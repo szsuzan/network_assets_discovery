@@ -1,0 +1,31 @@
+# Secrets / local env
+.env
+*.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+backend/scan_output/
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+frontend/verify/
+frontend/_probe.js
+
+# Debug helper scripts (kept locally, not published)
+backend/disc.py
+backend/pos.py
+backend/scans.py
+backend/topo.py
+
+# OS / editors
+Thumbs.db
+.DS_Store
+.idea/
+.vscode/
+
+# Logs
+*.log

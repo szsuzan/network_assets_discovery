@@ -1,0 +1,2 @@
+from app.main import app
+print('APP_IMPORT_OK')
