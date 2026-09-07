@@ -277,6 +277,26 @@ async def stop_scan(
     await db.refresh(scan)
     return scan
 
+# Canonical device_type queried from the UI/API -> all legacy spellings the DB
+# may still hold, so filters like device_type=ip_camera match rows stored as
+# 'camera' (pre-granular-taxonomy scans).
+DEVICE_TYPE_ALIASES = {
+    "router": {"router", "gateway", "network_gear"},
+    "smartphone": {"smartphone", "mobile"},
+    "physical_server": {"physical_server", "server"},
+    "ip_camera": {"ip_camera", "camera", "ipcam", "ip-cam", "cctv", "nvr", "dvr"},
+    "unidentified": {"unidentified", "unknown"},
+    "smart_speaker": {"smart_speaker", "virtual_assistant"},
+    "iot": {"iot", "smart_appliance"},
+    "conference": {"conference", "media_system"},
+    "smart_tv": {"smart_tv", "streaming_device"},
+    "voip_phone": {"voip_phone", "voip"},
+    "printer": {"printer", "network_printer", "copier"},
+    "nas": {"nas", "network_attached_storage"},
+    "rogue": {"rogue", "rogue_device"},
+}
+
+
 @router.get("/scans/{scan_id}/hosts", response_model=List[HostOut])
 async def list_hosts(
     scan_id: uuid.UUID,
@@ -295,7 +315,8 @@ async def list_hosts(
     if filter_status:
         query = query.where(Host.status == filter_status)
     if device_type:
-        query = query.where(Host.device_type == device_type)
+        dev_values = DEVICE_TYPE_ALIASES.get(device_type, {device_type})
+        query = query.where(Host.device_type.in_(dev_values))
     if search:
         like = f"%{search.lower()}%"
         query = query.where(

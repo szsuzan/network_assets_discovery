@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useHosts, useFindings } from '../hooks/useApi'
 import { DeviceIcon, SeverityBadge } from '../components/SeverityBadge'
-import { DEVICE_TYPE_LABELS, SEVERITY_ORDER, normalizeDeviceType, type Host, type Finding } from '../lib/types'
+import { DEVICE_TYPES, DEVICE_TYPE_LABELS, SEVERITY_ORDER, normalizeDeviceType, type Host, type Finding } from '../lib/types'
 import ScanNav from '../components/ScanNav'
 
 export default function AssetInventory() {
@@ -73,8 +73,8 @@ export default function AssetInventory() {
             className="rounded border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white"
           >
             <option value="all">All device types</option>
-            {Object.entries(DEVICE_TYPE_LABELS).map(([k, v]) => (
-              <option key={k} value={k}>{v}</option>
+            {DEVICE_TYPES.map((k) => (
+              <option key={k} value={k}>{DEVICE_TYPE_LABELS[k]}</option>
             ))}
           </select>
         </div>

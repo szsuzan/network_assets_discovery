@@ -25,6 +25,7 @@ Flags:
     --connect  use TCP connect scans instead of SYN (no root / no Npcap)
 """
 import argparse
+import ipaddress
 import json
 import os
 import shlex
@@ -38,14 +39,33 @@ import urllib.request
 import urllib.error
 import uuid
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Optional
 
 VERSION = "0.1.0"
 
+# Per-host nmap runs in parallel across a bounded worker pool. The agent used to
+# launch one nmap per host strictly serially (worst case: N hosts x {45 s port
+# scan + up to 120 s OS-only fingerprint}) - a 16-host /24 could burn 44 min.
+# nmap is already parallel internally, so bounding concurrency to a few workers
+# keeps a LAN-sized scan fast without flooding the wire or the router.
+PHASE2_WORKERS = 5
+PHASE3_WORKERS = 5
+
+# A lone `nmap -O --osscan-guess` guess on a host with no open ports is only
+# kept when nmap reports at least this accuracy. (Real-world no-port responders
+# typically score 90+, so this only trims inconclusive 'n/a' blips.)
+OS_ONLY_CONF_FLOOR = 50
+
 # Kept small by design: the server re-runs authoritative device classification
 # after receiving results, so the agent only needs to parse what nmap emits.
-PROBE_TIMING = {"quick": "-T4 --min-rate 500", "full": "-T4", "stealth": "-T2"}
+PROBE_TIMING = {"quick": "-T4 --min-rate 1000", "full": "-T4", "stealth": "-T2"}
+
+# OS fingerprinting (-O) measures TCP/IP timing (init seq, window sizing) so it
+# must NOT be run under --min-rate: rate-pumping starves/distorts those probes
+# and drops the OS guess entirely. Natural -T4 pacing only.
+FINGERPRINT_TIMING = {"quick": "-T4", "full": "-T4", "stealth": "-T2"}
 
 
 # --------------------------------------------------------------------------- #
@@ -93,9 +113,10 @@ class ApiClient:
         except Exception:
             pass
 
-    def result(self, task_id: str, hosts, status="completed", error=None, notes=""):
+    def result(self, task_id: str, hosts, status="completed", error=None, notes="", progress=None):
         return self._request("POST", f"/api/agents/tasks/{task_id}/result", {
             "status": status, "error": error, "hosts": hosts, "notes": notes,
+            "progress": progress,
         })
 
 
@@ -478,16 +499,69 @@ def parse_discovery(xml: str) -> List[dict]:
         st = host_el.find("status")
         if st is not None:
             state = st.get("state")
-        ip = mac = vendor = None
+        ip = mac = vendor = hostname = None
         for addr in host_el.findall("address"):
             if addr.get("addrtype") == "ipv4":
                 ip = addr.get("addr")
             elif addr.get("addrtype") == "mac":
                 mac = addr.get("addr")
                 vendor = addr.get("vendor")
+        hnm = host_el.find("hostnames")
+        if hnm is not None:
+            for hn_el in hnm.findall("hostname"):
+                n = (hn_el.get("name") or "").strip().rstrip(".")
+                if n:
+                    hostname = n[:255]
+                    break
         if ip:
-            found.append({"ip": ip, "mac": mac, "vendor": vendor, "state": state})
+            found.append({"ip": ip, "mac": mac, "vendor": vendor, "hostname": hostname, "state": state})
     return found
+
+
+def _hostname_from_banner(ports: list) -> Optional[str]:
+    """Pull a device hostname out of script banners when DNS/mDNS gave none.
+    Windows hosts advertise their computer name via the default smb-os-discovery
+    ('NetBIOS computer name: DESKTOP-ABC123') and nbstat ('NAME<00> UNIQUE'
+    Workstation row) scripts; earlier those ended up folded into the banner text
+    but never promoted to the hostname field."""
+    import re
+    pats = (
+        re.compile(r"NetBIOS computer name\s*:\s*([^\r\n]+)"),
+        re.compile(r"Computer name\s*:\s*([^\r\n]+)"),
+        re.compile(r"Workstation\s*:\s*([^\r\n]+)"),
+        re.compile(r"([A-Za-z0-9\-_.]{1,63})\s+<00>\s+UNIQUE"),
+    )
+    for p in ports:
+        b = p.get("banner") or ""
+        for rx in pats:
+            m = rx.search(b)
+            if m:
+                name = m.group(1).strip().split()[0]
+                if name and name.lower() not in ("unknown", "<unknown>", "anonymous"):
+                    return name[:255]
+    return None
+
+
+# Ports treated as HTTP-capable for script selection (a web listener -> HTTP
+# enumeration; stream ports -> RTSP; SMB -> Windows name/OS discovery).
+HTTP_PORTS = frozenset({80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 7000,
+                        7001, 8081, 8082, 9000, 9001, 9080, 9443, 10000, 8083})
+
+
+def _scripts_for_ports(ports: list) -> str:
+    """Pick nmap scripts from the ports actually open, so HTTP enumeration only
+    runs where a web service listens, RTSP only on stream ports, and SMB
+    discovery on Windows file shares (also the main source of Windows
+    hostnames). 'default' always runs and targets each service itself."""
+    s = ["default"]
+    if any(int(p) in HTTP_PORTS for p in ports):
+        s += ["http-title", "http-headers", "http-methods",
+              "http-server-header", "http-enum", "http-generator"]
+    if 554 in [int(p) for p in ports]:
+        s.append("rtsp-methods")
+    if 445 in [int(p) for p in ports]:
+        s += ["smb-os-discovery", "nbstat"]
+    return ",".join(s)
 
 
 def parse_host_xml(xml: str) -> Optional[dict]:
@@ -516,6 +590,15 @@ def parse_host_xml(xml: str) -> Optional[dict]:
     if not ip:
         return None
 
+    hostname = None
+    hnm = host_el.find("hostnames")
+    if hnm is not None:
+        for hn_el in hnm.findall("hostname"):
+            n = (hn_el.get("name") or "").strip().rstrip(".")
+            if n:
+                hostname = n[:255]
+                break
+
     ports = []
     for port_el in host_el.iter("port"):
         port_id = port_el.get("portid")
@@ -543,7 +626,8 @@ def parse_host_xml(xml: str) -> Optional[dict]:
             "service": service, "version": version, "banner": banner or None,
         })
 
-    host = {"ip": ip, "mac": mac, "vendor": vendor, "status": "up", "ports": ports}
+    host = {"ip": ip, "mac": mac, "vendor": vendor, "hostname": hostname,
+            "status": "up", "ports": ports}
 
     if mac:
         host["mac"] = mac
@@ -571,7 +655,67 @@ def parse_host_xml(xml: str) -> Optional[dict]:
     if os_guess:
         host["os_guess"] = os_guess
         host["os_confidence"] = os_conf
+    if not host.get("hostname") and ports:
+        host["hostname"] = _hostname_from_banner(ports)
     return host
+
+
+def _parse_open_ports(xml: str) -> list:
+    """Extract open port ids from `nmap -sS/-sT -p ... --open -oX -` output."""
+    found = []
+    try:
+        root = ET.fromstring(xml)
+        for port in root.findall(".//port"):
+            st = port.find("state")
+            if st is not None and st.get("state") == "open":
+                found.append(port.get("portid"))
+    except Exception:
+        pass
+    return found
+
+
+def _merge_phase2_ports(host: dict, phase2_opens: list) -> None:
+    """Overlay Phase-3 -sV/-O enrichment onto the Phase-2 -sS discoveries.
+
+    A port Phase 2 saw open is scan-truth: if the Phase-3 re-probe races a
+    sleeping device and re-opens nothing, keep the bare discovery instead of
+    erasing it from the report. Phase-3-only opens still count too.
+    """
+    phase2 = [int(p) for p in (phase2_opens or [])]
+    by_port = {p["port"]: p for p in host.get("ports", [])}
+    merged = []
+    seen = set()
+    for pid in phase2:
+        if pid in by_port:
+            merged.append(by_port[pid])
+        else:
+            merged.append({"port": pid, "protocol": "tcp", "state": "open",
+                           "service": None, "version": None, "banner": None})
+        seen.add(pid)
+    for p in host.get("ports", []):
+        if p["port"] not in seen:
+            merged.append(p)
+    host["ports"] = merged
+
+
+def _map_hosts(worker, items: List[tuple], workers: int,
+               client: "ApiClient", task_id: str, phase: str):
+    """Run a per-host nmap worker across a bounded thread pool.
+
+    Yields (item, result) pairs as each host FINISHES (completion order), so
+    findings stream to the server in realtime instead of waiting for slower
+    earlier hosts to finish first. A worker that hit a stop/interruption yields
+    None for that item. Concurrency is bounded so a subnet scan doesn't
+    saturate the uplink or the target router."""
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+        futs = {ex.submit(worker, it): it for it in items}
+        for f in as_completed(futs):
+            it = futs[f]
+            try:
+                yield (it, f.result())
+            except Exception as e:  # noqa: BLE001 - worker must never kill a scan
+                client.log(task_id, f"  {phase}: worker failed for {it[0]}: {e}", level="err")
+                yield (it, None)
 
 
 # --------------------------------------------------------------------------- #
@@ -634,15 +778,33 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     named = sum(1 for h in mdns_hints.values() if h["hostname"] or h["device_type"])
     client.log(task_id, f"Phase 0/3: {len(mdns_hints)} known mDNS device(s), {named} usable hint(s)", level="out")
 
+    # Passive evidence harvested between scans (DHCP / ARP / CDP / LLDP). MAC-keyed
+    # fingerprints (network gear announcing itself via CDP/LLDP, DHCP on privacy
+    # MACs) are cross-referenced onto the IPs ARP discovery just resolved (the fold
+    # below runs once live hosts are known, after Phase 1).
+    passive = passive_snapshot()
+    passive_by_ip = dict(passive["by_ip"])
+
     def _decorate(h: dict):
         h = dict(h)
         hint = mdns_hints.get(h.get("ip"))
-        if not hint:
-            return h
-        if hint["hostname"] and not h.get("hostname"):
-            h["hostname"] = hint["hostname"]
-        if hint["device_type"] and not h.get("device_type"):
-            h["device_type"] = hint["device_type"]
+        phint = passive_by_ip.get(h.get("ip"))
+        if hint:
+            if hint["hostname"] and not h.get("hostname"):
+                h["hostname"] = hint["hostname"]
+            if hint["device_type"] and not h.get("device_type"):
+                h["device_type"] = hint["device_type"]
+        if phint:
+            if phint.get("hostname") and not h.get("hostname"):
+                h["hostname"] = phint["hostname"]
+            if phint.get("device_type") and not h.get("device_type"):
+                h["device_type"] = phint["device_type"]
+            if phint.get("os_guess") and not h.get("os_guess"):
+                h["os_guess"] = phint["os_guess"]
+            if phint.get("vendor") and not h.get("vendor"):
+                h["vendor"] = phint["vendor"]
+            if phint.get("mac") and not h.get("mac"):
+                h["mac"] = phint["mac"]
         return h
 
     # ---- Phase 1/3: ARP (L2) discovery -> live hosts + MAC/vendor -------------
@@ -660,110 +822,182 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
             if h.get("state") == "up":
                 live[h["ip"]] = h
 
+    for _ip, _meta in list(live.items()):
+        _m = (_meta.get("mac") or "").lower()
+        if _m and _m in passive["by_mac"]:
+            _entry = dict(passive["by_mac"][_m])
+            _entry.update(passive_by_ip.get(_ip, {}))
+            passive_by_ip[_ip] = _entry
+    if passive_by_ip:
+        client.log(task_id, f"Phase 1/3: {len(passive_by_ip)} passive fingerprint(s) folded from DHCP/ARP/CDP/LLDP", level="out")
+
     if not live:
         client.log(task_id, "Discovery found no live hosts - reporting 0 hosts", level="warn")
 
-    # Merge mDNS responders into the live set. A device that answered mDNS is
-    # definitively up even if ARP -sn missed it (power-save radios often ignore
-    # ARP pings but do answer multicast), and carrying its hint lets us name a
-    # random-MAC device that would otherwise be dropped entirely.
-    merged = set(mdns_hints.keys()) - set(live.keys())
-    if merged:
-        client.log(task_id, f"mDNS-only host(s) added: {', '.join(sorted(merged))}", level="out")
-    for ip in merged:
+    # Merge mDNS responders AND passively-observed hosts into the live set. A
+    # device that answered mDNS - or that we saw lease an address / answer ARP
+    # while it was awake - is definitively up even if ARP -sn missed it
+    # (power-save radios often ignore ARP pings but do answer multicast/DHCP),
+    # and carrying its hints lets us name a random-MAC device that would
+    # otherwise be dropped entirely.
+    extra = (set(mdns_hints.keys()) | set(passive_by_ip.keys())) - set(live.keys())
+    if extra:
+        client.log(task_id, f"Observed-but-invisible host(s) added: {', '.join(sorted(extra))}", level="out")
+    for ip in extra:
         live[ip] = {"ip": ip, "mac": None, "vendor": None, "state": "up"}
 
     # Stream ARP results (IP + MAC + vendor) right away as a partial update.
     try:
         client.result(task_id, [
             _decorate({"ip": ip, "mac": m.get("mac"), "vendor": m.get("vendor"),
+                       "hostname": m.get("hostname"),
                        "status": "up", "ports": []})
             for ip, m in live.items()
-        ], status="partial", notes="discovery")
+        ], status="partial", notes="discovery", progress=20)
         posted.update(live.keys())
         client.log(task_id, f"Phase 1/3 done: {len(live)} live host(s), MAC/vendor streamed", level="out")
     except Exception as e:
         client.log(task_id, f"Partial discovery post failed: {e}", level="err")
 
     # ---- Phase 2/3: simple port scan (no -sV/-O) -> open ports only ----------
-    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s)", level="cmd")
-    open_ports = {}  # ip -> [portid]
-    for ip in live:
+    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {PHASE2_WORKERS} parallel worker(s)", level="cmd")
+
+    def _p2_worker(ip_meta):
+        ip, _meta = ip_meta
         if not _await_go(client, task_id):
-            client.log(task_id, "Scan stopped by user", level="warn")
-            return
+            return None
         args = [
             "nmap", scan_type, "-p", port_range, "--open",
-            timing, "--host-timeout", "45s", "-oX", "-", str(ip),
+            timing, "--host-timeout", "30s", "-oX", "-", str(ip),
         ]
-        client.log(task_id, " ".join(args), level="cmd")
         xml = run_nmap(args)
-        found = []
-        try:
-            root = ET.fromstring(xml)
-            for port in root.findall(".//port"):
-                if (port.find("state") is not None
-                        and port.find("state").get("state") == "open"):
-                    found.append(port.get("portid"))
-        except Exception:
-            pass
+        return _parse_open_ports(xml), " ".join(args)
+
+    open_ports = {}  # ip -> [portid]
+    p2_done = 0
+    p2_total = max(len(live), 1)
+    for (ip, _meta), res in _map_hosts(_p2_worker, list(live.items()),
+                                       PHASE2_WORKERS, client, task_id, "port-scan"):
+        if res is None:
+            client.log(task_id, "Scan stopped by user", level="warn")
+            break
+        found, args_str = res
         open_ports[ip] = found
+        p2_done += 1
+        client.log(task_id, f"$ {args_str}", level="cmd")
         client.log(task_id, f"  {ip}: {len(found)} open port(s)")
+        # Stream each host's open ports as it completes (server MERGES ports,
+        # never deletes, so these stay even if the later -sV re-probe races the
+        # device to sleep and re-opens nothing).
+        p2_prog = min(69, int(20 + 48 * p2_done / p2_total))
+        try:
+            client.result(task_id, [
+                _decorate({"ip": ip, "mac": _meta.get("mac"), "vendor": _meta.get("vendor"),
+                           "status": "up",
+                           "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
+                                      "service": None, "version": None, "banner": None}
+                                     for p in found]})
+            ], status="partial", notes="ports", progress=p2_prog)
+        except Exception as e:
+            client.log(task_id, f"Partial Phase-2 port post failed: {e}", level="err")
+    # any host still missing an entry (e.g. stopped early) is a no-port host
+    for ip in live:
+        if ip not in open_ports:
+            open_ports[ip] = []
 
     # ---- Phase 3/3: service/OS fingerprint -----------------------------------
-    client.log(task_id, f"Phase 3/3: -sV -O fingerprint (ports) / -O (OS-only for no-port hosts)", level="cmd")
-    for ip, meta in live.items():
+    client.log(task_id, f"Phase 3/3: -sV -O fingerprint (ports) / -O (OS-only for no-port hosts), {PHASE3_WORKERS} parallel worker(s)", level="cmd")
+
+    def _p3_worker(ip_meta):
+        ip, _meta = ip_meta
         if not _await_go(client, task_id):
-            client.log(task_id, "Scan stopped by user", level="warn")
-            return
+            return None
+        fp_timing = FINGERPRINT_TIMING.get(profile, "-T4")
         ports = open_ports.get(ip, [])
         if not ports:
             # No open ports, so -sV has nothing to probe, but -O can still
             # fingerprint the OS from the host's TCP/IP stack behaviour (works
             # on closed/filtered hosts). Attach any OS guess for richer typing.
-            client.log(task_id, f"  {ip}: no open ports - running OS-only fingerprint (-O)", level="cmd")
             args = ["nmap", "-O", "--osscan-guess",
-                    timing, "--host-timeout", "120s", str(ip), "-oX", "-"]
-            client.log(task_id, " ".join(args), level="cmd")
+                    fp_timing, "--host-timeout", "60s", str(ip), "-oX", "-"]
             xml = run_nmap(args)
             host = parse_host_xml(xml)
+            if host and (host.get("os_confidence") or 0) < OS_ONLY_CONF_FLOOR:
+                host.pop("os_guess", None)
+                host.pop("os_confidence", None)
+            return host, " ".join(args)
+        args = (
+            ["nmap", scan_type, "-sV", "-O", "-p", ",".join(ports), "--open",
+             fp_timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
+             "--host-timeout", "90s", str(ip), "-oX", "-"]
+        )
+        xml = run_nmap(args)
+        return parse_host_xml(xml), " ".join(args)
+
+    p3_done = 0
+    p3_total = max(len(live), 1)
+    for (ip, meta), res in _map_hosts(_p3_worker, list(live.items()),
+                                      PHASE3_WORKERS, client, task_id, "fingerprint"):
+        if res is None:
+            client.log(task_id, "Scan stopped by user", level="warn")
+            break
+        host, args_str = res
+        client.log(task_id, f"$ {args_str}", level="cmd")
+        ports = open_ports.get(ip, [])
+        p3_done += 1
+        p3_prog = min(89, int(70 + 19 * p3_done / p3_total))
+        if not ports:
             if host:
                 host.setdefault("mac", meta.get("mac"))
                 host.setdefault("vendor", meta.get("vendor"))
                 if not host.get("ports"):
                     host["ports"] = []
                 try:
-                    client.result(task_id, [_decorate(host)], status="partial", notes="host")
+                    client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
                     posted.add(host["ip"])
                 except Exception as e:
                     client.log(task_id, f"Partial host post failed: {e}", level="err")
-                os_note = host.get("os_guess") or "n/a"
-                client.log(task_id, f"  {ip}: OS-only fingerprint -> {os_note}")
+                client.log(task_id, f"  {ip}: OS-only fingerprint -> {host.get('os_guess') or 'n/a'}")
             else:
                 client.log(task_id, f"  {ip}: OS-only fingerprint returned no data")
-            continue
-        scripts = "--script default,http-title,http-headers,http-methods,http-server-header,http-enum,http-generator,rtsp-methods"
-        args = (
-            ["nmap", scan_type, "-sV", "-O", "-p", ",".join(ports), "--open",
-             timing, *shlex.split(scripts), "--host-timeout", "90s", str(ip), "-oX", "-"]
-        )
-        client.log(task_id, " ".join(args), level="cmd")
-        xml = run_nmap(args)
-        host = parse_host_xml(xml)
-        if host:
+                try:
+                    client.result(task_id, [], status="partial", notes="progress", progress=p3_prog)
+                except Exception:
+                    pass
+        elif host:
             host.setdefault("mac", meta.get("mac"))
             host.setdefault("vendor", meta.get("vendor"))
+            _merge_phase2_ports(host, ports)
             try:
-                client.result(task_id, [_decorate(host)], status="partial", notes="host")
+                client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
                 posted.add(host["ip"])
             except Exception as e:
                 client.log(task_id, f"Partial host post failed: {e}", level="err")
             client.log(task_id, f"  {ip}: {len(host['ports'])} open port(s) fingerprinted")
+        elif ports:
+            # Verification probe returned nothing parseable (the device went to
+            # sleep / RST raced us). Never lose the discovery: post the ports we
+            # already confirmed open, unenriched, so the report keeps them.
+            host = {"ip": ip,
+                    "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
+                               "service": None, "version": None, "banner": None}
+                              for p in ports]}
+            host.setdefault("mac", meta.get("mac"))
+            host.setdefault("vendor", meta.get("vendor"))
+            try:
+                client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
+                posted.add(host["ip"])
+            except Exception as e:
+                client.log(task_id, f"Partial host post failed: {e}", level="err")
 
     # ---- Finalise -------------------------------------------------------------
     remaining = [_decorate(h) for ip, h in [
         (ip, {"ip": ip, "mac": meta.get("mac"), "vendor": meta.get("vendor"),
-              "status": "up", "ports": []}) for ip, meta in live.items()
+              "status": "up",
+              "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
+                         "service": None, "version": None, "banner": None}
+                        for p in open_ports.get(ip, [])]})
+        for ip, meta in live.items()
     ] if ip not in posted]
     try:
         client.result(task_id, remaining, status="completed",
@@ -820,10 +1054,11 @@ def _deep_scan_host(client: ApiClient, task_id: str, ip: str, meta: dict,
     result as a partial update so the server merges it live."""
     scan_type = "-sT" if use_connect else "-sS"
     timing = PROBE_TIMING.get(profile, "-T4")
-    scripts = "--script default,http-title,http-headers,http-methods,http-server-header,http-enum,http-generator,rtsp-methods"
+    ports = ([int(x) for x in ports_spec.split(",")] if ports_spec else [])
     args = (
         ["nmap", scan_type, "-sV", "-O", "-p", ports_spec, "--open",
-         timing, *shlex.split(scripts), "--host-timeout", "90s", ip, "-oX", "-"]
+         timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
+         "--host-timeout", "90s", ip, "-oX", "-"]
     )
     client.log(task_id, " ".join(args), level="cmd")
     xml = run_nmap(args)
@@ -954,6 +1189,420 @@ def _root() -> bool:
 
 
 # --------------------------------------------------------------------------- #
+# Passive fingerprinting (optional Scapy: DHCP / ARP / CDP / LLDP)
+#
+# Active fingerprinting needs the target to answer. Passive capture sees what
+# the LAN already says:
+#   * DHCP (UDP 67/68) - the hostname and vendor-class-id a device advertises
+#     while leasing an address. This names privacy-MAC phones/tablets (their
+#     OUI is randomised away) and reveals brand/OS for printers, routers, NAS.
+#   * ARP - real IP<->MAC bindings, including devices whose radios ignore the
+#     broadcast ARP ping nmap sends.
+#   * CDP / LLDP - network gear announces itself (Cisco Discovery Protocol and
+#     Link Layer Discovery Protocol): switch/AP/router identity, platform,
+#     software version, and *authoritative* system capabilities. A switch that
+#     never answers an L3 probe is still named here.
+# Scapy is optional: if it is not installed (or lacks Npcap/privileges), the
+# agent just logs once and keeps running with active scanning only. Like the
+# mDNS sweeper this runs on a daemon thread for the agent's whole lifetime, so
+# fingerprints accumulate between scans and every scan harvests the full map.
+# --------------------------------------------------------------------------- #
+_PASSIVE_LOCK = threading.Lock()
+_passive_shared = {
+    "by_ip": {},  # ip        -> {"hostname","os_guess","device_type","vendor","mac","last_seen"}
+    "by_mac": {},  # mac.lower -> {"hostname","os_guess","device_type","vendor","port_id","last_seen"}
+}
+_passive_sniffer_ok = False
+_passive_sniffer_noted = False
+
+
+# VCI (DHCP option 60) -> (os_guess_hint, vendor_hint, coarse device_type fallback).
+# Specific brands first; generic OSes last. Only used when the classifier lacks
+# a stronger signal (nmap -O / SNMP win as usual - merge is fill-if-blank).
+_DHCP_VCI_RULES = [
+    ("mikrotik",            "MikroTik RouterOS (DHCP VCI)", "MikroTik", "network_gear"),
+    ("openwrt",             "OpenWrt (DHCP VCI)",           None,       "network_gear"),
+    ("dd-wrt",              "DD-WRT (DHCP VCI)",            None,       "network_gear"),
+    ("hikvision",           "Hikvision (DHCP VCI)",         "Hikvision","camera"),
+    ("dahua",               "Dahua (DHCP VCI)",             "Dahua",    "camera"),
+    ("brother",             "Brother printer (DHCP VCI)",   "Brother",  "printer"),
+    ("mfl-",                "Brother printer (DHCP VCI)",   "Brother",  "printer"),
+    ("epson",               "Epson printer (DHCP VCI)",     "Epson",    "printer"),
+    ("lexmark",             "Lexmark printer (DHCP VCI)",   "Lexmark",  "printer"),
+    ("canon",               "Canon printer (DHCP VCI)",     "Canon",    "printer"),
+    ("hewlett-packard",     "HP printer (DHCP VCI)",        "HP",       "printer"),
+    ("hp ",                 "HP printer (DHCP VCI)",        "HP",       "printer"),
+    ("synology",            "Synology NAS (DHCP VCI)",      "Synology", "nas"),
+    ("qnap",                "QNAP NAS (DHCP VCI)",          "QNAP",     "nas"),
+    ("msft",                "Windows (DHCP VCI: MSFT)",     None,       None),
+    ("android",             "Android (DHCP VCI)",           None,       "smartphone"),
+    ("ios",                 "Apple iOS (DHCP VCI)",         "Apple",    "smartphone"),
+    ("macos",               "Apple macOS (DHCP VCI)",       "Apple",    None),
+    ("darwin",              "Apple macOS (DHCP VCI)",       "Apple",    None),
+    ("udhcpc",              "Linux (udhcpc DHCP)",          None,       None),
+    ("udhcp",               "Linux (udhcpc DHCP)",          None,       None),
+    ("dhcpcd",              "Linux/BSD (dhcpcd DHCP)",      None,       None),
+    ("linux",               "Linux (DHCP VCI)",             None,       None),
+]
+
+
+# Brand -> canonical vendor string, sniffed from LLDP/CDP platform/descriptions.
+_VENDOR_KEYWORDS = [
+    ("aruba", "Aruba"), ("cisco", "Cisco"), ("juniper", "Juniper"),
+    ("arista", "Arista"), ("mikrotik", "MikroTik"), ("ubiquiti", "Ubiquiti"),
+    ("huawei", "Huawei"), ("fortinet", "Fortinet"), ("palo alto", "Palo Alto"),
+    ("paloalto", "Palo Alto"), ("extreme", "Extreme"), ("brocade", "Brocade"),
+    ("fritzbox", "AVM"), ("dell", "Dell"), ("hpe", "HPE"), ("hewlett", "HP"),
+    ("synology", "Synology"), ("qnap", "QNAP"), ("hikvision", "Hikvision"),
+    ("tp-link", "TP-Link"), ("tplink", "TP-Link"), ("netgear", "Netgear"),
+    ("zyxel", "Zyxel"), ("sophos", "Sophos"), ("avm", "AVM"),
+]
+
+
+def _ip_in_subnet(ip: str, cidr: str) -> bool:
+    try:
+        return ipaddress.ip_address(ip) in ipaddress.ip_network(cidr, strict=False)
+    except Exception:
+        return False
+
+
+def _pick_passive_iface(subnets: List[str]) -> Optional[str]:
+    """Pick the local interface whose IPv4 address sits inside the advertised
+    subnets (that is the LAN we must sniff). Returns None when Scapy is missing
+    or no interface matches."""
+    try:
+        from scapy.all import get_if_addr, get_if_list
+    except Exception:
+        return None
+    for iface in get_if_list():
+        try:
+            addr = get_if_addr(iface)
+        except Exception:
+            continue
+        if addr and addr != "0.0.0.0" and any(_ip_in_subnet(addr, s) for s in subnets):
+            return iface
+    return None
+
+
+def _vci_hint(vci: str):
+    """Map a DHCP vendor-class-id to (os_guess, vendor, coarse device_type)."""
+    v = vci.lower().strip()
+    if not v:
+        return None, None, None
+    for token, os_hint, vendor, dev in _DHCP_VCI_RULES:
+        if token in v:
+            return os_hint, vendor, dev
+    return None, None, None
+
+
+def _sniff_vendor(text: str) -> Optional[str]:
+    t = (text or "").lower()
+    for kw, name in _VENDOR_KEYWORDS:
+        if kw in t:
+            return name
+    return None
+
+
+def _mac_from_bytes(b: bytes) -> str:
+    try:
+        return ":".join("%02x" % x for x in b[:6])
+    except Exception:
+        return ""
+
+
+def _clean_str(v: bytes, limit: int = 120) -> Optional[str]:
+    try:
+        s = v.decode("utf-8", "replace").strip()
+    except Exception:
+        return None
+    s = " ".join(s.split())
+    if not s:
+        return None
+    return s[:limit]
+
+
+def _parse_dhcp_options(options):
+    """Extract (hostname, vendor_class_id) from Scapy BOOTP.options."""
+    hostname = vci = None
+    for opt in options or ():
+        if not (isinstance(opt, tuple) and len(opt) >= 2):
+            continue
+        key = opt[0]
+        val = opt[1]
+        if key == "hostname" and not hostname:
+            hostname = _clean_str(val if isinstance(val, bytes) else str(val).encode())
+        elif key == "vendor_class_id" and not vci:
+            vci = _clean_str(val if isinstance(val, bytes) else str(val).encode(), limit=64)
+    return hostname, vci
+
+
+def _parse_cdp(payload: bytes) -> dict:
+    """Parse a CDP message body -> {device_id, port_id, platform, software}."""
+    out = {}
+    if len(payload) < 4:
+        return out
+    body = payload[4:]  # version(1) ttl(1) checksum(2)
+    i = 0
+    while i + 4 <= len(body):
+        t = int.from_bytes(body[i:i + 2], "big")
+        ln = int.from_bytes(body[i + 2:i + 4], "big")
+        if ln < 4 or i + ln > len(body):
+            break
+        val = _clean_str(body[i + 4:i + ln], limit=255)
+        if val:
+            if t == 1 and not out.get("device_id"):
+                out["device_id"] = val
+            elif t == 3 and not out.get("port_id"):
+                out["port_id"] = val
+            elif t == 5 and not out.get("software"):
+                out["software"] = val
+            elif t == 6 and not out.get("platform"):
+                out["platform"] = val
+        i += ln
+    return out
+
+
+def _parse_lldp(payload: bytes) -> dict:
+    """Parse an LLDPDU -> {system_name, system_description, capabilities}."""
+    out = {}
+    i = 0
+    while i + 2 <= len(payload):
+        b0 = payload[i]
+        b1 = payload[i + 1]
+        t = (b0 & 0xFE) >> 1
+        ln = ((b0 & 0x01) << 8) | b1
+        i += 2
+        if t == 0:  # End-of-LLDPDU
+            break
+        if i + ln > len(payload):
+            break
+        val = payload[i:i + ln]
+        i += ln
+        if t == 1 and not out.get("chassis"):
+            out["chassis"] = _clean_str(val, limit=255)
+        elif t == 2 and not out.get("port_id"):
+            out["port_id"] = _clean_str(val, limit=255)
+        elif t == 5 and not out.get("system_name"):
+            out["system_name"] = _clean_str(val, limit=255)
+        elif t == 6 and not out.get("system_description"):
+            out["system_description"] = _clean_str(val, limit=255)
+        elif t == 7 and ln >= 2 and not out.get("capabilities"):
+            out["capabilities"] = int.from_bytes(val[:2], "big")
+    return out
+
+
+def _lldp_caps_device(caps: int) -> Optional[str]:
+    """LLDP System-Capabilities bits -> coarse device_type fallback.
+    bit7 station, bit4 router, bit3 wlan-ap, bit2 bridge(switch)."""
+    if caps & (1 << 4):
+        return "router"
+    if caps & (1 << 3):
+        return "wireless_access_point"
+    if caps & (1 << 2):
+        return "switch"
+    if caps & (1 << 7):
+        return "workstation"
+    return None
+
+
+def _passive_record(entry: dict, hints: dict):
+    """Merge hints into a shared entry (fill-if-blank, keep last_seen fresh)."""
+    for k in ("hostname", "os_guess", "device_type", "vendor", "mac"):
+        if hints.get(k) and not entry.get(k):
+            entry[k] = hints[k]
+    if hints.get("port_id") and not entry.get("port_id"):
+        entry["port_id"] = hints["port_id"]
+    entry["last_seen"] = time.time()
+
+
+def _passive_packet(pkt, subnets: List[str]):
+    try:
+        from scapy.all import ARP, BOOTP, Ether, SNAP
+
+        _guard = False
+        if pkt.haslayer(ARP):
+            a = pkt[ARP]
+            ip = getattr(a, "psrc", None)
+            mac = getattr(a, "hwsrc", None)
+            if (ip and mac and ip not in ("0.0.0.0", "255.255.255.255")
+                    and any(_ip_in_subnet(ip, s) for s in subnets)):
+                with _PASSIVE_LOCK:
+                    _mac_to_ip(mac, ip)
+                    _passive_record(
+                        _passive_shared["by_ip"].setdefault(
+                            ip, {"hostname": None, "os_guess": None,
+                                 "device_type": None, "vendor": None,
+                                 "mac": None, "last_seen": 0.0}),
+                        {"mac": mac},
+                    )
+                    _guard = True
+
+        if pkt.haslayer(BOOTP):
+            b = pkt[BOOTP]
+            chaddr = _mac_from_bytes(bytes(b.chaddr) if isinstance(b.chaddr, bytes) else b.chaddr)
+            hostname, vci = _parse_dhcp_options(b.options)
+            os_hint, vendor, dev = _vci_hint(vci or "")
+            yiaddr = None
+            try:
+                raw = bytes(b.yiaddr)
+                if raw and raw != b"\x00\x00\x00\x00":
+                    yiaddr = socket.inet_ntoa(raw)
+            except Exception:
+                yiaddr = None
+            if yiaddr and any(_ip_in_subnet(yiaddr, s) for s in subnets):
+                with _PASSIVE_LOCK:
+                    rec = _passive_shared["by_ip"].setdefault(
+                        yiaddr, {"hostname": None, "os_guess": None,
+                                 "device_type": None, "vendor": None,
+                                 "mac": None, "last_seen": 0.0})
+                    _passive_record(rec, {
+                        "hostname": hostname or None,
+                        "os_guess": os_hint,
+                        "device_type": dev,
+                        "vendor": vendor,
+                        "mac": chaddr or None,
+                    })
+                    if chaddr:
+                        _mac_to_ip(chaddr, yiaddr)
+            if chaddr and (hostname or os_hint or vendor or dev):
+                with _PASSIVE_LOCK:
+                    rec = _passive_shared["by_mac"].setdefault(
+                        chaddr, {"hostname": None, "os_guess": None,
+                                 "device_type": None, "vendor": None,
+                                 "port_id": None, "last_seen": 0.0})
+                    _passive_record(rec, {
+                        "hostname": hostname or None, "os_guess": os_hint,
+                        "device_type": dev, "vendor": vendor,
+                    })
+                    _guard = True
+
+        if pkt.haslayer(Ether):
+            eth = pkt[Ether]
+            src_mac = (eth.src or "").lower()
+            if eth.type == 0x88CC and src_mac and "ff" * 3 != src_mac:
+                info = _parse_lldp(bytes(eth.payload))
+                if info:
+                    dev = _lldp_caps_device(info.get("capabilities") or 0) if info.get("capabilities") else None
+                    vendor = _sniff_vendor(info.get("system_description") or info.get("system_name") or "")
+                    with _PASSIVE_LOCK:
+                        rec = _passive_shared["by_mac"].setdefault(
+                            src_mac, {"hostname": None, "os_guess": None,
+                                      "device_type": None, "vendor": None,
+                                      "port_id": None, "last_seen": 0.0})
+                        _passive_record(rec, {
+                            "hostname": info.get("system_name"),
+                            "os_guess": info.get("system_description"),
+                            "device_type": dev,
+                            "vendor": vendor,
+                            "port_id": info.get("port_id"),
+                        })
+                        _guard = True
+            elif eth.dst.lower() == "01:00:0c:cc:cc:cc" and pkt.haslayer(SNAP):
+                snap = pkt[SNAP]
+                if getattr(snap, "code", None) == 0x2000:
+                    pl = snap.payload
+                    orig = getattr(pl, "original", None) or bytes(pl)
+                    info = _parse_cdp(bytes(orig))
+                    if info:
+                        vendor = _sniff_vendor(info.get("platform") or info.get("software") or "")
+                        os_hint = info.get("software") or None
+                        with _PASSIVE_LOCK:
+                            rec = _passive_shared["by_mac"].setdefault(
+                                src_mac, {"hostname": None, "os_guess": None,
+                                          "device_type": None, "vendor": None,
+                                          "port_id": None, "last_seen": 0.0})
+                            _passive_record(rec, {
+                                "hostname": info.get("device_id"),
+                                "os_guess": os_hint,
+                                "device_type": "switch" if vendor else None,
+                                "vendor": vendor,
+                                "port_id": info.get("port_id"),
+                            })
+                            _guard = True
+        # Promote MAC-keyed fingerprints (CDP/LLDP/DHCP) to the IP we now know
+        # they map to, so scans can name the gear even without nmap answering.
+        if _guard:
+            with _PASSIVE_LOCK:
+                for ip, mac in list(_passive_shared.get("_mac2ip", {}).items()):
+                    e = _passive_shared["by_mac"].get(mac)
+                    if e:
+                        _passive_record(_passive_shared["by_ip"].setdefault(
+                            ip, {"hostname": None, "os_guess": None,
+                                 "device_type": None, "vendor": None,
+                                 "mac": None, "last_seen": 0.0}),
+                            e)
+    except Exception:
+        pass
+
+
+def _mac_to_ip(mac: str, ip: str):
+    m = (mac or "").lower()
+    if m and ("ff" * 3) != m and not _passive_shared.get("_mac2ip", {}).get(m):
+        _passive_shared.setdefault("_mac2ip", {})[m] = ip
+
+
+def _passive_observe(duration: float, subnets: List[str], iface: Optional[str]):
+    """Sniff one window of DHCP/ARP/CDP/LLDP traffic and fold results into the
+    shared map. Best-effort: any platform/permission error just disables it."""
+    global _passive_sniffer_ok, _passive_sniffer_noted
+    try:
+        from scapy.all import sniff
+    except Exception:
+        _passive_sniffer_ok = False
+        if not _passive_sniffer_noted:
+            _passive_sniffer_noted = True
+            print("[agent] passive fingerprinter OFF - 'pip install scapy' to enable", file=sys.stderr)
+        return
+
+    filters = [
+        "arp or (udp and (port 67 or port 68)) or (ether proto 0x88cc) or (ether dst 01:00:0c:cc:cc:cc)",
+        "arp or udp or ether proto 0x88cc",
+        None,
+    ]
+    last_err = None
+    for filt in filters:
+        try:
+            sniff(iface=iface, filter=filt, prn=lambda p: _passive_packet(p, subnets),
+                  store=0, timeout=max(1, int(duration)))
+            _passive_sniffer_ok = True
+            return
+        except Exception as e:
+            last_err = e
+    _passive_sniffer_ok = False
+    if not _passive_sniffer_noted:
+        _passive_sniffer_noted = True
+        print(f"[agent] passive fingerprinter unavailable (permissions/interface): {last_err}", file=sys.stderr)
+
+
+def _run_passive_sweeper(subnets: List[str], duration: float = 12.0, gap: float = 3.0,
+                         stop_evt=None, iface: Optional[str] = None):
+    """Background thread: continuously sniff passive fingerprints and accumulate
+    them into the shared map. Runs until stop_evt is set (or forever if None)."""
+    while True:
+        if stop_evt and stop_evt.is_set():
+            return
+        try:
+            _passive_observe(duration, subnets, iface)
+        except Exception:
+            pass
+        if gap > 0:
+            try:
+                time.sleep(gap)
+            except Exception:
+                return
+
+
+def passive_snapshot() -> dict:
+    """Copy of the shared map, keyed for scan-time merging:
+    {"by_ip": {ip: {...hints...}}, "by_mac": {mac: {...hints...}}}"""
+    with _PASSIVE_LOCK:
+        return {
+            "by_ip": {ip: {k: v for k, v in e.items()} for ip, e in _passive_shared["by_ip"].items()},
+            "by_mac": {m: {k: v for k, v in e.items()} for m, e in _passive_shared["by_mac"].items()},
+        }
+
+
+# --------------------------------------------------------------------------- #
 # Entrypoint
 # --------------------------------------------------------------------------- #
 def main():
@@ -996,6 +1645,25 @@ def main():
         sweeper.start()
     except Exception as e:
         print(f"[agent] mDNS sweeper failed to start (continuing): {e}")
+
+    # Passive Scapy fingerprinter (optional): DHCP/ARP/CDP/LLDP evidence on a
+    # daemon thread, exactly like the mDNS sweeper. Requires `pip install scapy`
+    # plus Npcap (Windows) / raw-socket privileges (Linux); degrades to
+    # active-only silently when unavailable.
+    try:
+        passive_iface = _pick_passive_iface(subnets)
+        if passive_iface:
+            psweeper = _th.Thread(target=_run_passive_sweeper, kwargs={
+                "subnets": subnets, "duration": 12.0, "gap": 3.0,
+                "iface": passive_iface,
+            }, daemon=True)
+            psweeper.start()
+            caps.append("passive")
+            print(f"[agent] passive fingerprinter running on '{passive_iface}'")
+        else:
+            print("[agent] Scapy available but no interface on target subnets; passive off")
+    except Exception as e:
+        print(f"[agent] passive fingerprinter disabled: {e} (pip install scapy to enable)")
 
     while True:
         try:

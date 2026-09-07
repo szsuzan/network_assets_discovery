@@ -395,38 +395,31 @@ async def agent_result(
         if hd.os_confidence is not None:
             host.os_confidence = hd.os_confidence
 
-        if scan.kind == "reverify":
-            # Merge without duplication: never delete existing ports; only add
-            # genuinely new ones and refresh service/version on matches.
-            cur_ports = {p.port: p for p in (await db.execute(
-                select(Port).where(Port.host_id == host.id)
-            )).scalars().all()}
-            for p in hd.ports:
-                row = cur_ports.get(p.port)
-                if row is None:
-                    db.add(Port(
-                        host_id=host.id, port=p.port, protocol=p.protocol,
-                        state=p.state, service=p.service, version=p.version,
-                        banner=p.banner,
-                    ))
-                    cur_ports[p.port] = row
-                else:
-                    if p.service:
-                        row.service = p.service
-                    if p.version:
-                        row.version = p.version
-                    if p.banner:
-                        row.banner = p.banner
+        # Merge ports additively for every scan kind. A confirmed open port is
+        # scan-truth and must survive even if a later verification re-probe
+        # races the device to sleep and reports it closed. Updates refine
+        # service/version/banner but never delete a port already recorded.
+        cur_ports = {p.port: p for p in (await db.execute(
+            select(Port).where(Port.host_id == host.id)
+        )).scalars().all()}
+        for p in hd.ports:
+            row = cur_ports.get(p.port)
+            if row is None:
+                row = Port(host_id=host.id, port=p.port, protocol=p.protocol,
+                           state=p.state, service=p.service, version=p.version,
+                           banner=p.banner)
+                db.add(row)
+                cur_ports[p.port] = row
+            else:
+                if p.service:
+                    row.service = p.service
+                if p.version:
+                    row.version = p.version
+                if p.banner:
+                    row.banner = p.banner
+                if p.state == "open" or row.state != "closed":
                     row.state = "open"
-                open_ports_total += 1
-        else:
-            await db.execute(delete(Port).where(Port.host_id == host.id))
-            for p in hd.ports:
-                db.add(Port(
-                    host_id=host.id, port=p.port, protocol=p.protocol, state=p.state,
-                    service=p.service, version=p.version, banner=p.banner,
-                ))
-                open_ports_total += 1
+            open_ports_total += 1
 
         if hd.snmp and (hd.snmp.sys_descr or hd.snmp.sys_name or hd.snmp.sys_objectid):
             snmp = (await db.execute(select(SNMPInfo).where(SNMPInfo.host_id == host.id))).scalar_one_or_none()
@@ -443,8 +436,10 @@ async def agent_result(
         if host.status == "up":
             up_count += 1
 
-        if not partial:
-            # Stream each live host to the Activity feed as it's finalised.
+        if not partial or hd.ports or hd.os_guess:
+            # Stream each live host to the Activity feed as it gains findings
+            # (ports streamed in from Phase-2, fingerprints from Phase-3 arrive
+            # live during the scan, not only at finalisation).
             await manager.broadcast(str(scan.id), {
                 "type": "host_updated",
                 "scan_id": str(scan.id),
@@ -454,6 +449,7 @@ async def agent_result(
                 "mac": hd.mac,
                 "vendor": hd.vendor,
                 "device_type": hd.device_type or host.device_type,
+                "os_guess": hd.os_guess or host.os_guess,
             })
 
     # Always keep the authoritative up-host count from the DB. The agent streams
@@ -466,13 +462,19 @@ async def agent_result(
     if partial:
         # Incremental update: keep the scan running on the agent; save what the
         # agent has finished so far and surface it live without finalising.
-        scan.progress_pct = min(89, int(20 + 60 * up_count / max(scan.hosts_total_in_scope, 1)))
+        # Progress comes from the agent's own exact phase-based value (monotonic,
+        # max-guarded so it never regresses e.g. 30% -> 20%).
+        if data.progress is not None:
+            scan.progress_pct = max(scan.progress_pct, min(89, int(data.progress)))
+        else:
+            scan.progress_pct = max(scan.progress_pct,
+                                    min(89, int(20 + 60 * up_count / max(scan.hosts_total_in_scope, 1))))
         task.status = "in_progress"
         await db.commit()
         try:
             await manager.broadcast(str(scan.id), {
                 "type": "cmd_log", "scan_id": str(scan.id), "level": "info",
-                "line": f"Agent progress: {up_count} host(s), {open_ports_total} open ports so far",
+                "line": f"Agent progress: {scan.hosts_discovered} host(s) discovered, {scan.progress_pct}%",
             })
         except Exception:
             pass
