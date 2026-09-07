@@ -280,3 +280,6 @@ class AgentResultIn(BaseModel):
     error: Optional[str] = None
     hosts: List[AgentHostIn] = []
     notes: str = ""
+    # Exact phase-based progress (0-100) reported by the agent so the backend
+    # never recomputes it from a single batch (which made it regress, 30% -> 20%).
+    progress: Optional[float] = None

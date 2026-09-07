@@ -10,13 +10,18 @@
 $ErrorActionPreference = 'Stop'
 
 $AgentPy    = Join-Path $PSScriptRoot 'agent\scanner_agent.py'
-$ApiKey     = '5rSBkPx8vGRHXiTZkRo3_qryiyc7GTzdv6FV5rkf8Vs'
+$ApiKey     = ($env:SCANNER_AGENT_API_KEY).Trim()   # REQUIRED — generated on agent (re)creation
 $Server     = 'http://localhost:8000'
 $Name       = 'lan-agent'
 $Subnets    = '192.168.1.0/24'
 $PidFile    = Join-Path $env:TEMP 'opencode\agent_pid.txt'
 $OutLog     = Join-Path $env:TEMP 'opencode\agent_out.log'
 $ErrLog     = Join-Path $env:TEMP 'opencode\agent_err.log'
+
+if ([string]::IsNullOrWhiteSpace($ApiKey)) {
+    Write-Host 'ERROR: SCANNER_AGENT_API_KEY is not set. Set it to the API key shown when the agent was (re)created.' -ForegroundColor Red
+    exit 1
+}
 
 function Get-RunningAgentPids {
     Get-CimInstance Win32_Process -Filter "Name like 'python%'" -ErrorAction SilentlyContinue |
@@ -43,7 +48,7 @@ Set-Content -Path $ErrLog -Value '' -NoNewline
 
 Write-Host '=== Starting LAN scanner agent ... ===' -ForegroundColor Cyan
 $proc = Start-Process -FilePath 'python' `
-    -ArgumentList @('-u', "`"$AgentPy`"", '--server', $Server, '--api-key', $ApiKey,
+    -ArgumentList @('-u', "`"$AgentPy`"", '--server', $Server, "--api-key=$ApiKey",
                     '--name', $Name, '--subnets', $Subnets) `
     -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog `
     -PassThru -WindowStyle Hidden

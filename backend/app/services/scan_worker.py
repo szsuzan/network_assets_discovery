@@ -1523,16 +1523,19 @@ def classify_device_type(host: Host):
         host.device_type = "smart_speaker"
         return
 
-    # --- smart TVs / streaming sticks ----------------------------------------
-    if any(x in os_guess for x in ("webos", "tizen", "vidaa", "smart tv", "android tv",
+# --- smart TVs / streaming sticks ----------------------------------------
+    # Soft hostname TV evidence is demoted when the OS clearly says otherwise
+    # (a Windows box named "<something>tv" is not a smart TV).
+    if (any(x in os_guess for x in ("webos", "tizen", "vidaa", "smart tv", "android tv",
                                    "tvos", "netcast", "roku", "fire os", "google tv",
                                    "chromecast", "smart-tv")) \
-       or any(kw in hostname for kw in ("tv-", "bravia", "roku", "fire tv", "apple tv",
-                                        "chromecast", "nvidia shield", "amazon fire",
-                                        "tivo", "smarttv", "smart tv", "android tv")) \
-       or ("tv" in hostname and any(v in vendor for v in ("samsung", "lg", "sony",
-                                                          "hisense", "tcl", "vizio",
-                                                          "panasonic", "sharp"))):
+        or any(kw in hostname for kw in ("tv-", "bravia", "roku", "fire tv", "apple tv",
+                                         "chromecast", "nvidia shield", "amazon fire",
+                                         "tivo", "smarttv", "smart tv", "android tv")) \
+        or ("tv" in hostname and any(v in vendor for v in ("samsung", "lg", "sony",
+                                                           "hisense", "tcl", "vizio",
+                                                           "panasonic", "sharp")))) \
+       and not any(x in os_guess for x in ("windows", "mac os", "macos", "darwin")):
         host.device_type = "smart_tv"
         return
 
@@ -1587,13 +1590,22 @@ def classify_device_type(host: Host):
         return
 
     # --- other phones / tablets ------------------------------------------------
+    # Soft phone evidence (an mDNS hostname like "Android_XXX" or a phone-OEM
+    # vendor) is only trusted when the OS does not contradict it. A privacy-MAC
+    # box named "Android" that the stack fingerprints as OpenWrt / tvOS is far
+    # more likely to be a TV stick or embedded device, not a handset.
+    _os_phone_contradict = ("windows", "mac os", "macos", "darwin", "tvos", "webos",
+                            "tizen", "vidaa", "openwrt", "dd-wrt", "ddwrt", "tomato",
+                            "routeros", "fritz!", "freebsd", "netbsd", "openbsd",
+                            "solaris", "vxworks", "chromeos")
     phone_vendors = ("samsung", "oppo", "vivo", "oneplus", "xiaomi", "huawei", "honor",
                      "realme", "motorola", "moto", "poco", "nothing", "google")
     android_hostname = hostname.startswith(("android", "pixel", "redmi", "xiaomi", "oppo",
                                             "vivo", "motorola", "moto", "samsung", "sm-",
                                             "huawei", "honor", "nokia", "iphone", "ipad",
                                             "ipod")) or "galaxy" in hostname
-    if any(v in vendor for v in phone_vendors) or android_hostname:
+    if (any(v in vendor for v in phone_vendors) or android_hostname) \
+       and not any(x in os_guess for x in _os_phone_contradict):
         if "tab" in hostname or hostname.startswith("sm-t") or "galaxy tab" in hostname \
            or "kindle" in hostname or "ipad" in hostname:
             host.device_type = "tablet"
