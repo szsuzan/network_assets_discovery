@@ -1,7 +1,15 @@
-export interface User {
-  id: string
-  email: string
-  role: string
+export type SettingType = 'text' | 'number' | 'boolean' | 'select' | 'json'
+
+export interface Setting {
+  key: string
+  category: string
+  category_label: string
+  label: string
+  description: string
+  type: SettingType
+  value: any
+  default: any
+  options?: string[]
 }
 
 export interface Engagement {
@@ -300,11 +308,4 @@ export function normalizeDeviceType(raw: string | null | undefined): string {
   if (!raw) return 'unidentified'
   const key = raw.toLowerCase().trim().replace(/[^a-z_]/g, '')
   return DEVICE_ALIASES[key] || key || 'unidentified'
-}
-
-export const PROFILE_LABELS: Record<string, string> = {
-  quick: 'Quick',
-  full: 'Full',
-  stealth: 'Stealth',
-  passive_only: 'Passive Only',
 }

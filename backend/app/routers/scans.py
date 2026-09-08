@@ -22,6 +22,7 @@ from ..schemas import (
 from ..auth import get_current_user
 from ..scope_utils import validate_targets_in_scope, count_hosts_in_scope
 from ..services.scan_worker import run_scan, read_console_log, _dispatch_run
+from ..services import settings as settings_svc
 
 router = APIRouter(prefix="/api", tags=["scans"])
 
@@ -49,12 +50,18 @@ async def start_scan(
         await db.commit()
         raise HTTPException(status_code=422, detail=str(e))
     
+    # Settings-driven defaults when the request omits them (the Settings page
+    # centralises these for every scan type/method).
+    profile = data.profile or await settings_svc.aget(db, "scan.default_profile", "quick")
+    port_range = data.port_range or await settings_svc.aget(db, "scan.default_port_range", "1-10000")
+    protocol = data.protocol or await settings_svc.aget(db, "scan.default_protocol", "tcp")
+    
     scan = Scan(
         engagement_id=engagement.id,
         targets=data.targets,
-        profile=data.profile,
-        port_range=data.port_range,
-        protocol=data.protocol,
+        profile=profile,
+        port_range=port_range,
+        protocol=protocol,
         status="queued",
         hosts_total_in_scope=count_hosts_in_scope(data.targets),
         started_by=current_user.id
@@ -66,7 +73,7 @@ async def start_scan(
         engagement_id=engagement.id,
         scan_id=scan.id,
         action="scan_started",
-        detail={"targets": data.targets, "profile": data.profile}
+        detail={"targets": data.targets, "profile": profile}
     ))
     
     await db.commit()
@@ -106,21 +113,39 @@ async def reverify_scan(
                        "analyzing", "agent_running", "paused"):
         raise HTTPException(status_code=409, detail="Scan is still running; wait for it to finish before re-verifying")
 
+    # Settings-driven defaults for re-verify behaviour (Settings page).
+    recheck_down = data.recheck_down_hosts
+    if recheck_down is None:
+        recheck_down = await settings_svc.aget(db, "reverify.recheck_down_hosts", True)
+    sweep_ports = data.sweep_remaining_ports
+    if sweep_ports is None:
+        sweep_ports = await settings_svc.aget(db, "reverify.sweep_remaining_ports", True)
+    min_gap = int(await settings_svc.aget(db, "reverify.min_interval_seconds", 0) or 0)
+    now = datetime.now(timezone.utc)
+    if scan.completed_at and min_gap > 0:
+        idle = (now - scan.completed_at).total_seconds()
+        if idle < min_gap:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Re-verify too soon: wait {max(1, int(min_gap - idle))}s between re-scans "
+                       f"(Settings > Re-scan)",
+            )
+
     db.add(AuditLog(
         user_id=current_user.id,
         engagement_id=scan.engagement_id,
         scan_id=scan.id,
         action="scan_reverify",
         detail={
-            "recheck_down_hosts": data.recheck_down_hosts,
-            "sweep_remaining_ports": data.sweep_remaining_ports,
+            "recheck_down_hosts": recheck_down,
+            "sweep_remaining_ports": sweep_ports,
             "port_range": data.port_range,
         }
     ))
 
     scan.kind = "reverify"
     scan.status = "queued"
-    scan.reverify_started_at = datetime.now(timezone.utc)
+    scan.reverify_started_at = now
     # Idle time between passes (previously completed_at -> now) is not active
     # run time, so accumulate it and let the UI deduct it from the total.
     if scan.completed_at is not None:
@@ -134,11 +159,12 @@ async def reverify_scan(
 
     # Pass the reverify options along as task args; the worker uses them to run
     # only the unscanned portion (down hosts + leftover ports) and merges the
-    # results into this same scan record.
+    # results into this same scan record. Values already resolved against the
+    # settings defaults above, so they are always explicit.
     reverify_cfg = {
         "port_range": data.port_range,
-        "recheck_down_hosts": data.recheck_down_hosts,
-        "sweep_remaining_ports": data.sweep_remaining_ports,
+        "recheck_down_hosts": bool(recheck_down),
+        "sweep_remaining_ports": bool(sweep_ports),
     }
     _dispatch_run(str(scan.id), reverify_cfg)
     return scan

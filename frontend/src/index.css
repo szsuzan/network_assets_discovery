@@ -3,10 +3,6 @@
 @tailwind utilities;
 
 :root {
-  --color-info: #8B95A1;
-  --color-notable: #E0B341;
-  --color-concerning: #E08341;
-  --color-critical: #E04B4B;
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
   --font-sans: 'Inter', system-ui, sans-serif;
 }
@@ -18,21 +14,6 @@ body {
 .mono {
   font-family: var(--font-mono);
 }
-
-.bg-info { background-color: var(--color-info); }
-.bg-notable { background-color: var(--color-notable); }
-.bg-concerning { background-color: var(--color-concerning); }
-.bg-critical { background-color: var(--color-critical); }
-
-.text-info { color: var(--color-info); }
-.text-notable { color: var(--color-notable); }
-.text-concerning { color: var(--color-concerning); }
-.text-critical { color: var(--color-critical); }
-
-.border-info { border-color: var(--color-info); }
-.border-notable { border-color: var(--color-notable); }
-.border-concerning { border-color: var(--color-concerning); }
-.border-critical { border-color: var(--color-critical); }
 
 /*
  * Light theme. Toggling the theme flips `.dark` on <html>; all components
@@ -70,14 +51,12 @@ html:not(.dark) .hover\:text-white:hover { color: #111827; }
 html:not(.dark) .hover\:text-gray-300:hover { color: #374151; }
 html:not(.dark) .hover\:border-gray-600:hover { border-color: #9ca3af; }
 html:not(.dark) .hover\:border-gray-500:hover { border-color: #9ca3af; }
-html:not(.dark) .hover\:border-gray-50:hover { border-color: #d1d5db; }
 
 /*
  * The console (Live Scan) keeps its terminal look in light mode too.
  */
 html:not(.dark) .bg-black { background-color: #0b0f17; }
 html:not(.dark) .bg-black .text-white { color: #f9fafb; }
-html:not(.dark) .bg-black .text-gray-100 { color: #e5e7eb; }
 html:not(.dark) .bg-black .text-gray-300 { color: #9ca3af; }
 html:not(.dark) .bg-black .text-gray-400 { color: #6b7280; }
 html:not(.dark) .bg-black .text-gray-500 { color: #6b7280; }
@@ -86,5 +65,4 @@ html:not(.dark) .bg-black .text-cyan-300 { color: #67e8f9; }
 html:not(.dark) .bg-black .text-orange-400 { color: #fb923c; }
 html:not(.dark) .bg-black .text-red-400 { color: #f87171; }
 html:not(.dark) .bg-black .text-amber-400 { color: #fbbf24; }
-html:not(.dark) .bg-black .text-blue-400 { color: #60a5fa; }
 html:not(.dark) .bg-black .border-gray-800 { border-color: #1f2937; }

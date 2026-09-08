@@ -6,6 +6,7 @@ import {
   DEVICE_TYPE_LABELS,
   FINDING_STATUSES,
   FINDING_STATUS_LABELS,
+  FINDING_TYPE_LABELS,
   normalizeDeviceType,
   SEVERITY_ORDER,
   type Finding,
@@ -13,25 +14,6 @@ import {
 } from '../lib/types'
 import ScanNav from '../components/ScanNav'
 import RiskRulesPanel from '../components/RiskRulesPanel'
-
-const TYPE_LABELS: Record<string, string> = {
-  default_credentials: 'Default Credentials',
-  eol_software: 'EOL Software',
-  exposed_admin_panel: 'Exposed Admin Panel',
-  unencrypted_protocol: 'Unencrypted Protocol',
-  unencrypted_video: 'Unencrypted Video Stream',
-  weak_crypto: 'Weak TLS/Crypto',
-  expired_certificate: 'Expired Certificate',
-  smb_signing_disabled: 'SMB Signing Not Required',
-  anonymous_ftp: 'Anonymous FTP',
-  unrestricted_share: 'World-Readable SMB Share',
-  dangerous_http_methods: 'Dangerous HTTP Methods',
-  missing_auth: 'Missing Authentication',
-  empty_password: 'Empty Password',
-  web_service_exposed: 'Web Service Exposed',
-  information_disclosure: 'Information Disclosure',
-  unexpected_exposure: 'Unexpected Exposure',
-}
 
 const STATUS_COLORS: Record<string, string> = {
   open: 'bg-gray-800 text-gray-300',
@@ -123,7 +105,7 @@ export default function Findings() {
     findings.forEach((f) => {
       let key: string
       if (groupBy === 'severity') key = f.severity
-      else if (groupBy === 'type') key = TYPE_LABELS[f.type] || f.type
+      else if (groupBy === 'type') key = FINDING_TYPE_LABELS[f.type] || f.type
       else key = hostKey(f)
       if (!map.has(key)) map.set(key, [])
       map.get(key)!.push(f)
@@ -208,7 +190,7 @@ export default function Findings() {
                       <div className="flex flex-wrap items-center gap-3">
                         <SeverityBadge severity={f.severity} />
                         <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">
-                          {TYPE_LABELS[f.type] || f.type}
+                          {FINDING_TYPE_LABELS[f.type] || f.type}
                         </span>
                         {statusBadge(f)}
                         {f.cwe && (

@@ -42,16 +42,16 @@ A professional-grade network asset discovery tool for penetration testing engage
 └──────────────┘
 ```
 
-- **Frontend:** React + TypeScript + Tailwind CSS, TanStack Query + TanStack Table, `react-force-graph` (topology), `recharts` (report charts), native WebSocket client.
+- **Frontend:** React + TypeScript + Tailwind CSS, TanStack Query, `react-force-graph` (topology), `recharts` (report charts), native WebSocket client.
 - **Backend:** Python 3.11+, FastAPI, PostgreSQL (async SQLAlchemy), Redis + Celery (background scan jobs), WebSockets for live updates, JWT auth.
-- **Scanning tools:** Nmap (TCP/UDP port scans + service/OS fingerprinting) runs either in-container (L3-only) or, preferably, on a **scanner agent** placed on the target LAN for full Layer-2 (ARP → MAC/vendor + raw-SYN/`-O` → exact OS). **Scapy** (optional, agent-side) passively fingerprints the LAN without touching a single host: DHCP vendor-class-ID → brand/OS, ARP → IP↔MAC, and CDP/LLDP → network-gear identity (switch/AP/router platform + capabilities). Scapy is best-effort: `pip install scapy` (+ Npcap on Windows) enables it, otherwise the agent scans actively only. pysnmp/SNMP (walks), `manuf`/OUI (MAC→vendor).
+- **Scanning tools:** Nmap (TCP/UDP port scans + service/OS fingerprinting) runs either in-container (L3-only) or, preferably, on a **scanner agent** placed on the target LAN for full Layer-2 (ARP → MAC/vendor + raw-SYN/`-O` → exact OS). **Scapy** (optional, agent-side) passively fingerprints the LAN without touching a single host: DHCP vendor-class-ID → brand/OS, ARP → IP↔MAC, and CDP/LLDP → network-gear identity (switch/AP/router platform + capabilities). Scapy is best-effort: `pip install scapy` (+ Npcap on Windows) enables it, otherwise the agent scans actively only. pysnmp/SNMP (walks).
 
 The stack runs five services:
 
 | Service | Purpose | Local port |
 |---------|---------|-----------|
-| `postgres` | Database (auto-applies schema on first boot) | 5432 |
-| `redis` | Celery message broker + pause/stop state | 6379 |
+| `postgres` | Database (applies all migrations 001–008 on first boot) | 5432 |
+| `redis` | Celery message broker + pause/stop state | 16379 |
 | `backend` | FastAPI REST + WebSocket API | 8000 |
 | `celery_worker` | Runs scan jobs in the background | — |
 | `frontend` | React UI (built static site) | 3000 |
@@ -263,6 +263,7 @@ The **Live Scan** screen shows a WebSocket-driven real-time feed: discovery/port
 queued → discovering → scanning → fingerprinting → analyzing → completed
                                         │
                                         └ (or) failed / stopped
+                                        └ (or) reverifying → analyzing → completed / failed
 ```
 
 When an online scanner agent covers the targets, the scan is **delegated** instead:
@@ -278,6 +279,7 @@ queued → agent_running → (agent executes) → analyzing → completed / fail
 | `discovering` | Phase 0 — host discovery (CIDR expansion + probes) |
 | `scanning` | Phases 1–2 — re-verification + port scan |
 | `fingerprinting` | Phase 3 — deep service/OS fingerprint on open ports |
+| `reverifying` | A re-verify pass is running (re-check down hosts + sweep ports) |
 | `paused` | User paused; progress frozen between phases (worker or agent) |
 | `analyzing` | Risk rules + topology + final DB persistence |
 | `completed` | Done, `progress_pct = 100` |
@@ -381,7 +383,26 @@ Base URL: `http://localhost:8000` (Swagger at `/docs`). Endpoints marked 🔒 re
 | `GET` | `/api/scans/{scan_id}/topology` | Topology nodes + edges 🔒 |
 | `GET` | `/api/scans/{scan_id}/findings` | List findings 🔒 |
 | `PATCH` | `/api/findings/{finding_id}` | Toggle include-in-report / edit 🔒 |
+| `GET` | `/api/scans/{scan_id}/findings/{finding_id}/audit` | Finding change history 🔒 |
+| `GET` | `/api/scans/{scan_id}/risk-rules` | Risk rule config for a scan 🔒 |
+| `PUT` | `/api/scans/{scan_id}/risk-rules` | Update risk rule thresholds 🔒 |
+| `POST` | `/api/scans/{scan_id}/reanalyze` | Re-run risk rules / webhooks on a scan 🔒 |
 | `GET` | `/api/scans/{scan_id}/diff/{other_scan_id}` | Compare two scans 🔒 |
+| `GET` | `/api/scans/{scan_id}/logs` | Recent scan log lines (Live Scan console) 🔒 |
+| `GET` | `/api/scans/{scan_id}/activity` | Activity/event feed for a scan 🔒 |
+| `GET` | `/api/scans/{scan_id}/export` | Export scan report (`json` / `csv` / `pdf`) 🔒 |
+
+### Settings & integrations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/settings` | List all settings (defaults + current values) 🔒 |
+| `PUT` | `/api/settings` | Bulk-update settings (admin/pentester) 🔒 |
+| `GET` | `/api/webhooks` | List webhooks 🔒 |
+| `POST` | `/api/webhooks` | Create webhook (optional `secret` for HMAC signing) 🔒 |
+| `PATCH` | `/api/webhooks/{id}` | Update webhook 🔒 |
+| `DELETE` | `/api/webhooks/{id}` | Delete webhook 🔒 |
+| `POST` | `/api/webhooks/{id}/test` | Fire a test `ping` event 🔒 |
 
 ### Export
 
@@ -458,8 +479,10 @@ Every event also carries a `ts` (ISO-8601 server timestamp) applied at emission 
 - **Asset Inventory** — virtualized table (IP, MAC, vendor, device type, OS, ports, risk, tags), search/filter/sort, bulk export/tag.
 - **Network Topology** — force-directed graph with severity coloring, device-type icons, subnet-zone rings, gateway/internet edges, responsive sizing, zoom/pan.
 - **Host Detail Drawer** — full host info, ports table (service/version/banner), SNMP block, editable notes/tags.
-- **Findings Summary** — severity-sorted, group-by (severity/type/host), include-in-report toggles, editable recommendations.
+- **Findings Summary** — severity-sorted, group-by (severity/type/host), include-in-report toggles, editable recommendations, risk-rule tuning, change history.
 - **Agents** — register/manage scanner agents, one-time keys, live online/offline status, run instructions.
+- **Integrations** — webhook subscriptions (HMAC-signed events), delivery status + test fire.
+- **Settings** — scan/re-verify/agent defaults and advanced toggles (persisted, applied to all scans).
 - **Report/Export** — executive summary, device + severity charts, coverage & limitations, export JSON/CSV/PDF.
 
 ---
@@ -485,7 +508,7 @@ Every event also carries a `ts` (ISO-8601 server timestamp) applied at emission 
 
 The full PostgreSQL schema is in `database/migrations/001_init.sql`. Key design decision: **`hosts` rows are per-scan** (not a single mutable table), so scan-to-scan diffing ("what's new/changed/gone since last scan") is just a query joining on `ip`/`mac` across `scan_id`s.
 
-Core entities: `users`, `engagements`, `scans`, `hosts`, `ports`, `snmp_info`, `findings`, `topology_edges`, `audit_log`, `agents`, `agent_tasks`.
+Core entities: `users`, `engagements`, `scans`, `hosts`, `ports`, `snmp_info`, `findings`, `finding_audit`, `topology_edges`, `audit_log`, `agents`, `agent_tasks`, `webhooks`, `system_settings`.
 
 ---
 

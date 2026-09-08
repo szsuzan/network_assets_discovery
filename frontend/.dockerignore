@@ -1,0 +1,5 @@
+node_modules/
+dist/
+verify/
+_probe.js
+npm-debug.log*

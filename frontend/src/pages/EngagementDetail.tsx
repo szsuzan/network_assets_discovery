@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useParams, useNavigate } from 'react-router-dom'
 import {
   useEngagement,
@@ -9,6 +9,7 @@ import {
   usePauseScan,
   useResumeScan,
   useReverifyScan,
+  useSettings,
 } from '../hooks/useApi'
 import { StatusBadge } from '../components/Badge'
 import type { Scan } from '../lib/types'
@@ -41,6 +42,22 @@ export default function EngagementDetail() {
     protocol: 'tcp',
     scope_confirmed: false,
   })
+  const [touched, setTouched] = useState(false)
+  const { data: globalSettings } = useSettings()
+
+  // Prefill the new-scan form with the defaults configured in Settings (only
+  // until the user starts editing those fields themselves).
+  useEffect(() => {
+    if (!globalSettings || touched) return
+    const val = (key: string, fallback: string) =>
+      globalSettings.find((s) => s.key === key)?.value ?? fallback
+    setForm((f) => ({
+      ...f,
+      profile: val('scan.default_profile', f.profile),
+      port_range: val('scan.default_port_range', f.port_range),
+      protocol: val('scan.default_protocol', f.protocol),
+    }))
+  }, [globalSettings, touched])
 
   const [diffScanA, setDiffScanA] = useState('')
   const [diffScanB, setDiffScanB] = useState('')
@@ -99,7 +116,10 @@ export default function EngagementDetail() {
               <label className="mb-1 block text-sm text-gray-300">Port Range</label>
               <input
                 value={form.port_range}
-                onChange={(e) => setForm({ ...form, port_range: e.target.value })}
+                onChange={(e) => {
+                  setTouched(true)
+                  setForm({ ...form, port_range: e.target.value })
+                }}
                 className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white mono"
               />
             </div>
@@ -110,7 +130,10 @@ export default function EngagementDetail() {
                   <button
                     type="button"
                     key={p}
-                    onClick={() => setForm({ ...form, protocol: p })}
+                    onClick={() => {
+                      setTouched(true)
+                      setForm({ ...form, protocol: p })
+                    }}
                     className={`flex-1 rounded border px-3 py-2 text-sm font-medium uppercase transition-colors ${
                       form.protocol === p
                         ? 'border-blue-500 bg-blue-500/10 text-white'
@@ -134,7 +157,10 @@ export default function EngagementDetail() {
                 <button
                   type="button"
                   key={key}
-                  onClick={() => setForm({ ...form, profile: key })}
+                  onClick={() => {
+                        setTouched(true)
+                        setForm({ ...form, profile: key })
+                      }}
                   className={`rounded border p-3 text-left transition-colors ${
                     form.profile === key
                       ? 'border-blue-500 bg-blue-500/10'

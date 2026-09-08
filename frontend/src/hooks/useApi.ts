@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
-import type { Engagement, Scan, Host, HostDetail, Finding, Topology } from '../lib/types'
+import type { Engagement, Scan, Host, HostDetail, Finding, Topology, Setting } from '../lib/types'
 
 export function useLogin() {
   return useMutation({
@@ -351,5 +351,22 @@ export function useDeleteAgent() {
   return useMutation({
     mutationFn: (id: string) => api.delete(`/api/agents/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
+  })
+}
+
+export function useSettings() {
+  return useQuery({
+    queryKey: ['settings'],
+    queryFn: () => api.get<Setting[]>('/api/settings').then((r) => r.data),
+    staleTime: 60_000,
+  })
+}
+
+export function useUpdateSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (values: Record<string, any>) =>
+      api.put<Setting[]>('/api/settings', values).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
   })
 }

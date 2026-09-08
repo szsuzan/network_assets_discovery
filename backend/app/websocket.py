@@ -145,8 +145,7 @@ class ConnectionManager:
                 r = _redis_client()
                 pubsub = r.pubsub()
                 pubsub.subscribe(EVENT_CHANNEL)
-            except Exception as exc:
-                self._relay_failed = str(exc)
+            except Exception:
                 return
             try:
                 for message in pubsub.listen():
