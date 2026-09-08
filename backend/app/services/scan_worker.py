@@ -15,6 +15,7 @@ from sqlalchemy import select, cast, delete, func
 from sqlalchemy.dialects.postgresql import INET
 from .db import SessionLocal
 from . import scanners
+from . import settings as settings_svc
 from ..models import Scan, Host, Port, SNMPInfo, Finding, AuditLog, TopologyEdge, Agent, AgentTask
 from ..websocket import manager
 from ..celery_app import celery_app
@@ -201,12 +202,22 @@ def _nse_scripts_for_ports(open_ports) -> str:
 
     Always includes `default` (=-sC) as the baseline, then appends each
     service-appropriate script set in ascending port order, deduplicated.
-    Unknown/misc ports simply get the default set.
+    Unknown/misc ports simply get the default set. Extra per-port scripts from
+    the Settings page (nmap.port_scripts) are merged over the built-in table.
     """
+    mapping = PORT_NSE_SCRIPTS
+    override = settings_svc.get("nmap.port_scripts") or {}
+    if override:
+        mapping = {**PORT_NSE_SCRIPTS}
+        for port, scripts in override.items():
+            try:
+                mapping[int(port)] = str(scripts)
+            except (TypeError, ValueError):
+                continue
     scripts = ["default"]
     seen = set()
     for p in sorted(open_ports):
-        for s in PORT_NSE_SCRIPTS.get(p, "").split(","):
+        for s in mapping.get(p, "").split(","):
             s = s.strip()
             if s and s not in seen:
                 seen.add(s)
@@ -490,8 +501,12 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
     new hosts / hidden ports with no duplicate rows.
     """
     cfg = cfg or {}
-    recheck_down = cfg.get("recheck_down_hosts", True)
-    sweep_ports = cfg.get("sweep_remaining_ports", True)
+    recheck_down = cfg.get("recheck_down_hosts")
+    if recheck_down is None:
+        recheck_down = settings_svc.get_bool("reverify.recheck_down_hosts", True)
+    sweep_ports = cfg.get("sweep_remaining_ports")
+    if sweep_ports is None:
+        sweep_ports = settings_svc.get_bool("reverify.sweep_remaining_ports", True)
     override_range = cfg.get("port_range")
 
     scan.status = "reverifying"
@@ -604,10 +619,11 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                         _wait_if_paused(scan)
                         port_list = ",".join(map(str, fresh_ports))
                         script_set = _nse_scripts_for_ports(fresh_ports)
+                        fp_tmo = settings_svc.get_int("execution.fingerprint_host_timeout", 300)
                         cmd = (f"nmap -sT -sV -O {PROFILE_TIMING.get(scan.profile, '-T4')} "
                                f"--version-intensity 7 --script {script_set} "
-                               f"--host-timeout 300s -p {port_list} {host.ip} -oX -")
-                        out = _run_streamed(scan, cmd, 360)
+                               f"--host-timeout {fp_tmo}s -p {port_list} {host.ip} -oX -")
+                        out = _run_streamed(scan, cmd, fp_tmo + 60)
                         parsed = parse_rustscan_output(out)
                         merged = _merge_host_ports(db, scan, str(host.ip), parsed)
                         if merged:
@@ -649,10 +665,6 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
 # ports; hitting any one confirms a host responds without a full scan.
 PROBE_PORTS = [80, 443, 22, 445, 3389, 23, 53, 8080, 8443, 515, 631, 135, 139]
 
-# Ports that are commonly firewalled/closed yet still used to infer aliveness.
-_CONFIRM_PORTS = [80, 443, 22, 445]
-
-
 def _expand_targets(targets: list) -> list:
     ips = []
     for t in targets:
@@ -669,37 +681,6 @@ def _expand_targets(targets: list) -> list:
     return ips
 
 
-def _hosts_from_sn_xml(xml_output: str) -> list:
-    """Parse host-native `nmap -sn -oX -` XML into [{ip, mac, vendor}, ...].
-
-    Returns only hosts reported as 'up' (those nmap confirmed via ARP/ping on
-    the host that has real L2). MAC/vendor come from nmap's address lines.
-    """
-    hosts = []
-    if not xml_output or not xml_output.strip():
-        return hosts
-    try:
-        root = ET.fromstring(xml_output)
-    except ET.ParseError:
-        return hosts
-
-    for host_el in root.findall("host"):
-        status = host_el.find("status")
-        if status is None or status.get("state") != "up":
-            continue
-        entry = {"ip": None, "mac": None, "vendor": None}
-        for addr in host_el.findall("address"):
-            atype = addr.get("addrtype")
-            if atype == "ipv4" and not entry["ip"]:
-                entry["ip"] = addr.get("addr")
-            elif atype == "mac":
-                entry["mac"] = addr.get("addr")
-                entry["vendor"] = addr.get("vendor")
-        if entry["ip"]:
-            hosts.append(entry)
-    return hosts
-
-
 def _tcp_probe(ip: str, timeout: float = 1.0) -> bool:
     """Return True if the host completes a TCP handshake on any probe port."""
     for port in PROBE_PORTS:
@@ -711,8 +692,10 @@ def _tcp_probe(ip: str, timeout: float = 1.0) -> bool:
     return False
 
 
-def _probe_alive(candidates: list, timeout: float = 1.0, max_workers: int = 64) -> set:
+def _probe_alive(candidates: list, timeout: float = None, max_workers: int = 64) -> set:
     """Concurrently TCP-probe candidate IPs, returning only reachable ones."""
+    if timeout is None:
+        timeout = settings_svc.get_float("execution.tcp_probe_timeout", 1.0)
     alive = set()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(_tcp_probe, ip, timeout): ip for ip in candidates}
@@ -858,55 +841,6 @@ def _run_streamed(scan, cmd: str, timeout: int = 60) -> str:
     return "".join(out_sink)
 
 
-def _nmap_run(scan, cmd: str, timeout: int = 60) -> list:
-    """Run an nmap command returning parsed open ports, or [] on failure.
-
-    Streams the command line and live progress output to the console via WS,
-    then a concise per-host/per-port summary once the command completes.
-    """
-    out = _run_streamed(scan, cmd, timeout)
-    if not out:
-        return []
-    _emit_summary(scan, out)
-    return parse_rustscan_output(out)
-
-
-def _emit_summary(scan, xml_output: str):
-    """Render concise per-host/per-port summary lines from nmap XML output."""
-    if not xml_output or not xml_output.strip():
-        return
-    try:
-        import xml.etree.ElementTree as _ET
-        root = _ET.fromstring(xml_output)
-    except Exception:
-        return
-
-    for host in root.findall("host"):
-        addr = host.find("address")
-        if addr is None:
-            continue
-        ip = addr.get("addr")
-        status = host.find("status")
-        state = status.get("state") if status is not None else "?"
-        ports = host.findall(".//port")
-        open_ports = [
-            p for p in ports
-            if (p.find("state") is not None and p.find("state").get("state") == "open")
-        ]
-        if not open_ports:
-            _emit_log(scan, f"  {ip} ({state}) - no open ports", level="out")
-            continue
-        for p in open_ports:
-            portid = p.get("portid")
-            proto = p.get("protocol")
-            svc = p.find("service")
-            name = svc.get("name") if svc is not None else "?"
-            ver = svc.get("version") if svc is not None else ""
-            _emit_log(scan, f"  {ip}: {portid}/{proto} open  {name} {ver}".rstrip(), level="out")
-
-
-
-
 def _delegate_to_agent(db, scan: Scan) -> bool:
     """Assign the scan to a live scanner agent whose local subnets cover the
     targets. Agents have real Layer-2 access (ARP -> MAC/vendor, SYN + -O ->
@@ -915,11 +849,16 @@ def _delegate_to_agent(db, scan: Scan) -> bool:
     is available, leaving the legacy in-worker execution to run.
     """
     try:
+        if not settings_svc.get_bool("agent.delegation_enabled", True):
+            # Master switch in the Settings page turns agent delegation off for
+            # every scan / re-verify method; always run in the worker instead.
+            return False
         from datetime import datetime as _dt, timezone as _tz
         now = _dt.now(_tz.utc)
+        window = settings_svc.get_int("agent.online_window_seconds", 90)
         online = []
         for agent in db.execute(select(Agent).where(Agent.status != "disabled")).scalars().all():
-            if agent.last_seen and (now - agent.last_seen).total_seconds() > 90:
+            if agent.last_seen and (now - agent.last_seen).total_seconds() > window:
                 continue
             online.append(agent)
         if not online:
@@ -967,7 +906,7 @@ def _delegate_to_agent(db, scan: Scan) -> bool:
 
 
 def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
-                            max_concurrency: int = 10):
+                            max_concurrency: int = None):
     """Run Phase 2/3 nmap per host, concurrently, streaming live results.
 
     Returns (results, os_map) where results maps host_id -> [open_ports] and
@@ -978,6 +917,11 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
     target list is resolved on the main thread and passed in; the resulting
     enrichment is applied by the caller after all threads complete.
     """
+    if max_concurrency is None:
+        max_concurrency = settings_svc.get_int("execution.phase2_concurrency", 10)
+    p2_min_rate = settings_svc.get_int("execution.phase2_min_rate", 500)
+    p2_host_timeout = settings_svc.get_int("execution.phase2_host_timeout", 75)
+    fp_host_timeout = settings_svc.get_int("execution.fingerprint_host_timeout", 300)
     profile_timing = PROFILE_TIMING.get(scan.profile, "-T4")
     proto = getattr(scan, "protocol", "tcp") or "tcp"
     port_spec = f"-p {scan.port_range}" if getattr(scan, "port_range", None) else ""
@@ -985,7 +929,7 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
     confirmed = [h for h in hosts if h.status == "up"]
     if not confirmed:
         _emit_log(scan, "  no up hosts to scan -- skipping", level="info")
-        return {}, {}
+        return {}, {}, {}
 
     # Resolve per-host working set on the main thread (DB-safe).
     work = {}  # host_id -> (host, args, timeout)
@@ -996,9 +940,9 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
             # L2/SYN here; L2/SYN+OS is provided by a scanner agent instead).
             # --host-timeout keeps one stuck host from stalling the phase.
             scan_mode = "-sU" if proto == "udp" else "-sT"
-            extra = "--min-rate 500 --host-timeout 75s" if proto != "udp" else ""
+            extra = f"--min-rate {p2_min_rate} --host-timeout {p2_host_timeout}s" if proto != "udp" else ""
             args = f"{scan_mode} {profile_timing} {extra} {port_spec} --open {ip}"
-            timeout = 90
+            timeout = p2_host_timeout + 15
         else:  # fingerprint only on already-open ports
             open_ports = [p for p in db.execute(
                 select(Port).where(Port.host_id == h.id)).scalars().all()
@@ -1018,9 +962,9 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
                 # chosen per-port from the safe set (-sC plus service-aware ids).
                 scan_mode = "-sT -sV -O"
                 extra = (f"--version-intensity 7 --script {script_set} "
-                         "--host-timeout 300s")
+                         f"--host-timeout {fp_host_timeout}s")
             args = f"{scan_mode} {profile_timing} {extra} -p {port_list} {ip}"
-            timeout = 360
+            timeout = fp_host_timeout + 60
         # --stats-every gives live progress ticks from the host
         stats = "" if profile_timing == "" else "--stats-every 5s"
         work[h.id] = (h, f"{args} {stats}".strip(), timeout)
@@ -1378,7 +1322,11 @@ def fingerprint_hosts(db, scan: Scan, hosts: list):
         )).scalar_one_or_none()
 
         if probed or host.device_type in ("unknown", "network_gear", "router"):
-            snmp_info = scanners.snmp_walk(ip, "public")
+            snmp_info = scanners.snmp_walk(
+                ip,
+                settings_svc.get("nmap.snmp_community", "public"),
+                settings_svc.get_float("nmap.snmp_timeout", 3.0),
+            )
             if snmp_info:
                 db.add(SNMPInfo(
                     host_id=host.id,

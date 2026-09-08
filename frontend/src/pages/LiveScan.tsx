@@ -248,7 +248,7 @@ export default function LiveScan() {
           setLiveHosts(null)
         }
         if (msg.type === 'host_discovered' && typeof msg.up !== 'undefined') {
-          setLiveHosts((prev) => (prev === null ? 1 : prev + (msg.up ? 1 : 0)))
+          setLiveHosts((prev) => (prev === null ? (msg.up ? 1 : 0) : prev + (msg.up ? 1 : 0)))
         }
       } catch {}
     }

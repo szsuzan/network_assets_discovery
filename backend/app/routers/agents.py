@@ -29,10 +29,11 @@ from ..schemas import (
 )
 from ..auth import get_current_user
 from ..websocket import manager
+from ..services import settings as settings_svc
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
-ONLINE_WINDOW_SECONDS = 90
+ONLINE_WINDOW_SECONDS = 90  # default; overridden per-request by the settings cache
 
 
 def _hash_key(key: str) -> str:
@@ -57,7 +58,8 @@ async def get_agent(
 def _live_status(agent: Agent) -> str:
     if agent.status == "disabled":
         return "disabled"
-    if agent.last_seen and (datetime.now(timezone.utc) - agent.last_seen).total_seconds() <= ONLINE_WINDOW_SECONDS:
+    window = settings_svc.get_int("agent.online_window_seconds", ONLINE_WINDOW_SECONDS)
+    if agent.last_seen and (datetime.now(timezone.utc) - agent.last_seen).total_seconds() <= window:
         return "online"
     return "offline"
 
@@ -207,6 +209,7 @@ async def claim_next_task(
         protocol=scan.protocol,
         kind=scan.kind,
         reverify=reverify_ctx,
+        workers=settings_svc.get_int("agent.workers", 5),
     )
 
 
@@ -292,11 +295,13 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
                     if probed or host.device_type in ("unknown", "network_gear", "router"):
                         probes.append((str(host.id), ip))
                 host_by_id = {str(h.id): h for h in scan.hosts}
+                snmp_community = settings_svc.get("nmap.snmp_community", "public")
+                snmp_timeout = settings_svc.get_float("nmap.snmp_timeout", 3.0)
 
                 def _snmp_probe(item):
                     hid, ip = item
                     try:
-                        return hid, _snmp_walk(ip, "public")
+                        return hid, _snmp_walk(ip, snmp_community, snmp_timeout)
                     except Exception:
                         return hid, None
 

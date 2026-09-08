@@ -195,6 +195,19 @@ class Agent(Base):
     notes = Column(Text, default="")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
+class SystemSetting(Base):
+    """Global application settings (scan defaults, agent delegation, re-scan
+    behaviour, Nmap/NSE/SNMP knobs) editable from the Settings page.
+
+    Every key is defined in the settings catalog (services/settings.py) with a
+    default; rows here override the catalog default at runtime.
+    """
+    __tablename__ = "system_settings"
+    key = Column(Text, primary_key=True)
+    value = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class AgentTask(Base):
     """A scan job claimed and executed by a scanner agent."""
     __tablename__ = "agent_tasks"

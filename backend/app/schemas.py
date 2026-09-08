@@ -47,13 +47,15 @@ class EngagementOut(BaseModel):
 
 class ScanCreate(BaseModel):
     targets: List[str]
-    profile: str = Field(pattern="^(quick|full|stealth|passive_only)$")
-    port_range: str = "1-10000"
-    protocol: str = Field(default="tcp", pattern="^(tcp|udp)$")
+    profile: Optional[str] = Field(default=None, pattern="^(quick|full|stealth|passive_only)$")
+    port_range: Optional[str] = None
+    protocol: Optional[str] = Field(default=None, pattern="^(tcp|udp)$")
 
     @field_validator("port_range")
     @classmethod
-    def _port_range_valid(cls, v: str) -> str:
+    def _port_range_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
         v = "".join(v.split()) if isinstance(v, str) else v
         if not PORT_RANGE_RE.match(v):
             raise ValueError("port_range must be nmap-style ranges, e.g. '1-1000' or '22,80,443-445'")
@@ -83,8 +85,19 @@ class ReverifyIn(BaseModel):
     original scan did not already check (computed from the stored scan range).
     """
     port_range: Optional[str] = None
-    recheck_down_hosts: bool = True
-    sweep_remaining_ports: bool = True
+    recheck_down_hosts: Optional[bool] = None
+    sweep_remaining_ports: Optional[bool] = None
+
+class SettingOut(BaseModel):
+    key: str
+    category: str
+    category_label: str
+    label: str
+    description: str
+    type: str
+    value: object
+    default: object
+    options: Optional[List[str]] = None
 
 class ScanOut(BaseModel):
     id: uuid.UUID
@@ -317,6 +330,7 @@ class AgentTaskOut(BaseModel):
     protocol: str
     kind: str = "discover"
     reverify: Optional[dict] = None
+    workers: Optional[int] = None
 
 class AgentLogIn(BaseModel):
     line: str

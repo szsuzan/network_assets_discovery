@@ -10,30 +10,6 @@ import subprocess
 log = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
-# MAC vendor lookup (OUI database)
-# --------------------------------------------------------------------------- #
-def mac_vendor(mac: str) -> str | None:
-    """Look up a MAC address prefix in the Wireshark OUI database.
-
-    Returns a vendor string or None if unknown/unavailable.
-    """
-    norm = "".join(c for c in (mac or "") if c.isalnum()).upper()
-    if len(norm) < 6:
-        return None
-    prefix = ":".join(norm[i:i + 2] for i in range(0, 6, 2))
-    try:
-        from manuf import manuf
-        parser = manuf.MacParser()
-        return parser.get_manuf(prefix)
-    except Exception:
-        pass
-
-    # Fallback: /sys/class/net vendor-independent local file is unlikely to help
-    # in a container, so return None rather than fabricate data.
-    return None
-
-
-# --------------------------------------------------------------------------- #
 # SNMP walk (device OS / system identification) via snmpwalk or pysnmp
 # --------------------------------------------------------------------------- #
 SNMP_SYSOBJECTID = "1.3.6.1.2.1.1.2.0"

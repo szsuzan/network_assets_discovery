@@ -27,7 +27,6 @@ Flags:
 import argparse
 import ipaddress
 import json
-import os
 import shlex
 import socket
 import struct
@@ -52,6 +51,22 @@ VERSION = "0.1.0"
 # keeps a LAN-sized scan fast without flooding the wire or the router.
 PHASE2_WORKERS = 5
 PHASE3_WORKERS = 5
+
+# Runtime override for the Phase 2/3 worker pool, set from the task payload the
+# server sends (Settings page > Agent delegation > Agent parallel workers).
+_RUNTIME_WORKERS = None
+
+
+def _p2_workers():
+    return _RUNTIME_WORKERS or PHASE2_WORKERS
+
+
+def _set_runtime_workers(task: dict):
+    global _RUNTIME_WORKERS
+    try:
+        _RUNTIME_WORKERS = int(task.get("workers")) if task.get("workers") else None
+    except (TypeError, ValueError):
+        _RUNTIME_WORKERS = None
 
 # A lone `nmap -O --osscan-guess` guess on a host with no open ports is only
 # kept when nmap reports at least this accuracy. (Real-world no-port responders
@@ -634,7 +649,7 @@ def _run_mdns_sweeper(probe_duration: float = 10.0, gap: float = 5.0, stop_evt=N
             except Exception:
                 return
 
-def run_nmap(args: List[str], log_stdout=False) -> str:
+def run_nmap(args: List[str]) -> str:
     """Run nmap, returning raw output. stderr (liveness/port progress) is
     echoed; the caller decides whether stdout XML is worth keeping."""
     proc = subprocess.run(args, capture_output=True, text=True, errors="replace")
@@ -895,17 +910,6 @@ def _map_hosts(worker, items: List[tuple], workers: int,
 # --------------------------------------------------------------------------- #
 # Scan execution
 # --------------------------------------------------------------------------- #
-def _root() -> bool:
-    try:
-        return os.geteuid() == 0
-    except Exception:
-        return False
-
-
-class AgentStopped(Exception):
-    pass
-
-
 def _await_go(client: ApiClient, task_id: str) -> bool:
     """Block until the scan is neither paused nor stopped. Returns False when
     the user stopped it (agent should bail without posting a result)."""
@@ -932,6 +936,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     targets = task["targets"] or []
     profile = task.get("profile") or "quick"
     port_range = task.get("port_range") or "1-10000"
+    _set_runtime_workers(task)
 
     client.log(task_id, f"=== Agent scan started (scan={scan_id}, targets={', '.join(targets)}) ===")
     client.log(task_id, f"Phase 1/3: L2/ARP discovery -> live hosts + MAC/vendor", level="cmd")
@@ -1053,7 +1058,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
         client.log(task_id, f"Partial discovery post failed: {e}", level="err")
 
     # ---- Phase 2/3: simple port scan (no -sV/-O) -> open ports only ----------
-    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {PHASE2_WORKERS} parallel worker(s)", level="cmd")
+    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {_p2_workers()} parallel worker(s)", level="cmd")
 
     def _p2_worker(ip_meta):
         ip, _meta = ip_meta
@@ -1070,7 +1075,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     p2_done = 0
     p2_total = max(len(live), 1)
     for (ip, _meta), res in _map_hosts(_p2_worker, list(live.items()),
-                                       PHASE2_WORKERS, client, task_id, "port-scan"):
+                                       _p2_workers(), client, task_id, "port-scan"):
         if res is None:
             client.log(task_id, "Scan stopped by user", level="warn")
             break
@@ -1282,6 +1287,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
     down_ips = rv.get("down_ips") or []
     up_ips = rv.get("up_ips") or []
     already_ports = rv.get("already_ports") or "1-65535"
+    _set_runtime_workers(task)
     # The component range(s) to sweep: complement of what was already checked.
     sweep_spec = _leftover_ports_spec(_range_to_ports_set(already_ports))
 
@@ -1303,7 +1309,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
         client.log(task_id, f"  {len(alive)} previously-down host(s) now responding")
         scan_type_a = "-sT" if use_connect else "-sS"
         timing_a = PROBE_TIMING.get(profile, "-T4")
-        client.log(task_id, f"  re-checking now-up host(s) (full pipeline), {PHASE2_WORKERS} parallel worker(s)")
+        client.log(task_id, f"  re-checking now-up host(s) (full pipeline), {_p2_workers()} parallel worker(s)")
 
         def _rv_down_worker(meta_ip):
             ip, meta = meta_ip
@@ -1329,7 +1335,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
                                    ",".join(found), use_connect, profile) or {"ip": ip, "ports": []}
 
         for (ip, _meta), host in _map_hosts(_rv_down_worker, [(a["ip"], a) for a in alive],
-                                            PHASE2_WORKERS, client, task_id, "re-verify-up"):
+                                            _p2_workers(), client, task_id, "re-verify-up"):
             if host is None:
                 client.log(task_id, "Scan stopped by user", level="warn")
                 break
@@ -1342,7 +1348,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
             return
         scan_type_b = "-sT" if use_connect else "-sS"
         timing_b = PROBE_TIMING.get(profile, "-T4")
-        client.log(task_id, f"Phase B: sweeping unscanned ports {sweep_spec} on {len(up_ips)} up host(s), {PHASE2_WORKERS} parallel worker(s)")
+        client.log(task_id, f"Phase B: sweeping unscanned ports {sweep_spec} on {len(up_ips)} up host(s), {_p2_workers()} parallel worker(s)")
 
         def _rv_sweep_worker(ip_meta):
             ip, _meta = ip_meta
@@ -1361,7 +1367,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
         leftover_done = 0
         leftover_total = max(len(up_ips), 1)
         for (ip, _meta), found in _map_hosts(_rv_sweep_worker, [(ip, {}) for ip in up_ips],
-                                             PHASE2_WORKERS, client, task_id, "leftover-sweep"):
+                                             _p2_workers(), client, task_id, "leftover-sweep"):
             if found is None:
                 client.log(task_id, "Scan stopped by user", level="warn")
                 break
@@ -1383,13 +1389,6 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
     except Exception as e:
         client.log(task_id, f"Final result post failed: {e}", level="err")
     client.log(task_id, f"=== Agent re-verify done: {len(newly_up)} host(s) recovered, report merged ===")
-
-
-def _root() -> bool:
-    try:
-        return hasattr(os:=__import__("os"), "geteuid") and __import__("os").geteuid() == 0
-    except Exception:
-        return False
 
 
 # --------------------------------------------------------------------------- #

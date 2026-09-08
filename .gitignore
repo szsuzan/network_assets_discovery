@@ -13,13 +13,6 @@ backend/scan_output/
 frontend/node_modules/
 frontend/dist/
 frontend/verify/
-frontend/_probe.js
-
-# Debug helper scripts (kept locally, not published)
-backend/disc.py
-backend/pos.py
-backend/scans.py
-backend/topo.py
 
 # OS / editors
 Thumbs.db
