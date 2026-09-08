@@ -8,6 +8,7 @@ type MinimapProps = {
   viewport: { x: number; y: number; k: number } | null
   onNavigate: (x: number, y: number) => void
   size?: number
+  dark?: boolean
 }
 
 const SEV_COLOR: Record<string, string> = {
@@ -17,7 +18,7 @@ const SEV_COLOR: Record<string, string> = {
   info: '#8B95A1',
 }
 
-export default function TopologyMinimap({ nodes, width, height, viewport, onNavigate, size = 170 }: MinimapProps) {
+export default function TopologyMinimap({ nodes, width, height, viewport, onNavigate, size = 170, dark = true }: MinimapProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
 
   useEffect(() => {
@@ -47,7 +48,7 @@ export default function TopologyMinimap({ nodes, width, height, viewport, onNavi
     const oy = (size - gH * scale) / 2 - minY * scale
 
     // background
-    ctx.fillStyle = 'rgba(11,16,32,0.6)'
+    ctx.fillStyle = dark ? 'rgba(11,16,32,0.6)' : 'rgba(249,250,251,0.92)'
     ctx.fillRect(0, 0, size, size)
 
     // nodes
@@ -74,7 +75,7 @@ export default function TopologyMinimap({ nodes, width, height, viewport, onNavi
       const vh = (height / viewport.k) * scale
       const vx = viewport.x * scale + ox - vw / 2
       const vy = viewport.y * scale + oy - vh / 2
-      ctx.strokeStyle = '#e2e8f0'
+      ctx.strokeStyle = dark ? '#e2e8f0' : '#64748b'
       ctx.lineWidth = 1
       ctx.strokeRect(vx, vy, vw, vh)
     }
@@ -102,7 +103,9 @@ export default function TopologyMinimap({ nodes, width, height, viewport, onNavi
   }
 
   return (
-    <div className="pointer-events-auto absolute bottom-3 right-3 z-10 rounded-md border border-gray-700 bg-[#0b1020]/90 p-1 shadow-lg">
+    <div className={`pointer-events-auto absolute bottom-3 right-3 z-10 rounded-md border p-1 shadow-lg ${
+      dark ? 'border-gray-700 bg-[#0b1020]/90' : 'border-gray-300 bg-white/90'
+    }`}>
       <canvas
         ref={canvasRef}
         onClick={handleClick}
