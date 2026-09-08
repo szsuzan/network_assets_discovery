@@ -278,7 +278,7 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
 </style>
 </head>
 <body>
-  <h1>Initial Asset Discovery Report</h1>
+  <h1>SubNex Initial Discovery Report</h1>
   <div class="subtitle">Scan of {_esc(', '.join(scan.targets))}</div>
   <div class="meta">
     Client / Engagement: <b>{_esc(getattr(engagement, "client_name", None) or "—")}</b>

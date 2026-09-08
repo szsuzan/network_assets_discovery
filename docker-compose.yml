@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pentest}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
-      POSTGRES_DB: ${POSTGRES_DB:-asset_discovery}
+      POSTGRES_DB: ${POSTGRES_DB:-subnex}
     ports:
       - "5432:5432"
     volumes:
@@ -32,7 +32,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pentest}:${POSTGRES_PASSWORD:-secret}@postgres:5432/${POSTGRES_DB:-asset_discovery}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pentest}:${POSTGRES_PASSWORD:-secret}@postgres:5432/${POSTGRES_DB:-subnex}
       REDIS_URL: redis://redis:6379/0
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}

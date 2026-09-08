@@ -7,8 +7,8 @@ from fastapi.responses import FileResponse
 from .routers import auth, engagements, scans, export, agents, webhooks, settings
 
 app = FastAPI(
-    title="Network Asset Discovery Platform",
-    description="Professional-grade network asset discovery tool for penetration testing engagements.",
+    title="SubNex",
+    description="SubNex - Where your assets hide, SubNex finds.",
     version="1.0.0"
 )
 
@@ -50,7 +50,7 @@ async def _startup():
 async def root():
     if _SPA_INDEX.exists():
         return FileResponse(_SPA_INDEX)
-    return {"message": "Network Asset Discovery Platform API", "docs": "/docs"}
+    return {"message": "SubNex API", "docs": "/docs"}
 
 
 @app.get("/health")

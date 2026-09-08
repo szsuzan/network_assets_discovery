@@ -1,6 +1,9 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useLogin } from '../hooks/useApi'
+import { useTheme } from '../lib/theme'
+import subnexLogo from '../assets/subnex-logo.svg'
+import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -8,6 +11,7 @@ export default function Login() {
   const [error, setError] = useState('')
   const navigate = useNavigate()
   const login = useLogin()
+  const { theme } = useTheme()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -24,10 +28,10 @@ export default function Login() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-950">
-      <div className="w-full max-w-md rounded-lg border border-gray-800 bg-gray-900 p-8">
+      <div className="w-full max-w-xl rounded-lg border border-gray-800 bg-gray-900 p-6">
         <div className="mb-8 text-center">
-          <h1 className="text-2xl font-bold text-white">Asset Discovery</h1>
-          <p className="mt-2 text-sm text-gray-400">Network asset discovery for penetration testing</p>
+          <img src={theme === 'dark' ? subnexLogoLight : subnexLogo} alt="SubNex" className="mx-auto mb-3 h-40 w-auto" />
+          <p className="text-sm italic text-gray-400">Where your assets hide, SubNex finds.</p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">

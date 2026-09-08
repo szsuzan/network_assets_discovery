@@ -1,6 +1,6 @@
-# Network Asset Discovery Platform
+# SubNex
 
-A professional-grade network asset discovery tool for penetration testing engagements. Discovers live assets on an in-scope network, fingerprints each host, maps network topology, surfaces risk-relevant findings, and produces a client-ready initial discovery report.
+SubNex is a network asset discovery platform for penetration testing engagements. Discovers live assets on an in-scope network, fingerprints each host, maps network topology, surfaces risk-relevant findings, and produces a client-ready initial discovery report.
 
 > **Out of scope for this entire system:** exploitation, credential brute-forcing, or any attack-execution capability. This is a *discovery, fingerprinting, and reporting* platform only.
 
@@ -83,6 +83,7 @@ Everything else (`nmap`, `weasyprint`, etc.) runs inside the Docker images.
 git clone https://github.com/szsuzan/network_assets_discovery.git
 cd network_assets_discovery
 ```
+> Note: the repo/clone directory will still be named `network_assets_discovery` until you rename it on GitHub; the product itself is **SubNex**.
 
 ### 3. (Optional) Configure secrets
 
@@ -95,7 +96,7 @@ cp .env.example .env
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `pentest` / `secret` / `asset_discovery` | Postgres access (used to build `DATABASE_URL`) |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `pentest` / `secret` / `subnex` | Postgres access (used to build `DATABASE_URL`) |
 | `JWT_SECRET` | `change-me-in-production` | Auth token signing key — change for anything beyond local dev |
 | `JWT_ALGORITHM` / `JWT_EXPIRY_MINUTES` | `HS256` / `60` | Token settings |
 

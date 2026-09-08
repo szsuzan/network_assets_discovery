@@ -103,7 +103,7 @@ async def test_webhook(
         w = s.get(Webhook, wh.id)
         deliver_test(s, w, "finding_updated", {
             "event": "test",
-            "message": "Test delivery from Asset Discovery",
+            "message": "Test delivery from SubNex",
             "sent_by": current_user.email,
         })
         return w

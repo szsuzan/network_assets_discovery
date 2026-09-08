@@ -1,6 +1,6 @@
 # =============================================================================
 #  stop-all.ps1
-#  Clean shutdown of the Network Asset Discovery stack:
+#  Clean shutdown of the SubNex stack:
 #    1. LAN scanner agent  (background python process)
 #    2. Docker Compose stack (postgres, redis, backend = API + Celery worker + UI)
 #
@@ -50,7 +50,7 @@ try {
 # Remove leftover project containers (any started outside compose, e.g. a
 # manual `docker run` of the frontend). Compose-down only knows its own
 # containers, and such leftovers would cause name conflicts on the next `up`.
-$leftover = @(& $DC ps -a --filter 'name=assetsdiscovery-' --format '{{.Names}}')
+$leftover = @(& $DC ps -a --filter 'name=subnex-' --format '{{.Names}}')
 if ($leftover.Count -gt 0) {
     foreach ($c in $leftover) {
         Write-Host "  removing leftover container $c"

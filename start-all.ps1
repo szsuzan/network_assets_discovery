@@ -1,6 +1,6 @@
 # =============================================================================
 #  start-all.ps1
-#  Clean startup of the Network Asset Discovery stack:
+#  Clean startup of the SubNex stack:
 #    1. Docker Compose stack  (postgres, redis, backend = API + Celery worker
 #       + built web UI served on the same port)
 #    2. LAN scanner agent     (once the backend is ready)

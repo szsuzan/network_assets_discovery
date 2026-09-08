@@ -4,7 +4,7 @@ from app.config import get_settings
 settings = get_settings()
 
 celery_app = Celery(
-    "asset_discovery",
+    "subnex",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
 )
