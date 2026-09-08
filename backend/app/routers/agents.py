@@ -271,45 +271,82 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
             if not scan:
                 return
             if completed:
+                from concurrent.futures import ThreadPoolExecutor as _SMPool
+                # Identify the hosts to probe, then run the SNMP walks
+                # concurrently (each walk can block ~1-2s on a silent target) so
+                # finalisation isn't a long serial tail. Results are applied on
+                # the main thread so the session objects are only touched there.
+                probes = []
                 for host in scan.hosts:
-                    if host.status == "up":
-                        ip = str(host.ip)
-                        # SNMP enrichment matching the in-worker fingerprint path:
-                        # probe UDP 161 (and best-effort on unknown/network gear)
-                        # so agent scans also get sysDescr/sysName/vendor/OS hints.
-                        probed = sdb.execute(select(Port).where(
-                            Port.host_id == host.id,
-                            Port.port == 161,
-                            Port.protocol == "udp",
-                        )).scalar_one_or_none()
-                        if probed or host.device_type in ("unknown", "network_gear", "router"):
-                            snmp_info = _snmp_walk(ip, "public")
-                            if snmp_info:
-                                existing = sdb.execute(
-                                    select(SNMPInfo).where(SNMPInfo.host_id == host.id)
-                                ).scalar_one_or_none()
-                                if not existing:
-                                    sdb.add(SNMPInfo(
-                                        host_id=host.id,
-                                        sys_descr=snmp_info.get("sys_descr"),
-                                        sys_name=snmp_info.get("sys_name"),
-                                        sys_location=snmp_info.get("sys_location"),
-                                        sys_objectid=snmp_info.get("sys_objectid"),
-                                        sys_uptime=snmp_info.get("uptime"),
-                                        default_community_found=True,
-                                    ))
-                                if snmp_info.get("sys_name") and not host.hostname:
-                                    host.hostname = snmp_info["sys_name"]
-                                if snmp_info.get("vendor") and not host.vendor:
-                                    host.vendor = snmp_info["vendor"]
-                                if snmp_info.get("sys_descr") and (
-                                    not host.os_guess
-                                    or host.os_guess.startswith("Most probably")
-                                    or (host.os_confidence or 100) < 60
-                                ):
-                                    host.os_guess = snmp_info["sys_descr"][:200]
-                                    host.os_confidence = 60 if host.os_guess else host.os_confidence
+                    if host.status != "up":
+                        continue
+                    ip = str(host.ip)
+                    # SNMP enrichment matching the in-worker fingerprint path:
+                    # probe UDP 161 (and best-effort on unknown/network gear)
+                    # so agent scans also get sysDescr/sysName/vendor/OS hints.
+                    probed = sdb.execute(select(Port).where(
+                        Port.host_id == host.id,
+                        Port.port == 161,
+                        Port.protocol == "udp",
+                    )).scalar_one_or_none()
+                    if probed or host.device_type in ("unknown", "network_gear", "router"):
+                        probes.append((str(host.id), ip))
+                host_by_id = {str(h.id): h for h in scan.hosts}
+
+                def _snmp_probe(item):
+                    hid, ip = item
+                    try:
+                        return hid, _snmp_walk(ip, "public")
+                    except Exception:
+                        return hid, None
+
+                if probes:
+                    with _SMPool(max_workers=min(8, len(probes))) as pool:
+                        for hid, snmp_info in pool.map(_snmp_probe, probes):
+                            host = host_by_id.get(hid)
+                            if not host or not snmp_info:
+                                continue
+                            existing = sdb.execute(
+                                select(SNMPInfo).where(SNMPInfo.host_id == host.id)
+                            ).scalar_one_or_none()
+                            if not existing:
+                                sdb.add(SNMPInfo(
+                                    host_id=host.id,
+                                    sys_descr=snmp_info.get("sys_descr"),
+                                    sys_name=snmp_info.get("sys_name"),
+                                    sys_location=snmp_info.get("sys_location"),
+                                    sys_objectid=snmp_info.get("sys_objectid"),
+                                    sys_uptime=snmp_info.get("uptime"),
+                                    default_community_found=True,
+                                ))
+                            if snmp_info.get("sys_name") and not host.hostname:
+                                host.hostname = snmp_info["sys_name"]
+                            if snmp_info.get("vendor") and not host.vendor:
+                                host.vendor = snmp_info["vendor"]
+                            if snmp_info.get("sys_descr") and (
+                                not host.os_guess
+                                or host.os_guess.startswith("Most probably")
+                                or (host.os_confidence or 100) < 60
+                            ):
+                                host.os_guess = snmp_info["sys_descr"][:200]
+                                host.os_confidence = 60 if host.os_guess else host.os_confidence
+                for host in scan.hosts:
                     classify_device_type(host)
+                # Container nmap fingerprint + NSE pass on the agent-confirmed
+                # open ports so agent scans also get structured NSE findings
+                # (weak TLS, SMB signing, anonymous FTP, web surface, OS refresh)
+                # stored under scan_output/<scan>/fingerprint_<ip>.xml. Skipped
+                # for passive_only profiles AND for re-verify passes: the agent
+                # already deep-scanned the same ports (and any reverify-hidden
+                # ones) with its own NSE script set, so re-running the full
+                # container fingerprint here would duplicate that work and stall
+                # finalisation for minutes.
+                if (getattr(scan, "profile", "full") != "passive_only"
+                        and scan.kind != "reverify"):
+                    up_hosts = [h for h in scan.hosts if h.status == "up"]
+                    if up_hosts:
+                        from ..services.scan_worker import fingerprint_open_ports
+                        fingerprint_open_ports(sdb, scan, up_hosts)
                 sdb.commit()
                 run_risk_rules(sdb, scan)
                 capture_topology(sdb, scan)
@@ -322,6 +359,8 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
                 scan.status = "completed"
                 scan.completed_at = datetime.now(timezone.utc)
                 scan.progress_pct = 100
+                from ..services.scan_worker import _snapshot_pass
+                _snapshot_pass(sdb, scan)
                 sdb.commit()
             else:
                 scan.status = "failed"
@@ -331,6 +370,7 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
         manager.broadcast_sync(scan_id, {
             "type": "scan_completed" if completed else "scan_failed",
             "scan_id": scan_id, "error": error or None,
+            "progress_pct": 100 if completed else scan.progress_pct,
         })
         manager.broadcast_sync(scan_id, {
             "type": "cmd_log", "scan_id": scan_id, "level": "info",

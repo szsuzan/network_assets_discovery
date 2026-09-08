@@ -29,6 +29,9 @@ export default function Layout() {
               <NavLink to="/agents" className={navClass}>
                 Agents
               </NavLink>
+              <NavLink to="/integrations" className={navClass}>
+                Integrations
+              </NavLink>
             </nav>
           </div>
           <div className="flex items-center gap-3">

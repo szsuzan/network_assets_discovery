@@ -2,8 +2,23 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useHosts, useFindings, useScan } from '../hooks/useApi'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
-import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, normalizeDeviceType } from '../lib/types'
+import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, normalizeDeviceType, FINDING_TYPE_LABELS, FINDING_STATUS_LABELS } from '../lib/types'
+import { SeverityBadge } from '../components/SeverityBadge'
 import ScanNav from '../components/ScanNav'
+
+const SEV_ORDER = ['critical', 'concerning', 'notable', 'info'] as const
+const SEV_WEIGHT = { critical: 10, concerning: 6, notable: 3, info: 1 } as const
+
+const STATUS_COLORS: Record<string, string> = {
+  open: 'bg-gray-800 text-gray-300',
+  triaged: 'bg-blue-900/50 text-blue-300',
+  confirmed: 'bg-orange-900/50 text-orange-300',
+  remediation_in_progress: 'bg-yellow-900/50 text-yellow-300',
+  retest: 'bg-purple-900/50 text-purple-300',
+  resolved: 'bg-emerald-900/50 text-emerald-300',
+  accepted_risk: 'bg-slate-700 text-slate-300',
+  false_positive: 'bg-slate-800 text-slate-400 line-through',
+}
 
 export default function Report() {
   const { engagementId, scanId } = useParams()
@@ -21,17 +36,35 @@ export default function Report() {
     return Array.from(map.entries()).map(([name, value]) => ({ name, value }))
   }, [hosts])
 
+  const reported = useMemo(() => findings?.filter((f) => f.included_in_report) || [], [findings])
+  const excludedCount = (findings?.length || 0) - reported.length
+
   const severityBreakdown = useMemo(() => {
     const counts = { critical: 0, concerning: 0, notable: 0, info: 0 }
-    findings?.forEach((f) => {
+    reported.forEach((f) => {
       if (counts[f.severity as keyof typeof counts] !== undefined) counts[f.severity as keyof typeof counts]++
     })
-    return (['critical', 'concerning', 'notable', 'info'] as const).map((sev) => ({
+    return SEV_ORDER.map((sev) => ({
       name: sev,
       count: counts[sev],
       fill: SEVERITY_COLORS[sev],
     }))
-  }, [findings])
+  }, [reported])
+
+  const riskIndex = useMemo(() => {
+    if (!reported.length) return 0
+    const score = reported.reduce((acc, f) => acc + (SEV_WEIGHT[f.severity as keyof typeof SEV_WEIGHT] || 1), 0)
+    return Math.max(1, Math.min(100, Math.round((score / (10 * reported.length)) * 100)))
+  }, [reported])
+
+  const prioritized = useMemo(() => {
+    const order = { critical: 0, concerning: 1, notable: 2, info: 3 }
+    return [...reported].sort((a, b) =>
+      (order[a.severity as keyof typeof order] ?? 9) - (order[b.severity as keyof typeof order] ?? 9)
+    )
+  }, [reported])
+
+  const namedHosts = useMemo(() => hosts?.filter((h) => h.hostname).length || 0, [hosts])
 
   const coveragePct = scan
     ? Math.round(((scan.hosts_discovered || 0) / Math.max(scan.hosts_total_in_scope || 1, 1)) * 100)
@@ -64,6 +97,8 @@ export default function Report() {
     setNextSteps((prev) => prev.map((s, idx) => (idx === i ? value : s)))
   }
 
+  const criticals = severityBreakdown[0].count + severityBreakdown[1].count + severityBreakdown[2].count
+
   return (
     <div>
       <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">
@@ -93,10 +128,12 @@ export default function Report() {
         {/* Executive summary */}
         <div className="rounded-lg border border-gray-800 bg-gray-900 p-6">
           <h2 className="mb-4 text-lg font-bold">Executive Summary</h2>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
             <SummaryStat label="Coverage" value={`${coveragePct}%`} sub={`${scan?.hosts_discovered || 0} live of ${scan?.hosts_total_in_scope || 0} in-scope`} />
             <SummaryStat label="Hosts" value={hosts?.length || 0} sub="discovered" />
-            <SummaryStat label="Findings" value={findings?.length || 0} sub={`${severityBreakdown.filter((s) => s.count > 0).length} severities`} />
+            <SummaryStat label="Named Hosts" value={namedHosts} sub="via mDNS / DHCP / SNMP" />
+            <SummaryStat label="Findings" value={reported.length} sub={excludedCount > 0 ? `${excludedCount} excluded` : `${severityBreakdown.filter((s) => s.count > 0).length} severities`} />
+            <SummaryStat label="Risk Index" value={`${riskIndex}/100`} sub={`${criticals} non-info findings`} />
           </div>
         </div>
 
@@ -118,7 +155,7 @@ export default function Report() {
           </div>
 
           <div className="rounded-lg border border-gray-800 bg-gray-900 p-6">
-            <h3 className="mb-4 font-medium">Findings by Severity</h3>
+            <h3 className="mb-4 font-medium">Findings by Severity {excludedCount > 0 && <span className="text-xs font-normal text-gray-500">({excludedCount} excluded from report)</span>}</h3>
             <ResponsiveContainer width="100%" height={280}>
               <BarChart data={severityBreakdown}>
                 <XAxis dataKey="name" stroke="#9CA3AF" />
@@ -134,6 +171,75 @@ export default function Report() {
           </div>
         </div>
 
+        {/* Prioritized findings */}
+        <div className="rounded-lg border border-gray-800 bg-gray-900 p-6">
+          <h3 className="mb-1 font-medium">Prioritized Risk Findings</h3>
+          <p className="mb-3 text-sm text-gray-500">
+            Ordered from critical to informational, matching the export. Status is live from the Findings page.
+          </p>
+          {prioritized.length ? (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-gray-800 text-xs uppercase tracking-wide text-gray-500">
+                    <th className="py-2 pr-3">Severity</th>
+                    <th className="py-2 pr-3">Finding</th>
+                    <th className="py-2 pr-3">Host</th>
+                    <th className="py-2 pr-3">Port</th>
+                    <th className="py-2 pr-3">Status</th>
+                    <th className="py-2 pr-3">CVSS</th>
+                    <th className="py-2 pr-3">CWE</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-800">
+                  {prioritized.map((f) => (
+                    <tr key={f.id} className="align-top hover:bg-gray-800/40">
+                      <td className="py-2 pr-3"><SeverityBadge severity={f.severity} /></td>
+                      <td className="max-w-md py-2 pr-3">
+                        <div className="text-gray-200">{f.title}</div>
+                        <div className="mt-0.5 text-xs text-gray-500">{FINDING_TYPE_LABELS[f.type] || f.type}</div>
+                        {f.evidence?.output && (
+                          <div className="mono mt-1 max-h-16 overflow-y-auto whitespace-pre-wrap rounded border border-gray-800 bg-gray-950 px-2 py-1 text-xs text-gray-500">
+                            <span className="text-gray-400">[{f.evidence.script}] </span>
+                            {f.evidence.output}
+                          </div>
+                        )}
+                      </td>
+                      <td className="mono py-2 pr-3">
+                        {f.host_ip ? (
+                          <Link to={`/engagements/${engagementId}/scans/${scanId}/host/${f.host_ip}`} className="text-blue-400 hover:underline">
+                            {f.host_ip}
+                          </Link>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
+                      <td className="mono py-2 pr-3 text-gray-300">{f.port ?? '—'}</td>
+                      <td className="py-2 pr-3">
+                        <span className={`rounded px-2 py-0.5 text-xs ${STATUS_COLORS[f.status] || STATUS_COLORS.open}`}>
+                          {FINDING_STATUS_LABELS[f.status] || f.status}
+                        </span>
+                      </td>
+                      <td className="py-2 pr-3">
+                        {f.cvss_score != null ? (
+                          <span className="text-gray-300" title={f.cvss_vector || ''}>{f.cvss_score.toFixed(1)}</span>
+                        ) : (
+                          <span className="text-gray-600">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 pr-3">
+                        {f.cwe ? <span className="mono text-xs text-orange-400">{f.cwe}</span> : <span className="text-gray-600">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-sm text-gray-500">No findings included in the report yet.</p>
+          )}
+        </div>
+
         {/* Coverage & limitations */}
         <div className="rounded-lg border border-gray-800 bg-gray-900 p-6">
           <h3 className="mb-3 font-medium">Coverage & Limitations</h3>
@@ -144,6 +250,7 @@ export default function Report() {
                 <li className="mono">{scan?.targets.join(', ') || '—'}</li>
                 <li>Profile: <span className="capitalize">{scan?.profile?.replace('_', ' ')}</span></li>
                 <li>Port range: <span className="mono">{scan?.port_range}</span></li>
+                <li>Generated: <span className="mono">{scan?.completed_at ? new Date(scan.completed_at).toLocaleString() : '—'}</span></li>
               </ul>
             </div>
             <div>
@@ -152,6 +259,8 @@ export default function Report() {
                 <li>Hosts that filter ICMP may not be detected</li>
                 <li>Passive-only scans do not enumerate open ports</li>
                 <li>OS/banner identification depends on scan timing and host response</li>
+                <li>Privacy-randomised MACs hide the vendor; hostnames inferred from mDNS/DHCP where available</li>
+                <li>Only targets within the engagement's authorized scope are included</li>
               </ul>
             </div>
           </div>

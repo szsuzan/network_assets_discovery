@@ -104,14 +104,34 @@ export function useHosts(scanId: string | undefined) {
 
 export type ConsoleLogEntry = { ts: string | null; level: string; line: string }
 
+export type ActivityEntry = {
+  ts: string | null
+  type: string
+  scan_id?: string
+  [key: string]: any
+}
+
 export function useScanLogs(scanId: string | undefined) {
   return useQuery({
     queryKey: ['scan', scanId, 'logs'],
     queryFn: () => api.get<ConsoleLogEntry[]>(`/api/scans/${scanId}/logs`).then((r) => r.data),
     enabled: !!scanId,
+    // Keep the console fresh even if the WebSocket drops/reconnects; the page
+    // is only mounted while the user is watching the live scan.
+    refetchInterval: 5000,
   })
 }
 
+
+export function useScanActivity(scanId: string | undefined) {
+  return useQuery({
+    queryKey: ['scan', scanId, 'activity'],
+    queryFn: () => api.get<ActivityEntry[]>(`/api/scans/${scanId}/activity`).then((r) => r.data),
+    enabled: !!scanId,
+    // Mirror the logs poll so the timeline catches up when the WebSocket drops.
+    refetchInterval: 5000,
+  })
+}
 
 export function useHostDetail(scanId: string | undefined, hostIp: string | undefined) {
   return useQuery({
@@ -145,6 +165,104 @@ export function usePatchFinding() {
     mutationFn: ({ id, data }: { id: string; data: Partial<Finding> }) =>
       api.patch(`/api/findings/${id}`, data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scan'] }),
+  })
+}
+
+export function useFindingAudit(scanId: string | undefined, findingId: string | undefined) {
+  return useQuery({
+    queryKey: ['scan', scanId, 'finding', findingId, 'audit'],
+    queryFn: () =>
+      api.get(`/api/scans/${scanId}/findings/${findingId}/audit`).then((r) => r.data),
+    enabled: !!scanId && !!findingId,
+  })
+}
+
+export interface RiskRule {
+  key: string
+  label: string
+  description: string | null
+  kind: string
+  default_severity: string
+  enabled: boolean
+  severity: string | null
+}
+
+export function useRiskRules(scanId: string | undefined) {
+  return useQuery({
+    queryKey: ['scan', scanId, 'risk-rules'],
+    queryFn: () => api.get<RiskRule[]>(`/api/scans/${scanId}/risk-rules`).then((r) => r.data),
+    enabled: !!scanId,
+  })
+}
+
+export function useUpdateRiskRules(scanId: string | undefined) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (rules: { key: string; enabled?: boolean; severity?: string | null }[]) =>
+      api.put(`/api/scans/${scanId}/risk-rules`, rules).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['scan', scanId, 'risk-rules'] }),
+  })
+}
+
+export function useReanalyze(scanId: string | undefined) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => api.post(`/api/scans/${scanId}/reanalyze`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['scan', scanId, 'findings'] }),
+  })
+}
+
+export interface Webhook {
+  id: string
+  name: string
+  url: string
+  events: string[]
+  enabled: boolean
+  secret?: string | null
+  created_at: string
+  last_triggered_at: string | null
+  last_status: number | null
+  last_error: string | null
+}
+
+export function useWebhooks() {
+  return useQuery({
+    queryKey: ['webhooks'],
+    queryFn: () => api.get<Webhook[]>('/api/webhooks').then((r) => r.data),
+  })
+}
+
+export function useCreateWebhook() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: Partial<Webhook> & { url: string; name: string }) =>
+      api.post('/api/webhooks', data).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhooks'] }),
+  })
+}
+
+export function useUpdateWebhook() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: Partial<Webhook> }) =>
+      api.patch(`/api/webhooks/${id}`, data).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhooks'] }),
+  })
+}
+
+export function useDeleteWebhook() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.delete(`/api/webhooks/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhooks'] }),
+  })
+}
+
+export function useTestWebhook() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/api/webhooks/${id}/test`).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['webhooks'] }),
   })
 }
 

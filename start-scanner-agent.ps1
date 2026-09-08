@@ -10,16 +10,25 @@
 $ErrorActionPreference = 'Stop'
 
 $AgentPy    = Join-Path $PSScriptRoot 'agent\scanner_agent.py'
-$ApiKey     = ($env:SCANNER_AGENT_API_KEY).Trim()   # REQUIRED — generated on agent (re)creation
 $Server     = 'http://localhost:8000'
 $Name       = 'lan-agent'
 $Subnets    = '192.168.1.0/24'
 $PidFile    = Join-Path $env:TEMP 'opencode\agent_pid.txt'
 $OutLog     = Join-Path $env:TEMP 'opencode\agent_out.log'
 $ErrLog     = Join-Path $env:TEMP 'opencode\agent_err.log'
+$KeyFile    = Join-Path $env:TEMP 'opencode\new_agent_key.txt'   # local-only fallback (never committed)
+
+# API key resolution order: 1) SCANNER_AGENT_API_KEY env var, 2) the local key
+# file written when the agent was (re)created. Keeps the secret out of the repo.
+$ApiKey = ''
+if (-not [string]::IsNullOrWhiteSpace($env:SCANNER_AGENT_API_KEY)) {
+    $ApiKey = ($env:SCANNER_AGENT_API_KEY).Trim()
+} elseif (Test-Path -LiteralPath $KeyFile) {
+    $ApiKey = (Get-Content -Raw -LiteralPath $KeyFile).Trim()
+}
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
-    Write-Host 'ERROR: SCANNER_AGENT_API_KEY is not set. Set it to the API key shown when the agent was (re)created.' -ForegroundColor Red
+    Write-Host "ERROR: agent API key not found. Set env SCANNER_AGENT_API_KEY, or place the key in:`n  $KeyFile" -ForegroundColor Red
     exit 1
 }
 

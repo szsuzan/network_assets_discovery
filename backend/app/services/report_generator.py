@@ -39,7 +39,7 @@ DEVICE_TYPE_LABEL = {
     "camera": "IP Camera / NVR",
     "iot": "Smart Appliance / IoT",
     "smart_speaker": "Virtual Assistant / Smart Speaker",
-    "unknown": "Unidentified Host (Private MAC)",
+    "unknown": "Unidentified Host",
     "access_control": "Access Control",
     # legacy keys from scans before the granular taxonomy
     "network_gear": "Router / Gateway",
@@ -47,6 +47,8 @@ DEVICE_TYPE_LABEL = {
     "server": "Physical Server",
     "camera_ip": "IP Camera / NVR",
 }
+
+SEVERITY_ORDER = {"critical": 0, "concerning": 1, "notable": 2, "info": 3}
 
 
 def _esc(value) -> str:
@@ -69,6 +71,42 @@ def _findings_by_severity(findings):
     return counts
 
 
+def _risk_index(findings) -> int:
+    """0-100 weighted disturbance index so the cover tells a story at a glance."""
+    weights = {"critical": 10, "concerning": 6, "notable": 3, "info": 1}
+    if not findings:
+        return 0
+    score = sum(weights.get(f.severity, 1) for f in findings)
+    return max(1, min(100, round(score / (10 * len(findings)) * 100)))
+
+
+FINDING_STATUS_LABEL = {
+    "open": "Open",
+    "triaged": "Triaged",
+    "confirmed": "Confirmed",
+    "remediation_in_progress": "In Remediation",
+    "retest": "Ready for Retest",
+    "resolved": "Resolved",
+    "accepted_risk": "Accepted Risk",
+    "false_positive": "False Positive",
+}
+
+FINDING_STATUS_COLOR = {
+    "open": "#6B7280",
+    "triaged": "#2563EB",
+    "confirmed": "#EA580C",
+    "remediation_in_progress": "#D97706",
+    "retest": "#9333EA",
+    "resolved": "#059669",
+    "accepted_risk": "#64748B",
+    "false_positive": "#9CA3AF",
+}
+
+# Statuses that are excluded from the client-facing summary regardless of the
+# analyst's include-in-report toggle.
+EXCLUDED_REPORT_STATUSES = {"false_positive"}
+
+
 def _hosts_in_report(hosts, findings):
     """Map host_id -> worst severity so the inventory shows risk badges."""
     worst = {}
@@ -84,13 +122,42 @@ def _hosts_in_report(hosts, findings):
     return worst
 
 
-def _build_html(scan, hosts, findings, ports_lookup) -> str:
+def _host_context(host) -> str:
+    """Compact 'ip (hostname · Device)' label used everywhere findings point at
+    a specific host, so the report reads clearly after device-type/hostname
+    enrichment."""
+    parts = [str(host.ip)]
+    if getattr(host, "hostname", None):
+        parts.append(host.hostname)
+    dev = getattr(host, "device_type", None)
+    if dev and dev not in ("unknown", "unidentified") and dev in DEVICE_TYPE_LABEL:
+        parts.append(DEVICE_TYPE_LABEL[dev])
+    return " · ".join(parts)
+
+
+def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    # Only findings explicitly included for the client report are reflected in
+    # the summary, severity table, risk badges and finding blocks. Analysts
+    # toggle this per-finding on the Findings page; false positives are always
+    # kept out of the client-facing summary.
+    reported = [
+        f for f in findings
+        if getattr(f, "included_in_report", True)
+        and getattr(f, "status", "open") not in EXCLUDED_REPORT_STATUSES
+    ]
     total = max(scan.hosts_total_in_scope or 1, 1)
     coverage = round((scan.hosts_discovered or 0) / total * 100)
-    by_sev = _findings_by_severity(findings)
+    by_sev = _findings_by_severity(reported)
+    risk_index = _risk_index(reported)
     breakdown = _device_breakdown(hosts)
-    worst = _hosts_in_report(hosts, findings)
+    excluded = len(findings) - len(reported)
+    named = sum(1 for h in hosts if h.hostname)
+    excl_note = f" · {excluded} finding(s) excluded from this report" if excluded else ""
+
+    device_rows = "".join(
+        f"<tr><td>{_esc(name)}</td><td>{count}</td></tr>" for name, count in breakdown
+    )
 
     sev_rows = "".join(
         f"""
@@ -105,36 +172,68 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
         f"<tr><td>{_esc(name)}</td><td>{count}</td></tr>" for name, count in breakdown
     )
 
-    host_rows = "".join(
-        f"""
-        <tr>
-          <td class="mono">{_esc(h.ip)}</td>
-          <td>{_esc(h.hostname or "—")}</td>
-          <td>{_esc(DEVICE_TYPE_LABEL.get(h.device_type, h.device_type or "Unknown"))}</td>
-          <td>{_esc(h.os_guess or "—")}</td>
-          <td>{cells_for_open_ports(ports_lookup.get(str(h.id), []))}</td>
-          <td>{_esc(SEVERITY_LABEL.get(worst.get(str(h.id), "info"), "Info"))}</td>
-        </tr>"""
-        for h in hosts
-    )
-
     finding_blocks = []
-    if findings:
-        for f in findings:
+    if reported:
+        for f in sorted(reported, key=lambda x: SEVERITY_ORDER.get(x.severity, 9)):
             color = SEVERITY_COLOR.get(f.severity, "#8B95A1")
+            host_ctx = ""
+            if f.host_id:
+                for h in hosts:
+                    if str(h.id) == str(f.host_id):
+                        host_ctx = f'<div class="finding-host mono">Host: {_esc(_host_context(h))}</div>'
+                        break
+            status = getattr(f, "status", "open")
+            status_chip = ""
+            if status and status != "open":
+                status_chip = f'<span class="badge" style="background:{FINDING_STATUS_COLOR.get(status, "#6B7280")}">{FINDING_STATUS_LABEL.get(status, status)}</span>'
+            cve_chips = "".join(
+                f'<span class="chip">{_esc(cve)}</span>' for cve in (f.cve_refs or [])
+            )
+            cvss_row = ""
+            if getattr(f, "cvss_score", None) is not None or getattr(f, "cwe", None):
+                bits = []
+                if getattr(f, "cvss_score", None) is not None:
+                    v = getattr(f, "cvss_vector", None)
+                    bits.append(f'CVSS <b>{f.cvss_score:.1f}</b>')
+                    if v:
+                        bits.append(f'<span class="mono dim">{_esc(v)}</span>')
+                if getattr(f, "cwe", None):
+                    bits.append(f'<span class="thingy">{_esc(f.cwe)}</span>')
+                cvss_row = f'<div class="chips">{" &nbsp; ".join(bits)}</div>'
             finding_blocks.append(f"""
             <div class="finding">
               <div class="finding-head">
                 <span class="badge" style="background:{color}">{SEVERITY_LABEL.get(f.severity, f.severity)}</span>
+                {status_chip}
                 <strong>{_esc(f.title)}</strong>
               </div>
+              {host_ctx}
+              {cvss_row}
               {f"<p>{_esc(f.description)}</p>" if f.description else ""}
+              {f'<p class="mono chip-note">{cve_chips}</p>' if cve_chips else ""}
               {f'<p class="rec"><span>Recommendation:</span> {_esc(f.recommendation)}</p>' if f.recommendation else ""}
             </div>""")
     else:
         finding_blocks.append('<p class="muted">No risk findings were generated for this scan.</p>')
 
     findings_html = "".join(finding_blocks)
+
+    topo_html = ""
+    try:
+        from .topology import compute_topology, topology_svg_data_uri
+        nodes, edges = compute_topology(scan, hosts, findings)
+        if nodes and edges:
+            uri = topology_svg_data_uri(nodes, edges)
+            topo_html = f"""
+  <h2>Network Topology</h2>
+  <div class="topo-block">
+    <img class="topo-img" src="{uri}" alt="Network topology diagram"/>
+    <p class="meta">Subnet zones are inferred from the scan targets. Node borders reflect the
+    worst finding severity on each host; a gateway connects each zone to the Internet.
+    Dash lines link hosts to their subnet.</p>
+  </div>"""
+    except Exception:
+        topo_html = ""
 
     return f"""<!DOCTYPE html>
 <html>
@@ -147,7 +246,14 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
   h2 {{ font-size: 16px; border-bottom: 2px solid #E5E7EB; padding-bottom: 6px; margin: 28px 0 12px; color: #101623; }}
   h3 {{ font-size: 13px; margin: 16px 0 8px; color: #101623; }}
   .subtitle {{ color: #5B6472; font-size: 12px; margin-bottom: 6px; }}
-  .meta {{ color: #8B95A1; font-size: 10px; }}
+  .meta {{ color: #8B95A1; font-size: 10px; line-height: 1.6; }}
+  .confidential {{ margin-top: 10px; padding: 6px 10px; background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; color: #9A3412; font-size: 9px; }}
+  .narrative {{ color: #374151; margin-top: 10px; }}
+  .chip {{ display: inline-block; padding: 1px 6px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 9px; }}
+  .chip-note {{ margin-top: 4px; }}
+  .chips {{ font-size: 10px; color: #374151; margin: 2px 0 4px; }}
+  .thingy {{ display: inline-block; padding: 1px 6px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 9px; }}
+  .dim {{ color: #9CA3AF; font-size: 8px; }}
   .mono {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
   table {{ width: 100%; border-collapse: collapse; margin: 8px 0; }}
   th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #E5E7EB; font-size: 10px; }}
@@ -160,26 +266,46 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
   .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; color: #fff; font-size: 9px; font-weight: 600; text-transform: uppercase; }}
   .finding {{ border: 1px solid #E5E7EB; border-left: 4px solid #8B95A1; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }}
   .finding-head {{ margin-bottom: 6px; }}
+  .finding-host {{ font-size: 10px; color: #6B7280; margin-bottom: 6px; }}
   .finding p {{ margin: 4px 0; color: #374151; }}
   .rec {{ color: #0F766E; }}
   .muted {{ color: #8B95A1; }}
   ul {{ margin: 6px 0 6px 18px; }}
   li {{ margin-bottom: 4px; }}
   .appendix {{ background: #F9FAFB; border-radius: 6px; padding: 12px; }}
+  .topo-block {{ margin: 6px 0 4px; }}
+  .topo-img {{ width: 100%; }}
 </style>
 </head>
 <body>
   <h1>Initial Asset Discovery Report</h1>
   <div class="subtitle">Scan of {_esc(', '.join(scan.targets))}</div>
-  <div class="meta">Profile: <b>{_esc(scan.profile)}</b> &nbsp;·&nbsp; Port range: <b>{_esc(scan.port_range)}</b> &nbsp;·&nbsp; Generated: {now}</div>
+  <div class="meta">
+    Client / Engagement: <b>{_esc(getattr(engagement, "client_name", None) or "—")}</b>
+    &nbsp;·&nbsp; Scan ID: <span class="mono">{_esc(scan.id)}</span><br>
+    Profile: <b>{_esc(scan.profile)}</b> &nbsp;·&nbsp; Port range: <b>{_esc(scan.port_range)}</b>
+    &nbsp;·&nbsp; Started: {_esc(scan.started_at.strftime("%Y-%m-%d %H:%M") if getattr(scan, "started_at", None) else "—")}
+    &nbsp;·&nbsp; Generated: {now}
+  </div>
+  <div class="confidential">CONFIDENTIAL — Prepared for authorized security testing. Distribution restricted to the engagement team and client stakeholders.</div>
 
   <h2>Executive Summary</h2>
   <div class="grid" style="margin-bottom:8px;">
     <div class="stat"><div class="num">{coverage}%</div><div class="lbl">Coverage</div></div>
     <div class="stat"><div class="num">{scan.hosts_discovered or 0}</div><div class="lbl">Hosts Discovered</div></div>
-    <div class="stat"><div class="num">{scan.hosts_total_in_scope or 0}</div><div class="lbl">Hosts In Scope</div></div>
-    <div class="stat"><div class="num">{len(findings)}</div><div class="lbl">Findings</div></div>
+    <div class="stat"><div class="num">{named}</div><div class="lbl">Named Hosts</div></div>
+    <div class="stat"><div class="num">{len(reported)}</div><div class="lbl">Findings</div></div>
+    <div class="stat"><div class="num">{risk_index}</div><div class="lbl">Risk Index (/100)</div></div>
   </div>
+  <p class="narrative">
+    This engagement covered <b>{scan.hosts_total_in_scope or 0}</b> in-scope asset(s) at
+    {_esc(', '.join(scan.targets))}, of which <b>{scan.hosts_discovered or 0}</b> responded to discovery
+    ({coverage}% coverage). Risk analysis of the discovered assets produced <b>{len(reported)}</b> finding(s):
+    {by_sev.get("critical", 0)} critical, {by_sev.get("concerning", 0)} concerning,
+    {by_sev.get("notable", 0)} notable and {by_sev.get("info", 0)} informational
+    (overall risk index {risk_index}/100). Highest-risk assets should be remediated
+    first; each finding below includes context, evidence and a recommendation.
+  </p>
 
   <div class="grid">
     <div>
@@ -197,16 +323,8 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
       </table>
     </div>
   </div>
-
-  <h2>Asset Inventory</h2>
-  <table>
-    <thead>
-      <tr><th>IP</th><th>Hostname</th><th>Device Type</th><th>OS Guess</th><th>Open Ports</th><th>Risk</th></tr>
-    </thead>
-    <tbody>{host_rows or '<tr><td colspan="6">No hosts discovered</td></tr>'}</tbody>
-  </table>
-
-  <h2>Risk Findings</h2>
+{topo_html}
+  <h2>Risk Findings<span class="muted"> ({len(reported)} shown{excl_note})</span></h2>
   {findings_html}
 
   <h2>Coverage &amp; Limitations</h2>
@@ -214,6 +332,8 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
     <li>Hosts that filter ICMP may not be detected by discovery.</li>
     <li>Passive-only scans do not enumerate open ports.</li>
     <li>OS and banner identification depends on scan timing and host responses.</li>
+    <li>Devices using privacy-randomised MAC addresses hide their vendor; hostnames
+        are then inferred from mDNS/DHCP service announcements where available.</li>
     <li>Only targets within the engagement's authorized scope were scanned.</li>
   </ul>
 
@@ -221,10 +341,11 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
   <div class="appendix">
     <p>Assets were discovered and fingerprinted using the following methodology:</p>
     <ul>
-      <li><b>Discovery:</b> ARP sweep (local subnets) and TCP SYN probes to common ports (routed subnets).</li>
+      <li><b>Discovery:</b> ARP sweep (local subnets) and TCP SYN probes to common ports (routed subnets), cross-referenced against live Layer-2 scanner agents on the target LAN.</li>
+      <li><b>Naming:</b> passive mDNS service enumeration, DHCP/DHCPv6 client traffic and SNMP sysName used to recover hostnames even when MACs are privacy-randomised.</li>
       <li><b>Port scan:</b> Nmap connect/syn scans of the configured port range, with service/version/OS detection (<span class="mono">-sV -sC -O</span>) applied only to open ports.</li>
-      <li><b>Fingerprinting:</b> MAC vendor lookup (OUI), SNMP walks on UDP 161, device-type classification heuristic.</li>
-      <li><b>Risk analysis:</b> Default SNMP community checks, banner version comparison against a curated outdated-software table, exposed admin panel and unencrypted protocol detection.</li>
+      <li><b>Fingerprinting:</b> MAC vendor lookup (OUI), SNMP walks on UDP 161, and device-type classification into a granular taxonomy (router/switch/AP, laptop vs. smartphone/tablet, server vs. VM, camera/NVR, smart TV/IoT, VoIP, NAS, printer, access control).</li>
+      <li><b>Risk analysis:</b> Nmap NSE evidence (SSL/SSH crypto strength, certificates, SMB signing and shares, anonymous FTP, HTTP method and admin-panel detection, authentication checks) combined with heuristic rules (default SNMP community, unencrypted protocols RTSP/SIP/Telnet/FTP/HTTP/SMB, outdated-software banner matching). Every rule is tunable per scan — operators can disable a rule or override its severity before re-analysis.</li>
     </ul>
     <p>Tools: Nmap, Scapy, pysnmp, Wireshark OUI database.</p>
     <p class="meta">This report is a discovery/fingerprinting artifact for authorized security testing. It contains no exploitation or credential-brute-force activity.</p>
@@ -236,10 +357,18 @@ def _build_html(scan, hosts, findings, ports_lookup) -> str:
 def cells_for_open_ports(ports) -> str:
     if not ports:
         return "—"
-    return "".join(f'<span class="mono">{p.port}/{p.protocol} </span>' for p in ports)
+    shown = list(ports)[:6]
+    extra = len(list(ports)) - len(shown)
+    cells = "".join(
+        f'<span class="mono">{p.port}/{p.protocol}{("·" + _esc(p.service)) if getattr(p, "service", None) else ""} </span>'
+        for p in shown
+    )
+    if extra > 0:
+        cells += f'<span class="mono">+{extra} more</span>'
+    return cells
 
 
-def generate_report(scan, hosts, findings, ports_lookup=None) -> bytes:
+def generate_report(scan, hosts, findings, ports_lookup=None, engagement=None) -> bytes:
     """Render the report to PDF bytes.
 
     Uses WeasyPrint when available. On any import/failure, returns a minimal
@@ -248,7 +377,7 @@ def generate_report(scan, hosts, findings, ports_lookup=None) -> bytes:
     if ports_lookup is None:
         ports_lookup = {}
 
-    html_doc = _build_html(scan, hosts, findings, ports_lookup)
+    html_doc = _build_html(scan, hosts, findings, ports_lookup, engagement)
 
     try:
         from weasyprint import HTML as WeasyHTML

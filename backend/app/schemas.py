@@ -99,7 +99,11 @@ class ScanOut(BaseModel):
     hosts_discovered: int
     progress_pct: int
     started_at: Optional[datetime] = None
+    reverify_started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    total_paused_seconds: int = 0
+    open_ports_count: int = 0
+    pass_history: List[dict] = []
     started_by: Optional[uuid.UUID] = None
     verified_at: Optional[datetime] = None
     created_at: datetime
@@ -159,6 +163,9 @@ class FindingOut(BaseModel):
     scan_id: uuid.UUID
     host_id: Optional[uuid.UUID] = None
     host_ip: Optional[str] = None
+    host_hostname: Optional[str] = None
+    host_device_type: Optional[str] = None
+    host_mac: Optional[str] = None
     severity: str
     type: str
     title: str
@@ -167,6 +174,13 @@ class FindingOut(BaseModel):
     cve_refs: Optional[List[str]] = None
     port: Optional[int] = None
     included_in_report: bool
+    status: str
+    cvss_vector: Optional[str] = None
+    cvss_score: Optional[float] = None
+    cwe: Optional[str] = None
+    notes: Optional[str] = None
+    evidence: Optional[dict] = None
+    updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -174,6 +188,66 @@ class FindingOut(BaseModel):
 class FindingPatch(BaseModel):
     included_in_report: Optional[bool] = None
     recommendation: Optional[str] = None
+    severity: Optional[str] = None
+    status: Optional[str] = None
+    cvss_vector: Optional[str] = None
+    cvss_score: Optional[float] = None
+    cwe: Optional[str] = None
+    notes: Optional[str] = None
+
+class FindingAuditOut(BaseModel):
+    id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    action: str
+    field: Optional[str] = None
+    old_value: Optional[str] = None
+    new_value: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+class RiskRuleOut(BaseModel):
+    key: str
+    label: str
+    description: Optional[str] = None
+    kind: str
+    default_severity: str
+    enabled: bool
+    severity: Optional[str] = None  # operator override, or None for default
+
+class RiskRulePatch(BaseModel):
+    key: str
+    enabled: Optional[bool] = None
+    severity: Optional[str] = None  # null / "" resets to rule default
+
+class WebhookOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    url: str
+    events: List[str]
+    enabled: bool
+    created_at: datetime
+    last_triggered_at: Optional[datetime] = None
+    last_status: Optional[int] = None
+    last_error: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class WebhookCreate(BaseModel):
+    name: str
+    url: str
+    secret: Optional[str] = None
+    events: List[str] = ["finding_created", "finding_updated"]
+    enabled: bool = True
+
+class WebhookPatch(BaseModel):
+    name: Optional[str] = None
+    url: Optional[str] = None
+    secret: Optional[str] = None
+    events: Optional[List[str]] = None
+    enabled: Optional[bool] = None
 
 class AuditLogOut(BaseModel):
     id: uuid.UUID

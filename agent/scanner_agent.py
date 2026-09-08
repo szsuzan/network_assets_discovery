@@ -189,6 +189,9 @@ MDNS_SERVICES = [
     "_spotify-connect._tcp.local",         # Spotify cast
     "_sonos._tcp.local",                   # Sonos speaker
     "_meshcop._udp.local",                 # Thread border router
+    "_device-info._tcp.local",             # human-readable device name (iOS/Android)
+    "_device-info._udp.local",             # same, UDP incarnation (most Android builds)
+    "_apple-mobdev2._tcp.local",           # iPhone proximity pairing
     "_ipp._tcp.local", "_printer._tcp.local", "_pdl-datastream._tcp.local",  # printers
     "_scanner._tcp.local",                 # scanner
     "_smb._tcp.local", "_adisk._tcp.local",  # file share / NAS
@@ -211,6 +214,8 @@ _MDNS_TYPE_HINTS = [
     ("_adisk", "nas"),                                   # Apple time-machine / NAS
     ("_smb", "nas"),
     ("_meshcop", "network_gear"),                        # Thread border router
+    ("_device-info", "mobile"),                          # phone/tablet display name + model
+    ("_apple-mobdev2", "mobile"),                        # iPhone proximity
     ("_googlecast", "media"),                            # cast-capable display/TV
     ("_amzn-wplay", "media"),
     ("_spotify-connect", "media"),
@@ -286,6 +291,71 @@ def _mdns_parse_txt(rd: bytes) -> List[str]:
     return out
 
 
+def _mdns_packet_info(data: bytes):
+    """Parse one raw mDNS UDP payload -> {services, hostnames, txt} or None.
+
+    Answer/Additional records carry the device's facts: A/AAAA owners are the
+    device's own hostname, PTR owners are the service types it offers, and TXT
+    records its attributes. Pure query echoes (no answer records) are skipped."""
+    if len(data) < 12:
+        return None
+    try:
+        qd, an, ns, ar = struct.unpack(">HHHH", data[4:12])
+    except Exception:
+        return None
+    if an + ar == 0:
+        return None  # pure query echo from the local host OS, not a device
+    info = {"services": set(), "hostnames": set(), "txt": set(), "instances": set(),
+            "inst2svc": {}, "model": None}
+    try:
+        off = 12
+        for _ in range(qd):
+            _, off = _mdns_decode_name(data, off)
+            off += 4
+
+        def _rr(msg, off):
+            name, off = _mdns_decode_name(msg, off)
+            if off + 10 > len(msg):
+                return None, off
+            rtype, _, _, rdlen = struct.unpack(">HHIH", msg[off:off + 10])
+            off += 10
+            rd = msg[off:off + rdlen]
+            return (name, rtype, rd), off + rdlen
+
+        for _ in range(an + ns + ar):
+            rr, off = _rr(data, off)
+            if not rr:
+                continue
+            name, rtype, rd = rr
+            nl = name.lower()
+            if rtype == 1 or rtype == 28:  # A / AAAA
+                info["hostnames"].add(name)
+            elif rtype == 12:  # PTR owner is a service name
+                info["services"].add(nl)
+            elif rtype in (33, 16):  # SRV / TXT owner = <inst>.<service>
+                # store full name; type-hint matching uses substring later
+                info["services"].add(nl)
+                # the instance part ("<name>._service._tcp.local") is the
+                # human-readable device name most mDNS devices advertise -
+                # a second name source when A/AAAA never appears.
+                if "." in name:
+                    inst = name.split(".", 1)[0]
+                    if inst:
+                        info["instances"].add(inst)
+                        info["inst2svc"][inst] = nl
+                if rtype == 16:
+                    info["txt"].update(_mdns_parse_txt(rd))
+    except Exception:
+        return None
+    # TV/phone model attributes: TXT `model=Xiaomi Redmi Note 8`, `mdl=...`
+    # (especially from `_device-info`) gives the same label the router shows.
+    for raw in sorted(info["txt"]):
+        key, _, val = raw.partition("=")
+        if key.lower() in ("model", "mdl", "device", "mf") and val and not info["model"]:
+            info["model"] = " ".join(val.split())
+    return info
+
+
 def mdns_probe(duration: float = 20.0, interval: float = 0.6) -> dict:
     """Actively query mDNS on the local subnet and collect per-IP hints.
 
@@ -326,47 +396,14 @@ def mdns_probe(duration: float = 20.0, interval: float = 0.6) -> dict:
                 continue
             except Exception:
                 break
-            if len(data) < 12:
+            info = _mdns_packet_info(data)
+            if info is None:
                 continue
-            try:
-                qd, an, ns, ar = struct.unpack(">HHHH", data[4:12])
-            except Exception:
-                continue
-            if an + ar == 0:
-                continue  # pure query echo from the local host OS, not a device
-            info = per_ip.setdefault(addr[0], {"services": set(), "hostnames": set(), "txt": set()})
-            try:
-                off = 12
-                for _ in range(qd):
-                    _, off = _mdns_decode_name(data, off)
-                    off += 4
-
-                def _rr(msg, off):
-                    name, off = _mdns_decode_name(msg, off)
-                    if off + 10 > len(msg):
-                        return None, off
-                    rtype, _, _, rdlen = struct.unpack(">HHIH", msg[off:off + 10])
-                    off += 10
-                    rd = msg[off:off + rdlen]
-                    return (name, rtype, rd), off + rdlen
-
-                for _ in range(an + ns + ar):
-                    rr, off = _rr(data, off)
-                    if not rr:
-                        continue
-                    name, rtype, rd = rr
-                    nl = name.lower()
-                    if rtype == 1 or rtype == 28:  # A / AAAA
-                        info["hostnames"].add(name)
-                    elif rtype == 12:  # PTR owner is a service name
-                        info["services"].add(nl)
-                    elif rtype in (33, 16):  # SRV / TXT owner = <inst>.<service>
-                        # store full name; type-hint matching uses substring later
-                        info["services"].add(nl)
-                        if rtype == 16:
-                            info["txt"].update(_mdns_parse_txt(rd))
-            except Exception:
-                continue
+            entry = per_ip.setdefault(addr[0], {"services": set(), "hostnames": set(), "txt": set(), "instances": set()})
+            entry["services"].update(info["services"])
+            entry["hostnames"].update(info["hostnames"])
+            entry["txt"].update(info["txt"])
+            entry["instances"].update(info.get("instances") or ())
     finally:
         try:
             s.close()
@@ -380,12 +417,30 @@ def mdns_device_hint(info: dict) -> (Optional[str], Optional[str]):
 
     hostname hint comes from an A/AAAA record (e.g. `Android_XXXX.local`),
     which reveals the device's mDNS hostname even when the MAC is randomised.
-    Empty strings mean 'no signal' and are left unset by the caller."""
+    Falls back to the SRV/TXT owner instance name (`DESKTOP-ABC._workstation.
+    _tcp.local` -> DESKTOP-ABC). Empty strings mean 'no signal' and are left
+    unset by the caller."""
     hostname = ""
+    # Prefer the human-readable service instance (e.g. `_device-info` gives
+    # "OnePlus Nord CE 3 5G") - the closest we get to the router's labels.
+    best = None
+    for inst, svc in (info.get("inst2svc") or {}).items():
+        if "_device-info" in svc and not best:
+            best = inst
+    if best:
+        import re as _re
+        if not _re.fullmatch(r"[0-9a-f\\-]{6,}", best) and not best.startswith(("_", ".")):
+            hostname = best
     for h in info.get("hostnames") or ():
-        if h.lower().endswith(".local"):
+        if not hostname and h.lower().endswith(".local"):
             hostname = h[: -len(".local")]
-            break
+    if not hostname:
+        import re as _re
+        for inst in (info.get("instances") or ()):
+            if inst and not _re.fullmatch(r"[0-9a-f\\-]{6,}", inst) \
+               and not inst.startswith(("_", ".")):
+                hostname = inst
+                break
     services = info.get("services") or ()
     dev = None
     for key, kind in _MDNS_TYPE_HINTS:
@@ -425,7 +480,7 @@ def mdns_observe(probe_duration: float = 10.0, interval: float = 0.6):
             cur = _mdns_shared.get(ip)
             if cur is None:
                 cur = _mdns_shared[ip] = {
-                    "hostname": None, "device_type": None,
+                    "hostname": None, "device_type": None, "model": None,
                     "services": set(), "last_seen": now,
                 }
             cur["services"].update(info.get("services") or ())
@@ -433,25 +488,144 @@ def mdns_observe(probe_duration: float = 10.0, interval: float = 0.6):
                 cur["hostname"] = hn
             if dev and not cur["device_type"]:
                 cur["device_type"] = dev
+            if info.get("model") and not cur["model"]:
+                cur["model"] = info["model"]
             cur["last_seen"] = now
 
 
 def mdns_snapshot():
     """Return a copy of the shared map in the shape execute_task consumes:
-    {ip: {"hostname": str|None, "device_type": str|None}}."""
+    {ip: {"hostname": str|None, "device_type": str|None, "model": str|None}}."""
     with mdns_lock:
-        return {ip: {"hostname": c["hostname"], "device_type": c["device_type"]}
+        return {ip: {"hostname": c["hostname"], "device_type": c["device_type"],
+                     "model": c.get("model")}
                 for ip, c in _mdns_shared.items()}
 
 
+def _mdns_observe_scapy(duration: float = 12.0):
+    """Capture mDNS over a raw snaplen sniff (bypasses the host firewall that
+    silently drops inbound UDP 5353 multicast on Windows) and fold every device
+    packet into the shared map. Also grabs announcements from OTHER hosts'
+    queries/responses, not just answers to our own probes.
+
+    While sniffing we ALSO actively re-send the service enumeration query over
+    a plain UDP socket (sending is not firewall-blocked on Windows, only the
+    socket receive is) so devices respond - and the sniff catches those
+    answers that the socket layer would have dropped."""
+    try:
+        from scapy.all import sniff
+    except Exception:
+        return False
+    import threading as _th
+
+    sock = None
+    try:
+        q = _mdns_build_query(MDNS_SERVICES)
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", MDNS_PORT))
+        mreq = struct.pack("4s4s", socket.inet_aton(MDNS_GROUP), socket.inet_aton("0.0.0.0"))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        sock.settimeout(0.05)
+    except Exception:
+        try:
+            sock and sock.close()
+        except Exception:
+            pass
+        sock = None
+        q = None
+
+    stop = _th.Event()
+
+    def _sniff():
+        try:
+            sniff(filter="udp port 5353", store=0,
+                  timeout=max(2, int(duration) + 4),
+                  prn=lambda p: _mdns_fold_packet(p))
+        except Exception:
+            pass
+        stop.set()
+
+    t = _th.Thread(target=_sniff, daemon=True)
+    t.start()
+    end = time.time() + max(2, int(duration))
+    try:
+        while time.time() < end and not stop.is_set():
+            if sock is not None and q is not None:
+                try:
+                    sock.sendto(q, (MDNS_GROUP, MDNS_PORT))
+                except Exception:
+                    pass
+            time.sleep(0.5)
+    finally:
+        try:
+            sock and sock.close()
+        except Exception:
+            pass
+    t.join(timeout=2)
+    return t.is_alive() or stop.is_set()
+
+
+def _mdns_fold_packet(pkt):
+    try:
+        if not pkt.haslayer("UDP"):
+            return
+        udp = pkt["UDP"]
+        if udp.sport != MDNS_PORT and udp.dport != MDNS_PORT:
+            return
+        ip = pkt.getlayer("IP")
+        if ip is None:
+            return
+        src = ip.src
+        if not src or src == "0.0.0.0":
+            return
+        info = _mdns_packet_info(bytes(udp.payload))
+        if info is None:
+            return
+        _mdns_fold_raw(src, info)
+    except Exception:
+        pass
+
+
+def _mdns_fold_raw(ip: str, info: dict):
+    """Accumulate a parsed mDNS packet (from any source, socket or sniff) into
+    the shared per-IP map, exactly like mdns_observe does for probe results."""
+    hn, dev = mdns_device_hint(info)
+    now = time.time()
+    with mdns_lock:
+        cur = _mdns_shared.get(ip)
+        if cur is None:
+            cur = _mdns_shared[ip] = {
+                "hostname": None, "device_type": None, "model": None,
+                "services": set(), "last_seen": now,
+            }
+        cur["services"].update(info.get("services") or ())
+        if hn and not cur["hostname"]:
+            cur["hostname"] = hn
+        if dev and not cur["device_type"]:
+            cur["device_type"] = dev
+        if info.get("model") and not cur["model"]:
+            cur["model"] = info["model"]
+        cur["last_seen"] = now
+
+
 def _run_mdns_sweeper(probe_duration: float = 10.0, gap: float = 5.0, stop_evt=None):
-    """Background thread: continuously re-probe mDNS and accumulate into the
-    shared map. Runs until stop_evt is set (or forever if None)."""
+    """Background thread: continuously capture mDNS and accumulate into the
+    shared map. Prefers the raw scapy sniff (reliable on Windows where the
+    UDP-socket receive is firewall-blocked); falls back to socket probing when
+    scapy is unavailable. Runs until stop_evt is set (or forever if None)."""
+    sniff_ok = False
     while True:
         if stop_evt and stop_evt.is_set():
             return
         try:
-            mdns_observe(probe_duration, 0.6)
+            if not sniff_ok:
+                if _mdns_observe_scapy(probe_duration):
+                    sniff_ok = True
+                else:
+                    mdns_observe(probe_duration, 0.6)
+            else:
+                _mdns_observe_scapy(probe_duration)
         except Exception:
             pass  # never let the sweeper crash the agent
         if gap > 0:
@@ -778,6 +952,13 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     named = sum(1 for h in mdns_hints.values() if h["hostname"] or h["device_type"])
     client.log(task_id, f"Phase 0/3: {len(mdns_hints)} known mDNS device(s), {named} usable hint(s)", level="out")
 
+    # Nudge IPv6-capable clients into DHCPv6 (SOLICIT on UDP 547) so the
+    # passive sweeper can hear their Client-FQDN — the router-grade name.
+    # Rate-limited internally to ~once/90s; replies fold during the scan and
+    # are picked up by the refreshed snapshot at Finalise.
+    if _dhcp6_nudge(_pick_passive_iface(targets)):
+        client.log(task_id, "DHCPv6 RA nudge sent (M flag) - asking clients to reveal names", level="cmd")
+
     # Passive evidence harvested between scans (DHCP / ARP / CDP / LLDP). MAC-keyed
     # fingerprints (network gear announcing itself via CDP/LLDP, DHCP on privacy
     # MACs) are cross-referenced onto the IPs ARP discovery just resolved (the fold
@@ -794,6 +975,8 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
                 h["hostname"] = hint["hostname"]
             if hint["device_type"] and not h.get("device_type"):
                 h["device_type"] = hint["device_type"]
+            if hint.get("model") and not h.get("hostname"):
+                h["hostname"] = hint["model"]
         if phint:
             if phint.get("hostname") and not h.get("hostname"):
                 h["hostname"] = phint["hostname"]
@@ -839,8 +1022,18 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     # while it was awake - is definitively up even if ARP -sn missed it
     # (power-save radios often ignore ARP pings but do answer multicast/DHCP),
     # and carrying its hints lets us name a random-MAC device that would
-    # otherwise be dropped entirely.
-    extra = (set(mdns_hints.keys()) | set(passive_by_ip.keys())) - set(live.keys())
+    # otherwise be dropped entirely. Kept inside the target networks so an
+    # mDNS/passive hint from another VLAN cannot leak an out-of-scope host in.
+    scope_nets = []
+    for t in targets:
+        try:
+            scope_nets.append(ipaddress.ip_network(t, strict=False))
+        except Exception:
+            pass  # plain host target -> no fold beyond it, conservatively
+    in_scope = (lambda ip: True) if not scope_nets else (
+        lambda ip: any(ipaddress.ip_address(ip) in n for n in scope_nets))
+    extra = {ip for ip in (set(mdns_hints.keys()) | set(passive_by_ip.keys())) - set(live.keys())
+             if in_scope(ip)}
     if extra:
         client.log(task_id, f"Observed-but-invisible host(s) added: {', '.join(sorted(extra))}", level="out")
     for ip in extra:
@@ -991,6 +1184,9 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
                 client.log(task_id, f"Partial host post failed: {e}", level="err")
 
     # ---- Finalise -------------------------------------------------------------
+    # Re-read passive evidence: the RA nudge + background sweeps may have
+    # surfaced DHCPv6/DHCP hostnames during the scan window.
+    passive_by_ip = dict(passive_snapshot()["by_ip"])
     remaining = [_decorate(h) for ip, h in [
         (ip, {"ip": ip, "mac": meta.get("mac"), "vendor": meta.get("vendor"),
               "status": "up",
@@ -1104,73 +1300,81 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
         for h in parse_discovery(xml):
             if h.get("state") == "up":
                 alive.append(h)
-        client.log(task_id, f"  {len(alive)} previously-down host(s) now responding", level="out")
-        for meta in alive:
-            if not _await_go(client, task_id):
-                return
-            client.log(task_id, f"  re-verifying now-up host {meta['ip']} (full pipeline)")
-            # TCP port scan
-            p_args = ["nmap", "-sT" if use_connect else "-sS", "-p", "1-10000",
-                      "--open", PROBE_TIMING.get(profile, "-T4"),
-                      "--host-timeout", "45s", "-oX", "-", meta["ip"]]
-            pxml = run_nmap(p_args)
-            found = []
-            try:
-                import xml.etree.ElementTree as _ET
-                root = _ET.fromstring(pxml)
-                for port in root.findall(".//port"):
-                    if (port.find("state") is not None
-                            and port.find("state").get("state") == "open"):
-                        found.append(port.get("portid"))
-            except Exception:
-                pass
-            meta.setdefault("ports", [])
-            if found:
-                host = _deep_scan_host(client, task_id, meta["ip"], meta,
-                                       ",".join(found), use_connect, profile)
-                if host:
-                    newly_up.append(meta["ip"])
-                    client.log(task_id, f"  {meta['ip']}: {len(host['ports'])} open port(s)")
-            else:
-                # no open ports on a now-up host -> just stream MAC/vendor
-                try:
-                    client.result(task_id, [{"ip": meta["ip"], "mac": meta.get("mac"),
-                                             "vendor": meta.get("vendor"),
-                                             "status": "up", "ports": []}],
-                                  status="partial", notes="host")
-                    newly_up.append(meta["ip"])
-                except Exception as e:
-                    client.log(task_id, f"Partial post failed: {e}", level="err")
+        client.log(task_id, f"  {len(alive)} previously-down host(s) now responding")
+        scan_type_a = "-sT" if use_connect else "-sS"
+        timing_a = PROBE_TIMING.get(profile, "-T4")
+        client.log(task_id, f"  re-checking now-up host(s) (full pipeline), {PHASE2_WORKERS} parallel worker(s)")
 
-    # ---- Phase B: sweep unscanned ports on the up hosts ----
+        def _rv_down_worker(meta_ip):
+            ip, meta = meta_ip
+            if not _await_go(client, task_id):
+                return None
+            p_args = ["nmap", scan_type_a, "-p", "1-10000",
+                      "--open", timing_a,
+                      "--host-timeout", "45s", "-oX", "-", ip]
+            pxml = run_nmap(p_args)
+            found = _parse_open_ports(pxml)
+            if not found:
+                # no open ports on a now-up host -> just stream MAC/vendor
+                if meta and meta.get("mac"):
+                    try:
+                        client.result(task_id, [{"ip": ip, "mac": meta.get("mac"),
+                                                 "vendor": meta.get("vendor"),
+                                                 "status": "up", "ports": []}],
+                                      status="partial", notes="host")
+                    except Exception as e:
+                        client.log(task_id, f"Partial post failed: {e}", level="err")
+                return {"ip": ip, "ports": []}
+            return _deep_scan_host(client, task_id, ip, meta or {},
+                                   ",".join(found), use_connect, profile) or {"ip": ip, "ports": []}
+
+        for (ip, _meta), host in _map_hosts(_rv_down_worker, [(a["ip"], a) for a in alive],
+                                            PHASE2_WORKERS, client, task_id, "re-verify-up"):
+            if host is None:
+                client.log(task_id, "Scan stopped by user", level="warn")
+                break
+            newly_up.append(ip)
+            client.log(task_id, f"  {ip}: {len(host.get('ports', []))} open port(s)")
+
+    # ---- Phase B: sweep unscanned ports on the up hosts (parallel) ----
     if sweep_spec and up_ips:
         if not _await_go(client, task_id):
             return
-        client.log(task_id, f"Phase B: sweeping unscanned ports {sweep_spec} on {len(up_ips)} up host(s)")
-        for ip in up_ips:
+        scan_type_b = "-sT" if use_connect else "-sS"
+        timing_b = PROBE_TIMING.get(profile, "-T4")
+        client.log(task_id, f"Phase B: sweeping unscanned ports {sweep_spec} on {len(up_ips)} up host(s), {PHASE2_WORKERS} parallel worker(s)")
+
+        def _rv_sweep_worker(ip_meta):
+            ip, _meta = ip_meta
             if not _await_go(client, task_id):
-                return
-            p_args = ["nmap", "-sT" if use_connect else "-sS", "-p", sweep_spec,
-                      "--open", PROBE_TIMING.get(profile, "-T4"),
-                      "--host-timeout", "45s", "-oX", "-", ip]
-            client.log(task_id, " ".join(p_args), level="cmd")
-            pxml = run_nmap(p_args)
-            found = []
-            try:
-                import xml.etree.ElementTree as _ET
-                root = _ET.fromstring(pxml)
-                for port in root.findall(".//port"):
-                    if (port.find("state") is not None
-                            and port.find("state").get("state") == "open"):
-                        found.append(port.get("portid"))
-            except Exception:
-                pass
+                return None
+            args = ["nmap", scan_type_b, "-p", sweep_spec, "--open", timing_b,
+                    "--host-timeout", "45s", "-oX", "-", ip]
+            client.log(task_id, " ".join(args), level="cmd")
+            pxml = run_nmap(args)
+            found = _parse_open_ports(pxml)
+            if found:
+                _deep_scan_host(client, task_id, ip, {"mac": None, "vendor": None},
+                                ",".join(found), use_connect, profile)
+            return found
+
+        leftover_done = 0
+        leftover_total = max(len(up_ips), 1)
+        for (ip, _meta), found in _map_hosts(_rv_sweep_worker, [(ip, {}) for ip in up_ips],
+                                             PHASE2_WORKERS, client, task_id, "leftover-sweep"):
+            if found is None:
+                client.log(task_id, "Scan stopped by user", level="warn")
+                break
+            leftover_done += 1
             if not found:
                 client.log(task_id, f"  {ip}: no hidden open ports in leftover range")
-                continue
-            client.log(task_id, f"  {ip}: hidden open port(s) in leftover range: {','.join(found)}")
-            _deep_scan_host(client, task_id, ip, {"mac": None, "vendor": None},
-                            ",".join(found), use_connect, profile)
+            else:
+                client.log(task_id, f"  {ip}: hidden open port(s) in leftover range: {','.join(map(str, found))}")
+            try:
+                client.result(task_id, [], status="partial", notes="progress",
+                              progress=min(99, int(40 + 60 * leftover_done / leftover_total)))
+            except Exception:
+                pass
 
     # ---- Finalise ----
     try:
@@ -1269,19 +1473,34 @@ def _ip_in_subnet(ip: str, cidr: str) -> bool:
 def _pick_passive_iface(subnets: List[str]) -> Optional[str]:
     """Pick the local interface whose IPv4 address sits inside the advertised
     subnets (that is the LAN we must sniff). Returns None when Scapy is missing
-    or no interface matches."""
+    or no interface is useable at all."""
     try:
         from scapy.all import get_if_addr, get_if_list
     except Exception:
         return None
+    candidates = []
     for iface in get_if_list():
         try:
             addr = get_if_addr(iface)
         except Exception:
             continue
-        if addr and addr != "0.0.0.0" and any(_ip_in_subnet(addr, s) for s in subnets):
+        if addr and addr != "0.0.0.0":
+            candidates.append((iface, addr))
+    for iface, addr in candidates:
+        if any(_ip_in_subnet(addr, s) for s in subnets):
             return iface
-    return None
+    # No adapter matched the subnet (e.g. VPN/VM adapters came first) - fall
+    # back to the first usable LAN/private adapter rather than disabling
+    # passive evidence entirely. Sniffing the wrong L2 is harmless: the packet
+    # handler scopes every result back through the target subnets anyway.
+    import ipaddress as _ipa
+    for iface, addr in candidates:
+        try:
+            if _ipa.ip_address(addr).is_private:
+                return iface
+        except Exception:
+            continue
+    return candidates[0][0] if candidates else None
 
 
 def _vci_hint(vci: str):
@@ -1333,7 +1552,72 @@ def _parse_dhcp_options(options):
             hostname = _clean_str(val if isinstance(val, bytes) else str(val).encode())
         elif key == "vendor_class_id" and not vci:
             vci = _clean_str(val if isinstance(val, bytes) else str(val).encode(), limit=64)
+        elif key in (81, "client_fqdn", "fqdn", "option_81") and not hostname:
+            # RFC 4702 client FQDN: flags(1) + keytag(1) + name (DNS wire).
+            h = _parse_fqdn_option(val if isinstance(val, bytes) else b"")
+            if h:
+                hostname = h
     return hostname, vci
+
+
+def _dns_wire_name(buf: bytes):
+    """Decode one DNS wire-format name -> dot-joined string (or None)."""
+    parts = []
+    i = 0
+    while i < len(buf):
+        n = buf[i]
+        i += 1
+        if n == 0:
+            return ".".join(parts) or None
+        if n > 63 or i + n > len(buf):
+            return None
+        lab = buf[i:i + n].decode("utf-8", "replace")
+        if "\x00" in lab:
+            return None
+        parts.append(lab)
+        i += n
+    return None
+
+
+def _parse_fqdn_option(val: bytes) -> Optional[str]:
+    """Client-FQDN option payload (flags + optional keytag + DNS-wire name).
+
+    The name always starts AFTER the flags byte (RFC 4702: flags, optional
+    keytag/len field, then the wire-form name). Try the two plausible offsets
+    (flags only, or flags + keytag) and return the first clean decode."""
+    if not val:
+        return None
+    for start in (2 if len(val) >= 3 else 1, 1):
+        if start >= len(val):
+            continue
+        n = _dns_wire_name(val[start:])
+        if n:
+            return n
+    return None
+
+
+def _parse_dhcp6_fqdn(payload: bytes) -> Optional[str]:
+    """Hostname from a DHCPv6 SOLICIT/REQUEST (client-to-server, port 547):
+    option 39 (Client FQDN) carries the client's name the router knows."""
+    try:
+        if len(payload) < 4 or payload[0] not in (1, 3, 5, 7, 11, 13):
+            return None
+        o = 4  # msg-type(1) + transaction-id(3)
+        while o + 4 <= len(payload):
+            code = int.from_bytes(payload[o:o + 2], "big")
+            ln = int.from_bytes(payload[o + 2:o + 4], "big")
+            o += 4
+            if o + ln > len(payload):
+                break
+            val = payload[o:o + ln]
+            o += ln
+            if code == 39:
+                n = _parse_fqdn_option(val)
+                if n:
+                    return n
+    except Exception:
+        pass
+    return None
 
 
 def _parse_cdp(payload: bytes) -> dict:
@@ -1476,6 +1760,29 @@ def _passive_packet(pkt, subnets: List[str]):
                     })
                     _guard = True
 
+        # DHCPv6: Android/iOS negotiate IPv6 DNS by multicasting SOLICIT/REQUEST
+        # (ff02::1:2, src ff02::1:2/port 547) to the router - visible to any
+        # listener on the L2, unlike unicast DHCPv4 renewals. The Client-FQDN
+        # option (39) is the very hostname the router's DHCP table shows.
+        if pkt.haslayer("UDP"):
+            udp6 = pkt["UDP"]
+            if udp6.dport == 547:
+                try:
+                    fqdn = _parse_dhcp6_fqdn(bytes(udp6.payload))
+                except Exception:
+                    fqdn = None
+                if fqdn:
+                    eth6 = pkt.getlayer(Ether)
+                    mac6 = (eth6.src or "").lower() if eth6 else ""
+                    if mac6 and "ff" * 3 != mac6:
+                        with _PASSIVE_LOCK:
+                            rec = _passive_shared["by_mac"].setdefault(
+                                mac6, {"hostname": None, "os_guess": None,
+                                       "device_type": None, "vendor": None,
+                                       "port_id": None, "last_seen": 0.0})
+                            _passive_record(rec, {"hostname": fqdn})
+                            _guard = True
+
         if pkt.haslayer(Ether):
             eth = pkt[Ether]
             src_mac = (eth.src or "").lower()
@@ -1555,7 +1862,7 @@ def _passive_observe(duration: float, subnets: List[str], iface: Optional[str]):
         return
 
     filters = [
-        "arp or (udp and (port 67 or port 68)) or (ether proto 0x88cc) or (ether dst 01:00:0c:cc:cc:cc)",
+        "arp or (udp and (port 67 or port 68 or port 547)) or (ether proto 0x88cc) or (ether dst 01:00:0c:cc:cc:cc)",
         "arp or udp or ether proto 0x88cc",
         None,
     ]
@@ -1600,6 +1907,46 @@ def passive_snapshot() -> dict:
             "by_ip": {ip: {k: v for k, v in e.items()} for ip, e in _passive_shared["by_ip"].items()},
             "by_mac": {m: {k: v for k, v in e.items()} for m, e in _passive_shared["by_mac"].items()},
         }
+
+
+_RA_NUDGE_LOCK = threading.Lock()
+_RA_NUDGE_LAST = 0.0
+
+
+def _dhcp6_nudge(iface: Optional[str], min_gap_s: float = 90.0) -> bool:
+    """Multicast a Router Advertisement with the M (Managed-config) flag to
+    ff02::1 so IPv6-aware hosts run DHCPv6. Their SOLICIT/REQUEST (multicast,
+    UDP 547) is captured by the passive sniffer, which extracts the
+    Client-FQDN option - the same hostname the router's DHCP table shows but
+    which unicast DHCPv4 renewals hide. routerlifetime=0 + no prefix info means
+    hosts never adopt us as a gateway (our routing tables stay untouched).
+    Rate-limited to one burst per min_gap_s across the whole agent."""
+    global _RA_NUDGE_LAST
+    try:
+        with _RA_NUDGE_LOCK:
+            now = time.time()
+            if now - _RA_NUDGE_LAST < min_gap_s:
+                return False
+            _RA_NUDGE_LAST = now
+    except Exception:
+        return False
+    try:
+        from scapy.all import Ether, IPv6, ICMPv6ND_RA, sendp, get_if_hwaddr
+    except Exception:
+        return False
+    try:
+        if not iface:
+            return False
+        mac = get_if_hwaddr(iface)
+        pkt = (Ether(src=mac, dst="33:33:00:00:00:01") /
+               IPv6(src="fe80::1", dst="ff02::1", nh=58, hlim=255) /
+               ICMPv6ND_RA(routerlifetime=0, chlim=64, M=1))
+        for _ in range(3):
+            sendp(pkt, iface=iface, verbose=0)
+            time.sleep(1.0)
+        return True
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #

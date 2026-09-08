@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import auth, engagements, scans, export, agents
+from .routers import auth, engagements, scans, export, agents, webhooks
 
 app = FastAPI(
     title="Network Asset Discovery Platform",
@@ -21,6 +21,7 @@ app.include_router(engagements.router)
 app.include_router(scans.router)
 app.include_router(agents.router)
 app.include_router(export.router)
+app.include_router(webhooks.router)
 
 
 @app.on_event("startup")

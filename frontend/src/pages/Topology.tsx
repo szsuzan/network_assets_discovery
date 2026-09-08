@@ -56,8 +56,9 @@ function computeStaticLayout(nodes: HostNode[], links: { source: any; target: an
   const centerX = 0
 
   // Build band descriptors with ring radius + gateway per zone.
-  // Ring radius grows with host count so neighbours stay EXACTLY `gap` apart
-  // around the circle (their 16u hit-areas never overlap).
+  // Ring radius grows linearly with host count so neighbours stay EXACTLY
+  // `gap` apart around the circle (their 16u hit-areas never overlap); the
+  // dotted subnet border scales too — a margin that grows with the ring.
   const gap = 48
   const bands = zones.map((zone) => {
     const hosts = nodes
@@ -67,7 +68,10 @@ function computeStaticLayout(nodes: HostNode[], links: { source: any; target: an
     return { zone, hosts, ringR }
   })
 
-  const zonePad = 40 // dotted-circle margin, matches `_zoneR`
+  // Dotted-border margin: constant ring-to-border spacing, same as the
+  // original. Hosts sit on the ring; the border stays `zonePad` outside it
+  // regardless of how many hosts are in the subnet.
+  const zonePad = 40
   const outerOf = (b: (typeof bands)[number]) => b.ringR + zonePad
   const zoneGap = 70 // horizontal gap between neighbouring zone circles
   const rowGap = 90 // vertical gap between stacked rows
@@ -284,7 +288,7 @@ function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _
 
   // IP caption below node — constant size regardless of zoom
   const label = node.ip || (node.kind === 'host' ? node.id : '') || node.name || ''
-  ctx.font = `${11 / scale}px monospace`
+  ctx.font = `${9 / scale}px monospace`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
   ctx.fillStyle = 'rgba(226,232,240,0.9)'
@@ -370,6 +374,7 @@ export default function Topology() {
       source: e.source,
       target: e.target,
       type: e.type || 'l2',
+      source_kind: nodeById.get(e.source)?.kind,
     }))
 
     // Orient every link so its particles flow TOWARD the internet node:
@@ -406,6 +411,9 @@ export default function Topology() {
           l.source = l.target
           l.target = tmp
         }
+      }
+      for (const l of ls) {
+        l.source_kind = nodeById.get(typeof l.source === 'string' ? l.source : (l.source as any)?.id)?.kind
       }
     }
 
@@ -486,15 +494,13 @@ export default function Topology() {
   }, [graphLinks, visibleNodes])
 
   // Node sizing — the built-in hit radius is r = sqrt(nodeVal)*nodeRelSize.
-  // Hosts get a large hit radius (~32px, matching the ring's 32px spacing) so
-  // that even if the shadow hit-areas are offset a few px from the visuals,
-  // every host is still grabbable; the drawn dot stays small/distinct.
+  // Hosts get a large hit radius (~16px) and internet keeps its disk; the zone
+  // does NOT use a disk: its clickable area is a thin band around the border
+  // circle, painted by the nodePointerAreaPaint hook below (nodeVal=1 leaves
+  // only a ~1px hit at the exact center).
   const getNodeVal = useCallback((n: HostNode) => {
     if (n.kind === 'internet') return 55 * 55
-    if (n.kind === 'zone') {
-      const rr = Math.max(30, n._zoneR || 60)
-      return rr * rr
-    }
+    if (n.kind === 'zone') return 1
     return 16 * 16
   }, [])
 
@@ -662,11 +668,36 @@ export default function Topology() {
               linkDirectionalArrowLength={7}
               linkDirectionalArrowRelPos={1}
               linkDirectionalArrowColor={(l: any) => (EDGE_STYLE[l.type] || EDGE_STYLE.l2).color}
-              linkCurvature={(l: any) => (l.type === 'gateway' ? 0 : 0.08)}
+              linkCurvature={(l: any) => {
+                if (l.type === 'gateway') return 0
+                // in_subnet edges toward the zone are drawn host->zone, but a
+                // gateway host sits closer to internet than its zone, so its
+                // edge flow was reversed (zone->host) by orientation. Mirror
+                // the bend to match every other host->zone arc.
+                return l.source_kind === 'zone' ? -0.08 : 0.08
+              }}
               onZoom={(transform: any) => setViewport(transform)}
               autoPauseRedraw={false}
               enableNodeDrag={true}
               enablePointerInteraction={true}
+              nodePointerAreaPaint={((node: any, color: any, ctx: CanvasRenderingContext2D) => {
+                ctx.save()
+                ctx.beginPath()
+                if (node.kind === 'zone') {
+                  // Clickable band around the border circle only: an annulus
+                  // just inside/outside the dashed border, not the whole disk.
+                  const rr = Math.max(30, node._zoneR || 60)
+                  ctx.arc(node.x, node.y, rr + 3, 0, Math.PI * 2, false)
+                  ctx.arc(node.x, node.y, Math.max(16, rr - 16), 0, Math.PI * 2, true)
+                  ctx.fillStyle = color
+                  ctx.fill('evenodd')
+                } else {
+                  ctx.arc(node.x, node.y, node.kind === 'internet' ? 55 : 16, 0, Math.PI * 2, false)
+                  ctx.fillStyle = color
+                  ctx.fill()
+                }
+                ctx.restore()
+              }) as any}
               onNodeClick={handleNodeClick as any}
               onNodeDrag={((node: any) => {
                   if (!node || node.id == null) return

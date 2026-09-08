@@ -10,6 +10,7 @@ import HostDrawer from './pages/HostDrawer'
 import Findings from './pages/Findings'
 import Report from './pages/Report'
 import Agents from './pages/Agents'
+import Integrations from './pages/Integrations'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const token = localStorage.getItem('token')
@@ -37,6 +38,7 @@ export default function App() {
         <Route path="/engagements/:engagementId/scans/:scanId/findings" element={<Findings />} />
         <Route path="/engagements/:engagementId/scans/:scanId/report" element={<Report />} />
         <Route path="/agents" element={<Agents />} />
+        <Route path="/integrations" element={<Integrations />} />
       </Route>
     </Routes>
   )

@@ -1,9 +1,11 @@
 import json
 import threading
 from collections import deque
+from datetime import datetime, timezone
 from typing import Dict, Set
 from fastapi import WebSocket
 from .config import get_settings
+from .services.activity import append_activity
 
 EVENT_CHANNEL = "scan_events"
 MAX_RETRIES = 5
@@ -60,7 +62,13 @@ class ConnectionManager:
         the direct local send is scheduled onto the shared loop without waiting,
         so long-running scans never block the API on WebSocket fan-out.
         """
+        # Stamp the emission timestamp here, once, so the WS message, the Redis
+        # relay and the persisted activity feed all carry the same value (the UI
+        # dedupes replayed history against live events using this key).
+        if not event.get("ts"):
+            event["ts"] = datetime.now(timezone.utc).isoformat()
         self.publish_event(scan_id, event)
+        append_activity(scan_id, event)
         import asyncio
         loop = self._get_loop()
         try:
