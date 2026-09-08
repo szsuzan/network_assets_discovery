@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Network Asset Discovery - scanner agent.
+"""SubNex - scanner agent.
 
 A small, self-contained L2 scanner you run ON a machine that is directly
 connected to the target LAN. It performs the actual discovery/port/fingerprint
@@ -1952,7 +1952,7 @@ def _dhcp6_nudge(iface: Optional[str], min_gap_s: float = 90.0) -> bool:
 # Entrypoint
 # --------------------------------------------------------------------------- #
 def main():
-    parser = argparse.ArgumentParser(description="LAN scanner agent for Network Asset Discovery")
+    parser = argparse.ArgumentParser(description="LAN scanner agent for SubNex")
     parser.add_argument("--server", required=True, help="server base URL, e.g. http://1.2.3.4:8000")
     parser.add_argument("--api-key", default=None, help="agent API key (or SCANNER_AGENT_KEY env)")
     parser.add_argument("--name", required=True, help="agent display name")

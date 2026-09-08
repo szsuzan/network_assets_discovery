@@ -1,5 +1,7 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useTheme } from '../lib/theme'
+import subnexLogo from '../assets/subnex-logo.svg'
+import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
 export default function Layout() {
   const { theme, toggle } = useTheme()
@@ -21,7 +23,10 @@ export default function Layout() {
       <header className="border-b border-gray-800 bg-gray-900">
         <div className="flex items-center justify-between px-4 py-3">
           <div className="flex items-center gap-6">
-            <span className="text-lg font-bold text-white">🛡️ Asset Discovery</span>
+            <div className="flex flex-col leading-tight">
+              <img src={theme === 'dark' ? subnexLogoLight : subnexLogo} alt="SubNex" className="h-20 w-auto" />
+              <span className="ml-0.5 text-[11px] text-gray-500 italic">Where your assets hide, SubNex finds.</span>
+            </div>
             <nav className="flex items-center gap-1">
               <NavLink to="/" end className={navClass}>
                 Engagements
