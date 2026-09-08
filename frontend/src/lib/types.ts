@@ -16,6 +16,16 @@ export interface Engagement {
   created_at: string
 }
 
+export interface ScanPass {
+  index: number
+  kind: 'discover' | 'reverify'
+  started_at: string
+  completed_at: string
+  duration: number
+  hosts: number
+  ports: number
+}
+
 export interface Scan {
   id: string
   engagement_id: string
@@ -29,7 +39,11 @@ export interface Scan {
   hosts_discovered: number
   progress_pct: number
   started_at: string | null
+  reverify_started_at: string | null
   completed_at: string | null
+  total_paused_seconds: number
+  open_ports_count: number
+  pass_history: ScanPass[]
   verified_at: string | null
   started_by: string | null
   created_at: string
@@ -78,6 +92,9 @@ export interface Finding {
   scan_id: string
   host_id: string | null
   host_ip?: string | null
+  host_hostname?: string | null
+  host_device_type?: string | null
+  host_mac?: string | null
   severity: string
   type: string
   title: string
@@ -86,6 +103,64 @@ export interface Finding {
   cve_refs: string[] | null
   port: number | null
   included_in_report: boolean
+  status: string
+  cvss_vector?: string | null
+  cvss_score?: number | null
+  cwe?: string | null
+  notes?: string | null
+  evidence?: Record<string, any> | null
+  updated_at?: string | null
+}
+
+export interface FindingAuditEntry {
+  id: string
+  user_id: string | null
+  action: string
+  field: string | null
+  old_value: string | null
+  new_value: string | null
+  created_at: string
+}
+
+export const FINDING_STATUSES = [
+  'open',
+  'triaged',
+  'confirmed',
+  'remediation_in_progress',
+  'retest',
+  'resolved',
+  'accepted_risk',
+  'false_positive',
+] as const
+
+export const FINDING_STATUS_LABELS: Record<string, string> = {
+  open: 'Open',
+  triaged: 'Triaged',
+  confirmed: 'Confirmed',
+  remediation_in_progress: 'In Remediation',
+  retest: 'Ready for Retest',
+  resolved: 'Resolved',
+  accepted_risk: 'Accepted Risk',
+  false_positive: 'False Positive',
+}
+
+export const FINDING_TYPE_LABELS: Record<string, string> = {
+  default_credentials: 'Default Credentials',
+  eol_software: 'EOL Software',
+  exposed_admin_panel: 'Exposed Admin Panel',
+  unencrypted_protocol: 'Unencrypted Protocol',
+  unencrypted_video: 'Unencrypted Video Stream',
+  weak_crypto: 'Weak TLS/Crypto',
+  expired_certificate: 'Expired Certificate',
+  smb_signing_disabled: 'SMB Signing Not Required',
+  anonymous_ftp: 'Anonymous FTP',
+  unrestricted_share: 'World-Readable SMB Share',
+  dangerous_http_methods: 'Dangerous HTTP Methods',
+  missing_auth: 'Missing Authentication',
+  empty_password: 'Empty Password',
+  web_service_exposed: 'Web Service Exposed',
+  information_disclosure: 'Information Disclosure',
+  unexpected_exposure: 'Unexpected Exposure',
 }
 
 export interface Topology {

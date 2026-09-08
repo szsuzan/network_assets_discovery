@@ -1,5 +1,5 @@
-from sqlalchemy import Column, String, DateTime, Boolean, Integer, Uuid, ForeignKey, Text, func, JSON
-from sqlalchemy.dialects.postgresql import ARRAY, INET, MACADDR
+from sqlalchemy import Column, String, DateTime, Boolean, Integer, Uuid, ForeignKey, Text, func, JSON, Float
+from sqlalchemy.dialects.postgresql import ARRAY, INET, MACADDR, JSONB
 from sqlalchemy.orm import relationship
 from .database import Base
 import uuid
@@ -36,11 +36,17 @@ class Scan(Base):
     protocol = Column(Text, nullable=False, default="tcp")
     status = Column(Text, nullable=False, default="queued")
     kind = Column(Text, nullable=False, default="discover")  # discover|reverify
+    risk_rules = Column(JSONB, nullable=False, default=dict, server_default="{}")
     hosts_total_in_scope = Column(Integer, default=0)
     hosts_discovered = Column(Integer, default=0)
     progress_pct = Column(Integer, default=0)
     started_at = Column(DateTime(timezone=True))
+    reverify_started_at = Column(DateTime(timezone=True))
     completed_at = Column(DateTime(timezone=True))
+    total_paused_seconds = Column(Integer, nullable=False, default=0)
+    # Per-pass history for the UI (initial + re-verify passes with their own
+    # started/completed, duration, and committed host/port counts).
+    pass_history = Column(JSONB, nullable=False, default=list, server_default="[]")
     verified_at = Column(DateTime(timezone=True))
     started_by = Column(Uuid, ForeignKey("users.id"))
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -110,8 +116,41 @@ class Finding(Base):
     cve_refs = Column(ARRAY(Text))
     port = Column(Integer)
     included_in_report = Column(Boolean, default=True)
+    # -- findings workflow ------------------------------------------------
+    status = Column(Text, nullable=False, default="open")
+    cvss_vector = Column(Text)
+    cvss_score = Column(Float)
+    cwe = Column(Text)
+    notes = Column(Text)
+    evidence = Column(JSON)
+    updated_at = Column(DateTime(timezone=True))
 
     scan = relationship("Scan", back_populates="findings")
+
+class FindingAudit(Base):
+    __tablename__ = "finding_audit"
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    finding_id = Column(Uuid, ForeignKey("findings.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Uuid, ForeignKey("users.id"))
+    action = Column(Text, nullable=False)
+    field = Column(Text)
+    old_value = Column(Text)
+    new_value = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class Webhook(Base):
+    __tablename__ = "webhooks"
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    name = Column(Text, nullable=False)
+    url = Column(Text, nullable=False)
+    secret = Column(Text)
+    events = Column(ARRAY(Text), nullable=False, default=["finding_created", "finding_updated"])
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_by = Column(Uuid, ForeignKey("users.id"))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    last_triggered_at = Column(DateTime(timezone=True))
+    last_status = Column(Integer)
+    last_error = Column(Text)
 
 class TopologyEdge(Base):
     __tablename__ = "topology_edges"

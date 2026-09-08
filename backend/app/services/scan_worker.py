@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from sqlalchemy import select, cast
+from sqlalchemy import select, cast, delete, func
 from sqlalchemy.dialects.postgresql import INET
 from .db import SessionLocal
 from . import scanners
@@ -155,6 +155,7 @@ PROFILE_TIMING = {
 # --------------------------------------------------------------------------- #
 
 _HTTP_NSE = "http-title,http-headers,http-methods,http-server-header,http-enum,http-generator"
+_SSL_NSE = ",ssl-cert,ssl-enum-ciphers"
 _SMB_NSE = ("smb-protocols,smb-security-mode,smb2-security-mode,"
             "smb-enum-shares,smb-os-discovery,smb2-capabilities")
 
@@ -172,23 +173,24 @@ PORT_NSE_SCRIPTS = {
     139: _SMB_NSE,
     161: "snmp-info",
     389: "ldap-rootdse",
-    443: _HTTP_NSE + ",ssl-cert",
+    443: _HTTP_NSE + _SSL_NSE,
     445: _SMB_NSE,
     515: "cups-queue-info",
     554: "rtsp-methods",
     631: "cups-queue-info",
-    993: "ssl-cert,imap-ntlm-info",
-    995: "ssl-cert",
+    636: "ssl-cert,ssl-enum-ciphers",
+    993: "ssl-cert,ssl-enum-ciphers,imap-ntlm-info",
+    995: "ssl-cert,ssl-enum-ciphers",
     3269: "msrpc-enum",
-    3306: "mysql-info,mysql-enum",
-    3389: "rdp-enum-encryption,rdp-ntlm-info",
-    5432: "",
-    5900: "vnc-info",
+    3306: "mysql-info,mysql-enum,mysql-empty-password",
+3389: "rdp-enum-encryption,rdp-ntlm-info",
+     # no dedicated postgres NSE ships with nmap; 5432 inherits the default set
+     5900: "vnc-info",
     6379: "redis-info",
     8000: _HTTP_NSE,
     8009: "ajp-header",
     8080: _HTTP_NSE,
-    8443: _HTTP_NSE + ",ssl-cert",
+    8443: _HTTP_NSE + _SSL_NSE,
     8834: _HTTP_NSE,
     27017: "mongodb-info",
 }
@@ -215,6 +217,11 @@ def cancel_scan(scan_id: str):
     """Global kill switch: revoke a queued/running scan task so subprocesses are
     terminated.
 
+    Tasks are dispatched with a fresh, unique Celery task id (recorded in redis)
+    because re-using the scan id is unsafe: once a scan id has been revoked by a
+    stop, celery silently discards every later task that reuses it — which left
+    re-verify passes permanently stuck at 'queued'. See _dispatch_run.
+
     The Celery revoke is synchronous and blocks for up to ~10s while it talks to
     the broker, which makes the stop/delete endpoint feel stuck (and does nothing
     useful for agent-delegated scans, which do not run in Celery). It is therefore
@@ -223,11 +230,44 @@ def cancel_scan(scan_id: str):
     """
     def _revoke():
         import time as _time
+        task_ids = [scan_id]
         try:
-            celery_app.control.revoke(scan_id, terminate=True, signal="SIGKILL")
+            from ..websocket import _redis_client
+            rc = _redis_client()
+            v = rc.get(f"scan:task:{scan_id}")
+            if v:
+                task_ids.append(v.decode())
+            rc.close()
         except Exception:
             pass
+        for tid in task_ids:
+            try:
+                celery_app.control.revoke(tid, terminate=True, signal="SIGKILL")
+            except Exception:
+                pass
     threading.Thread(target=_revoke, daemon=True).start()
+
+
+def _dispatch_run(scan_id: str, reverify_cfg: dict = None):
+    """Queue a scan job against a FRESH Celery task id.
+
+    Using the scan id as the task id worked for first runs but breaks re-verify:
+    a stopped scan is revoked by id and celery never re-accepts that id, so the
+    reverify of a resumed/stopped scan was silently discarded (stuck 'queued').
+    The fresh id is recorded under `scan:task:<scan_id>` so the distributed stop
+    (revoke) can still match and kill the running task.
+    """
+    args = [str(scan_id)] if reverify_cfg is None else [str(scan_id), reverify_cfg]
+    task_uuid = str(uuid.uuid4())
+    run_scan.apply_async(args=args, task_id=task_uuid)
+    try:
+        from ..websocket import _redis_client
+        rc = _redis_client()
+        rc.set(f"scan:task:{scan_id}", task_uuid, ex=86400)
+        rc.close()
+    except Exception:
+        pass
+    return task_uuid
 
 @celery_app.task(bind=True)
 def run_scan(self, scan_id: str, reverify_cfg: dict = None):
@@ -245,9 +285,11 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
 
         scan.status = "discovering"
         scan.started_at = datetime.now(timezone.utc)
+        scan.reverify_started_at = None
+        scan.total_paused_seconds = 0
         db.commit()
 
-        manager.broadcast_sync(scan_id, {"type": "scan_started", "scan_id": scan_id})
+        manager.broadcast_sync(scan_id, {"type": "scan_started", "scan_id": scan_id, "targets": scan.targets})
         _emit_log(scan, f"=== Scan started (id={scan_id}, targets={', '.join(scan.targets)}, " +
                          f"profile={scan.profile}, protocol={getattr(scan, 'protocol', 'tcp')}) ===")
         _write_scan_manifest(scan)
@@ -323,14 +365,15 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
             scan.status = "completed"
             scan.completed_at = datetime.now(timezone.utc)
             scan.progress_pct = 100
+            _snapshot_pass(db, scan)
             db.commit()
             _emit_log(scan, f"=== Scan completed: {scan.hosts_discovered} hosts ===", level="info")
-            manager.broadcast_sync(scan_id, {"type": "scan_completed", "scan_id": scan_id})
+            manager.broadcast_sync(scan_id, {"type": "scan_completed", "scan_id": scan_id, "progress_pct": 100, "hosts_discovered": scan.hosts_discovered})
         except ScanStopped:
             # Intentionally stopped: keep the authoritative 'stopped' state and
             # the UTC completed_at the user's stop set. Do not mark failed.
             _emit_log(scan, "=== Scan stopped (phases aborted) ===", level="warn")
-            manager.broadcast_sync(scan_id, {"type": "scan_stopped", "scan_id": scan_id})
+            manager.broadcast_sync(scan_id, {"type": "scan_stopped", "scan_id": scan_id, "progress_pct": scan.progress_pct})
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -338,7 +381,7 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
             scan.completed_at = datetime.now(timezone.utc)
             db.commit()
             _emit_log(scan, f"=== Scan FAILED: {e} ===", level="err")
-            manager.broadcast_sync(scan_id, {"type": "scan_failed", "scan_id": scan_id, "error": str(e)})
+            manager.broadcast_sync(scan_id, {"type": "scan_failed", "scan_id": scan_id, "error": str(e), "progress_pct": scan.progress_pct})
 
 
 # --------------------------------------------------------------------------- #
@@ -452,12 +495,14 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
     override_range = cfg.get("port_range")
 
     scan.status = "reverifying"
-    scan.started_at = datetime.now(timezone.utc)
+    if scan.reverify_started_at is None:
+        scan.reverify_started_at = datetime.now(timezone.utc)
     scan.completed_at = None
     scan.progress_pct = 0
     db.commit()
     _emit_log(scan, "=== Re-verify scan started (unscanned ports + down hosts only) ===")
-    manager.broadcast_sync(str(scan.id), {"type": "scan_reverifying", "scan_id": str(scan.id)})
+    manager.broadcast_sync(str(scan.id), {"type": "scan_reverifying", "scan_id": str(scan.id),
+                              "reverify_started_at": scan.reverify_started_at.isoformat()})
 
     # Prefer the L2 scanner agent (ARP -> MAC/vendor, SYN + -O) when one covers
     # the network; it runs the same down-host + leftover-port re-verify and the
@@ -583,12 +628,13 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         scan.completed_at = datetime.now(timezone.utc)
         scan.verified_at = datetime.now(timezone.utc)
         scan.progress_pct = 100
+        _snapshot_pass(db, scan)
         db.commit()
         _emit_log(scan, f"=== Re-verify complete: {scan.hosts_discovered} hosts, report updated (no duplicates) ===")
-        manager.broadcast_sync(str(scan.id), {"type": "scan_completed", "scan_id": str(scan.id)})
+        manager.broadcast_sync(str(scan.id), {"type": "scan_completed", "scan_id": str(scan.id), "progress_pct": 100, "hosts_discovered": scan.hosts_discovered})
     except ScanStopped:
         _emit_log(scan, "=== Re-verify stopped ===", level="warn")
-        manager.broadcast_sync(str(scan.id), {"type": "scan_stopped", "scan_id": str(scan.id)})
+        manager.broadcast_sync(str(scan.id), {"type": "scan_stopped", "scan_id": str(scan.id), "progress_pct": scan.progress_pct})
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -596,7 +642,7 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         scan.completed_at = datetime.now(timezone.utc)
         db.commit()
         _emit_log(scan, f"=== Re-verify FAILED: {e} ===", level="err")
-        manager.broadcast_sync(str(scan.id), {"type": "scan_failed", "scan_id": str(scan.id), "error": str(e)})
+        manager.broadcast_sync(str(scan.id), {"type": "scan_failed", "scan_id": str(scan.id), "error": str(e), "progress_pct": scan.progress_pct})
 
 
 # Ports tried for a quick TCP aliveness probe. Ordered by common admin/service
@@ -1013,11 +1059,12 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
                 script_os_map[hid] = scripts_os
             done_count += 1
             _emit_log(scan, f"  {str(h.ip)}: {len(ports)} open port(s) ({phase})", level="out")
-            # live per-host result, plus a rolling phase progress
+            # live per-host result, plus a rolling phase progress (never
+            # regresses an already-higher value written by an earlier phase)
             if phase == "ports":
-                scan.progress_pct = min(70, 20 + int(done_count / total * 50))
+                scan.progress_pct = max(scan.progress_pct, min(70, 20 + int(done_count / total * 50)))
             else:
-                scan.progress_pct = min(90, 70 + int(done_count / total * 20))
+                scan.progress_pct = max(scan.progress_pct, min(90, 70 + int(done_count / total * 20)))
             try:
                 db.flush()
                 db.commit()
@@ -1569,6 +1616,48 @@ def classify_device_type(host: Host):
             host.device_type = "smartphone"  # no clue: phones dominate Apple unknowns
         return
 
+    # --- router-ish devices from the OS fingerprint -------------------------
+    # -O nicknames whole products ("3Com OfficeConnect 3CRWER100-75 wireless
+    # broadband router"); nothing later would catch those, so type them here.
+    if any(x in os_guess for x in ("wireless bro", "router", "officeconnect",
+                                   "access point", "gateway")) \
+       or any(x in os_guess for x in ("cable modem", "wifi", "wi-fi")):
+        host.device_type = "wireless_access_point"
+        return
+
+    # --- phones / tablets / TV sticks purely from the OS fingerprint ---------
+    # Privacy-randomised MACs erase the vendor and the hostname may never
+    # surface, but the -O stack fingerprint still says iOS/Android/tvOS. Type
+    # those instead of falling through to "physical_server". Android TV and
+    # Apple TV are typed smart_tv; ambiguous "iOS or tvOS" guesses go phone.
+    if hostname and ("macbook" in hostname or "mac book" in hostname
+                     or " mac air" in hostname or " mac mini" in hostname
+                     or " mac pro" in hostname):
+        host.device_type = "laptop"  # mDNS name beats the "iOS" OS mislabel
+        return
+    if hostname and ("iphone" in hostname or "ipod" in hostname):
+        host.device_type = "smartphone"
+        return
+    if hostname and "ipad" in hostname:
+        host.device_type = "tablet"
+        return
+    if "ipad" in os_guess or "ipados" in os_guess:
+        host.device_type = "tablet"
+        return
+    if "iphone" in os_guess or ("ios" in os_guess and "mac" not in os_guess) \
+       or os_guess.startswith("ios"):
+        host.device_type = "smartphone"
+        return
+    if "tvos" in os_guess or "apple tv" in os_guess:
+        host.device_type = "smart_tv"
+        return
+    if "android" in os_guess:
+        if "android tv" in os_guess or "androidtv" in os_guess:
+            host.device_type = "smart_tv"
+        else:
+            host.device_type = "smartphone"
+        return
+
     # --- Chromebooks are laptops, not phones ----------------------------------
     if any(x in os_guess for x in ("chromeos", "chromium os", "chrome os")) \
        or "chromebook" in hostname:
@@ -1577,8 +1666,9 @@ def classify_device_type(host: Host):
 
     # --- macOS/darwin behind privacy-randomised MACs -------------------------
     # Privacy MACs erase the vendor OUI, but the OS string still says it is an
-    # Apple device. AirPlay hosts (49152/62078) are laptops, never "servers".
-    if ports and any(x in os_guess for x in ("mac os", "macos", "darwin", "osx")):
+    # Apple device (a bare TCP-stack -O guess is enough). AirPlay hosts
+    # (49152/62078) are laptops, never "servers".
+    if any(x in os_guess for x in ("mac os", "macos", "darwin", "osx")):
         if "ipad" in os_guess:
             host.device_type = "tablet"
         elif "iphone" in os_guess or ("ios" in os_guess and "mac" not in os_guess):
@@ -1657,95 +1747,336 @@ def classify_device_type(host: Host):
 
     host.device_type = "unknown"
 
+def _host_label(host: Host) -> str:
+    """Short 'ip (hostname · device)' context used in finding titles so reports
+    reflect the hostname/device-type enrichment the scan pipeline now produces."""
+    parts = [str(host.ip)]
+    if host.hostname:
+        parts.append(host.hostname)
+    if host.device_type and host.device_type not in ("unknown", "unidentified"):
+        parts.append(host.device_type)
+    return " · ".join(parts)
+
+
+def _nse_xml_for_host(scan, host) -> str:
+    """Re-assemble the raw NSE-bearing XML nmap produced for this host across
+    phases. Finding rules consume it as evidence; absent files (e.g. hosts only
+    seen by an L2 agent with no container nmap pass) yield empty output."""
+    try:
+        ip_safe = str(host.ip).replace("/", "_").replace(":", "_")
+        base = SCAN_OUTPUT_DIR / str(scan.id)
+        parts = []
+        for name in (f"fingerprint_{ip_safe}.xml", f"nse_{ip_safe}.xml", f"ports_{ip_safe}.xml"):
+            p = base / name
+            if p.exists():
+                parts.append(p.read_text(encoding="utf-8", errors="replace"))
+        return "\n".join(parts)
+    except Exception:
+        return ""
+
+
+def _apply_meta(f: Finding, finding_type: str):
+    """Stamp CWE + CVSS reference metadata onto a finding by its type."""
+    try:
+        from .nse_engine import FINDING_META
+        cwe, score, vector = FINDING_META.get(finding_type, ("", None, None))
+        f.cwe = cwe or None
+        f.cvss_score = score
+        f.cvss_vector = vector or None
+    except Exception:
+        pass
+
+
+def _snapshot_pass(db, scan: Scan):
+    """Record one completed scan pass (initial discover or re-verify) with its
+    own duration plus the committed host/port counts, so the UI can show the
+    value differences between passes (initial -> re-verify -> re-verify...).
+
+    Idempotent: a pass whose (started_at, completed_at) already appears as the
+    last history entry is skipped (e.g. if a worker retries finalisation).
+    """
+    try:
+        start = scan.reverify_started_at if (scan.kind == "reverify" and scan.reverify_started_at) else scan.started_at
+        end = scan.completed_at
+        if not start or not end:
+            return
+        port_count = db.execute(
+            select(func.count()).select_from(Port).join(Host, Host.id == Port.host_id)
+            .where(Host.scan_id == scan.id, Port.state == "open")
+        ).scalar_one() or 0
+        history = list(scan.pass_history or [])
+        if (history and history[-1].get("started_at") == start.isoformat()
+                and history[-1].get("completed_at") == end.isoformat()):
+            return
+        history.append({
+            "index": len(history),
+            "kind": scan.kind if scan.kind in ("discover", "reverify") else "discover",
+            "started_at": start.isoformat(),
+            "completed_at": end.isoformat(),
+            "duration": max(0, int((end - start).total_seconds())),
+            "hosts": scan.hosts_discovered or 0,
+            "ports": port_count,
+        })
+        scan.pass_history = history
+    except Exception:
+        return  # snapshotting is best-effort
+
+
 def run_risk_rules(db, scan: Scan):
+    from . import nse_engine
+    from .risk_rules import merged_rules, rule_enabled, effective_severity
+
+    cfg = merged_rules(scan.risk_rules)
+
     result = db.execute(select(Host).where(Host.scan_id == scan.id))
     hosts = result.scalars().all()
+
+    created_findings: list = []
+
+    def _on(key: str) -> bool:
+        return rule_enabled(cfg, key)
+
+    def _sev(key: str, current: str) -> str:
+        return effective_severity(cfg, key, current)
+
+    # Existing rows are upserted so re-verify passes that re-run risk rules
+    # refresh findings instead of piling up duplicate (host, type, port) rows.
+    existing_rows = db.execute(select(Finding).where(Finding.scan_id == scan.id)).scalars().all()
+    existing_by_key: dict = {}
+    for frow in existing_rows:
+        existing_by_key.setdefault((str(frow.host_id), frow.type, frow.port), frow)
+
+    def _upsert(ftype: str, severity: str, port, title, description,
+                recommendation, cwe=None, cvss_score=None, cvss_vector=None,
+                evidence=None, cve_refs=None):
+        ex = existing_by_key.get((str(host.id), ftype, port))
+        if ex is not None:
+            ex.severity = severity
+            ex.title = title
+            ex.description = description
+            ex.recommendation = recommendation
+            ex.port = port
+            ex.evidence = evidence
+            ex.cve_refs = cve_refs or ex.cve_refs or []
+            ex.cwe = cwe
+            ex.cvss_score = cvss_score
+            ex.cvss_vector = cvss_vector
+            ex.included_in_report = True
+            ex.updated_at = datetime.now(timezone.utc)
+            created_findings.append(ex)
+            return ex
+        f = Finding(
+            scan_id=scan.id,
+            host_id=host.id,
+            severity=severity,
+            type=ftype,
+            title=title,
+            description=description,
+            recommendation=recommendation,
+            cve_refs=cve_refs or [],
+            port=port,
+            evidence=evidence,
+            cwe=cwe,
+            cvss_score=cvss_score,
+            cvss_vector=cvss_vector,
+        )
+        db.add(f)
+        created_findings.append(f)
+        return f
 
     for host in hosts:
         if host.status != "up":
             continue
         host_ports = db.execute(select(Port).where(Port.host_id == host.id))
         ports = host_ports.scalars().all()
+        open_ports = {p.port for p in ports if p.state == "open"}
+        label = _host_label(host)
 
-        # Rule: Default SNMP community found
-        snmp = db.execute(select(SNMPInfo).where(SNMPInfo.host_id == host.id))
-        snmp_row = snmp.scalar_one_or_none()
-        if snmp_row and snmp_row.default_community_found:
-            db.add(Finding(
-                scan_id=scan.id,
-                host_id=host.id,
-                severity="notable",
-                type="default_credentials",
-                title=f"Default SNMP community string in use on {str(host.ip)}",
-                description="The device responds to the default SNMP community string 'public', allowing unauthenticated read access to system information.",
-                recommendation="Change the SNMP community string to a non-default value and restrict SNMP access to trusted management hosts.",
-                cve_refs=[],
-                port=161
-            ))
+        # Keys already added this pass (type, port) — prevents duplicates between
+        # the NSE evidence rules and the port/service heuristics.
+        found: set = set()
 
-        # Rule: Common unencrypted protocols
-        insecure_ports = {
-            23: ("Telnet", "concerning"),
-            21: ("FTP", "notable"),
-            80: ("HTTP (unencrypted)", "notable"),
-            445: ("SMB", "info")
-        }
+        def _add(ftype: str, severity: str, port, title, description,
+                 recommendation, cwe=None, cvss_score=None, cvss_vector=None,
+                 evidence=None, cve_refs=None):
+            key = (ftype, port)
+            if key in found:
+                return
+            found.add(key)
+            _apply_meta_vals = {"cwe": cwe, "cvss_score": cvss_score, "cvss_vector": cvss_vector}
+            _upsert(
+                ftype, severity, port, title, description, recommendation,
+                cwe=_apply_meta_vals["cwe"],
+                cvss_score=_apply_meta_vals["cvss_score"],
+                cvss_vector=_apply_meta_vals["cvss_vector"],
+                evidence=evidence,
+                cve_refs=cve_refs,
+            )
 
-        for p in ports:
-            if p.port in insecure_ports:
+        # ---- NSE evidence rules ------------------------------------------
+        # Everything Nmap/NSE actually *reported* becomes a finding here, with
+        # the raw script output kept as evidence. Port/service heuristics then
+        # only fill gaps NSE did not cover.
+        nse_xml = _nse_xml_for_host(scan, host)
+        nse_web = {}
+        if nse_xml:
+            nse_res = nse_engine.nse_findings_for_host(scan.id, host, label, nse_xml)
+            nse_web = nse_res["web"]
+            for fd in nse_res["findings"]:
+                if not _on(fd["type"]):
+                    continue
+                _add(fd["type"], _sev(fd["type"], fd["severity"]), fd["port"], fd["title"],
+                     fd["description"], fd["recommendation"],
+                     cwe=fd.get("cwe"), cvss_score=fd.get("cvss_score"),
+                     cvss_vector=fd.get("cvss_vector"), evidence=fd.get("evidence"))
+
+        # ---- Rule: Default SNMP community found ---------------------------
+        if _on("default_credentials"):
+            snmp = db.execute(select(SNMPInfo).where(SNMPInfo.host_id == host.id))
+            snmp_row = snmp.scalar_one_or_none()
+            if snmp_row and snmp_row.default_community_found:
+                f = _upsert(
+                    "default_credentials",
+                    _sev("default_credentials", "notable"),
+                    161,
+                    f"Default SNMP community string in use on {label}",
+                    "The device responds to the default SNMP community string 'public', allowing unauthenticated read access to system information.",
+                    "Change the SNMP community string to a non-default value and restrict SNMP access to trusted management hosts.",
+                )
+                _apply_meta(f, "default_credentials")
+                found.add(("default_credentials", 161))
+
+        # ---- Rule: Common unencrypted protocols ----------------------------
+        # HTTP ports are handled by the web NSE rules below, never here. SIP on
+        # a VoIP handset is expected for the class but still unencrypted.
+        if _on("unencrypted_protocol"):
+            insecure_ports = {
+                23: ("Telnet", "concerning"),
+                21: ("FTP", "notable"),
+                445: ("SMB", "info"),
+            }
+            if host.device_type == "voip_phone":
+                insecure_ports[5060] = ("SIP (unencrypted)", "notable")
+
+            for p in ports:
+                if p.state != "open" or p.port not in insecure_ports:
+                    continue
                 name, sev = insecure_ports[p.port]
-                db.add(Finding(
-                    scan_id=scan.id,
-                    host_id=host.id,
-                    severity=sev,
-                    type="unencrypted_protocol",
-                    title=f"{name} enabled on {str(host.ip)} port {p.port}",
-                    description=f"Host is running {name} which transmits data in clear text.",
-                    recommendation=f"Replace {name} with an encrypted alternative (SSH/HTTPS).",
-                    cve_refs=[],
-                    port=p.port
-                ))
+                f = _upsert(
+                    "unencrypted_protocol",
+                    _sev("unencrypted_protocol", sev),
+                    p.port,
+                    f"{name} enabled on {label} port {p.port}",
+                    f"Host is running {name} which transmits data in clear text.",
+                    f"Replace {name} with an encrypted alternative (SSH/HTTPS/SRTP).",
+                )
+                _apply_meta(f, "unencrypted_protocol")
+                found.add(("unencrypted_protocol", p.port))
 
-        # Rule: Known outdated software (from banner parsing)
-        for p in ports:
-            if p.version and p.service:
-                if is_outdated_version(p.service, p.version):
-                    db.add(Finding(
-                        scan_id=scan.id,
-                        host_id=host.id,
-                        severity="concerning",
-                        type="eol_software",
-                        title=f"Potentially outdated {p.service} on {str(host.ip)} port {p.port}",
-                        description=f"{p.service} version {p.version} may contain known vulnerabilities.",
-                        recommendation=f"Upgrade {p.service} to a currently supported version.",
-                        cve_refs=[],
-                        port=p.port
-                    ))
+        # ---- Rule: Unencrypted RTSP video / media streams -------------------
+        if _on("unencrypted_video") and host.device_type in ("camera", "smart_tv", "conference", "iot"):
+            rtsp_ports = [p for p in ports if p.state == "open" and
+                          (p.port in (554, 8554) or (p.service or "").lower() == "rtsp")]
+            for p in rtsp_ports:
+                f = _upsert(
+                    "unencrypted_video",
+                    _sev("unencrypted_video", "concerning"),
+                    p.port,
+                    f"Unencrypted RTSP video stream on {label} port {p.port}",
+                    f"The host serves raw RTSP on port {p.port}; captured traffic exposes the live feed unencrypted and typically unauthenticated to LAN clients.",
+                    "Move video delivery to RTSPS/SRTP or a restricted management VLAN, and require authentication for stream access.",
+                )
+                _apply_meta(f, "unencrypted_video")
+                found.add(("unencrypted_video", p.port))
 
-        # Rule: Exposed admin panels
-        for p in ports:
-            if p.service and p.service in ("http", "https", "http-alt"):
-                db.add(Finding(
-                    scan_id=scan.id,
-                    host_id=host.id,
-                    severity="concerning",
-                    type="exposed_admin_panel",
-                    title=f"Web service exposed on {str(host.ip)} port {p.port}",
-                    description="A web service is listening. Administrative login pages should be checked for default credentials.",
-                    recommendation="Validate web application access controls and change all default credentials.",
+        # ---- Rule: Known outdated software (from banner parsing) -------------
+        if _on("eol_software"):
+            for p in ports:
+                if p.version and p.service and is_outdated_version(p.service, p.version):
+                    f = _upsert(
+                        "eol_software",
+                        _sev("eol_software", "concerning"),
+                        p.port,
+                        f"Potentially outdated {p.service} on {label} port {p.port}",
+                        f"{p.service} version {p.version} may contain known vulnerabilities.",
+                        f"Upgrade {p.service} to a currently supported version.",
+                    )
+                    _apply_meta(f, "eol_software")
+                    found.add(("eol_software", p.port))
+
+        # ---- Web surface rule (NSE evidence first, port fallback) ------------
+        # NSE http-title/http-enum already produced exposed_admin_panel /
+        # web_service_exposed findings above. Any open http service NSE did not
+        # cover (no script results) still gets a light web_service_exposed row so
+        # the report documents the full web surface even on odd ports.
+        if _on("web_service_exposed"):
+            web_ports = {p.port for p in ports if p.state == "open"
+                         and p.service in ("http", "https", "http-alt")}
+            for wport in web_ports:
+                if wport in nse_web:
+                    continue  # NSE already voted on this port
+                f = _upsert(
+                    "web_service_exposed",
+                    _sev("web_service_exposed", "info"),
+                    wport,
+                    f"Web service exposed on {label} port {wport}",
+                    "A web service is listening on this port; confirm TLS and access controls.",
+                    "Ensure the web service is patched, uses TLS, and is access-controlled.",
                     cve_refs=[],
-                    port=p.port
-                ))
+                )
+                _apply_meta(f, "web_service_exposed")
+                found.add(("web_service_exposed", wport))
 
         host.last_seen = datetime.now(timezone.utc)
 
     db.commit()
 
+    # Deliver finding_created webhook events for anything generated this pass.
+    try:
+        from .webhook import has_subscribers, deliver_finding_created
+        if created_findings and has_subscribers(db, "finding_created"):
+            engagement = None
+            try:
+                from ..models import Engagement
+                engagement = db.execute(
+                    select(Engagement).where(Engagement.id == scan.engagement_id)
+                ).scalar_one_or_none()
+            except Exception:
+                pass
+            host_by_id = {str(h.id): h for h in hosts}
+            for fobj in created_findings:
+                try:
+                    deliver_finding_created(
+                        db, fobj,
+                        host=host_by_id.get(str(fobj.host_id)),
+                        scan=scan, engagement=engagement,
+                    )
+                except Exception:
+                    continue  # delivery is best-effort per finding
+    except Exception:
+        pass
+
     # Broadcast one aggregate finding event so the live feed reflects risk analysis completion
-    manager.broadcast_sync(str(scan.id), {
-        "type": "finding_added",
-        "scan_id": str(scan.id)
-    })
+    try:
+        by_sev = {s: 0 for s in ("critical", "concerning", "notable", "info")}
+        total = 0
+        for fobj in db.execute(
+            select(Finding).where(Finding.scan_id == scan.id)
+        ).scalars().all():
+            by_sev[fobj.severity] = by_sev.get(fobj.severity, 0) + 1
+            total += 1
+        manager.broadcast_sync(str(scan.id), {
+            "type": "finding_added",
+            "scan_id": str(scan.id),
+            "count": total,
+            "by_severity": by_sev,
+            "hosts_discovered": scan.hosts_discovered,
+        })
+    except Exception:
+        manager.broadcast_sync(str(scan.id), {
+            "type": "finding_added",
+            "scan_id": str(scan.id),
+        })
 
 def is_outdated_version(service: str, version: str) -> bool:
     KNOWN_OUTDATED = {
@@ -1767,6 +2098,8 @@ def capture_topology(db, scan: Scan):
     # would reference a non-existent node -- avoid both by chaining hosts only.
     result = db.execute(select(Host).where(Host.scan_id == scan.id))
     hosts = [h for h in result.scalars().all() if h.status == "up"]
+
+    db.execute(delete(TopologyEdge).where(TopologyEdge.scan_id == scan.id))
 
     for i in range(len(hosts) - 1):
         db.add(TopologyEdge(

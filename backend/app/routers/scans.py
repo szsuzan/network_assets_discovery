@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, Text, cast
+from sqlalchemy import select, delete, Text, cast, func
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import INET
 from datetime import datetime, timezone
@@ -13,14 +13,15 @@ def _host_ip_eq(host_ip: str):
     return cast(host_ip, INET)
 
 from ..database import get_db
-from ..models import User, Engagement, Scan, Host, Port, SNMPInfo, Finding, AuditLog
+from ..models import User, Engagement, Scan, Host, Port, SNMPInfo, Finding, FindingAudit, AuditLog
 from ..schemas import (
     ScanCreate, ReverifyIn, ScanOut, HostOut, HostDetail, HostPatch,
-    FindingOut, FindingPatch, TopologyOut, DiffResult
+    FindingOut, FindingPatch, FindingAuditOut, RiskRuleOut, RiskRulePatch,
+    TopologyOut, DiffResult
 )
 from ..auth import get_current_user
 from ..scope_utils import validate_targets_in_scope, count_hosts_in_scope
-from ..services.scan_worker import run_scan, read_console_log
+from ..services.scan_worker import run_scan, read_console_log, _dispatch_run
 
 router = APIRouter(prefix="/api", tags=["scans"])
 
@@ -71,9 +72,10 @@ async def start_scan(
     await db.commit()
     await db.refresh(scan)
     
-    # Queue the scan job. Use the scan UUID as the Celery task id so the
-    # distributed stop (revoke) actually matches and kills the running task.
-    run_scan.apply_async(args=[str(scan.id)], task_id=str(scan.id))
+    # Queue the scan job. Fresh unique task id (the scan id may already have
+    # been revoked by a stop, and celery discards re-used revoked ids) recorded
+    # in redis so the distributed stop still revokes the running task.
+    _dispatch_run(str(scan.id))
     
     return scan
 
@@ -118,7 +120,12 @@ async def reverify_scan(
 
     scan.kind = "reverify"
     scan.status = "queued"
-    scan.started_at = datetime.now(timezone.utc)
+    scan.reverify_started_at = datetime.now(timezone.utc)
+    # Idle time between passes (previously completed_at -> now) is not active
+    # run time, so accumulate it and let the UI deduct it from the total.
+    if scan.completed_at is not None:
+        paused = max(0, int((scan.reverify_started_at - scan.completed_at).total_seconds()))
+        scan.total_paused_seconds += paused
     scan.completed_at = None
     scan.progress_pct = 0
 
@@ -133,7 +140,7 @@ async def reverify_scan(
         "recheck_down_hosts": data.recheck_down_hosts,
         "sweep_remaining_ports": data.sweep_remaining_ports,
     }
-    run_scan.apply_async(args=[str(scan.id), reverify_cfg], task_id=str(scan.id))
+    _dispatch_run(str(scan.id), reverify_cfg)
     return scan
 
 @router.get("/scans/{scan_id}/logs", response_model=List[dict])
@@ -147,6 +154,15 @@ async def scan_logs(
         raise HTTPException(status_code=404, detail="Scan not found")
     return read_console_log(scan_id)
 
+@router.get("/scans/{scan_id}/activity", response_model=List[dict])
+async def scan_activity(
+    scan_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from ..services.activity import read_activity
+    return read_activity(str(scan_id))
+
 @router.get("/scans/{scan_id}", response_model=ScanOut)
 async def get_scan(
     scan_id: uuid.UUID,
@@ -157,6 +173,11 @@ async def get_scan(
     scan = result.scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
+    open_count = await db.execute(
+        select(func.count()).select_from(Port).join(Host, Host.id == Port.host_id)
+        .where(Host.scan_id == scan.id, Port.state == "open")
+    )
+    scan.open_ports_count = open_count.scalar_one() or 0
     return scan
 
 @router.post("/scans/{scan_id}/pause", response_model=ScanOut)
@@ -272,7 +293,7 @@ async def stop_scan(
         "type": "cmd_log", "scan_id": str(scan.id), "level": "warn",
         "line": "=== Scan STOPPED by user ===",
     })
-    manager.broadcast_sync(str(scan.id), {"type": "scan_stopped", "scan_id": str(scan.id)})
+    manager.broadcast_sync(str(scan.id), {"type": "scan_stopped", "scan_id": str(scan.id), "progress_pct": scan.progress_pct})
 
     await db.refresh(scan)
     return scan
@@ -401,117 +422,13 @@ async def get_topology(
     current_user: User = Depends(get_current_user)
 ):
     scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
-
     hosts_result = await db.execute(select(Host).where(Host.scan_id == scan_id, Host.status == "up"))
     hosts = hosts_result.scalars().all()
-    
     find_host_findings = await db.execute(select(Finding).where(Finding.scan_id == scan_id))
     findings = find_host_findings.scalars().all()
-    
-    finding_by_host = {}
-    for f in findings:
-        if f.host_id not in finding_by_host:
-            finding_by_host[f.host_id] = "info"
-        sev_order = {"critical": 4, "concerning": 3, "notable": 2, "info": 1}
-        if sev_order.get(f.severity, 0) > sev_order.get(finding_by_host[f.host_id], 0):
-            finding_by_host[f.host_id] = f.severity
 
-    # --- Subnet zones inferred from the scan targets ----------------------- #
-    import ipaddress
-    zone_nets = []
-    for t in (scan.targets if scan else []):
-        try:
-            net = ipaddress.ip_network(str(t), strict=False)
-        except ValueError:
-            continue
-        # Plain single-address target parses to a /32 (/128) host network —
-        # widen it to the implied subnet the host lives on.
-        if net.prefixlen == 32 or net.prefixlen == 128:
-            ip = net.network_address
-            net = ipaddress.ip_network(f"{ip}/24" if ip.version == 4 else f"{ip}/64",
-                                       strict=False)
-        zone_nets.append(net)
-
-    def _zone_key(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
-        for net in zone_nets:
-            if ip in net:
-                return str(net)
-        # Fallback zone derived from the host's own address.
-        return str(ipaddress.ip_network(f"{ip}/24" if ip.version == 4 else f"{ip}/64",
-                                        strict=False))
-
-    group: dict = {}
-    for h in hosts:
-        group.setdefault(_zone_key(ipaddress.ip_address(str(h.ip))), []).append(h)
-
-    def _gw_ip_for(net: ipaddress.IPv4Network | ipaddress.IPv6Network):
-        """Usable gateway candidates (.1 / last usable) for IPv4 /24-ish nets."""
-        if net.version != 4 or net.prefixlen > 24:
-            return None
-        return str(net.network_address + 1)
-
-    zone_nodes = []
-    gw_hosts: dict = {}  # zkey -> gateway host object (up host at .1/.254 or router/network_gear)
-    for zkey, hs in sorted(group.items(), key=lambda kv: kv[0]):
-        net = ipaddress.ip_network(zkey)
-        any_ip = _gw_ip_for(net)
-        gw_candidates = [h for h in hs if h.device_type in ("network_gear", "router")]
-        if any_ip:
-            gw_candidates = ([h for h in hs if str(h.ip) == any_ip] or
-                             [h for h in hs if str(h.ip).rsplit(".", 1)[0] + ".254" == str(h.ip)] or
-                             gw_candidates)
-        gw = gw_candidates[0] if gw_candidates else None
-        if gw:
-            gw_hosts[zkey] = gw
-        sev = max((sev_order.get(finding_by_host.get(h.id, "info"), 1) for h in hs), default=1)
-        label = zkey.replace("/", " mask ")
-        zone_nodes.append({
-            "id": "zone:" + zkey,
-            "kind": "zone",
-            "label": label,
-            "ip": any_ip if gw and not gw_hosts.get(zkey) is None else None,
-            "host_count": len(hs),
-            "device_type": "router" if gw else None,
-            "severity": next(s for s, o in [("critical", 4), ("concerning", 3), ("notable", 2), ("info", 1)]
-                             if o == sev),
-        })
-
-    nodes = list(zone_nodes)
-    nodes.append({"id": "internet", "kind": "internet", "label": "Internet"})
-
-    # A host may itself be a zone gateway (AP/router). Host node ids use the IP
-    # string so every edge (which references IPs) resolves to a real node.
-    gw_by_zone: dict = {}  # zkey -> gateway host
-    for zkey, gw in gw_hosts.items():
-        gw_by_zone[zkey] = gw
-
-    for h in hosts:
-        is_gw = any(gw is h for gw in gw_hosts.values())
-        nodes.append({
-            "id": str(h.ip),
-            "kind": "host",
-            "ip": str(h.ip),
-            "label": h.hostname or str(h.ip),
-            "device_type": h.device_type,
-            "severity": finding_by_host.get(h.id, "info"),
-            "is_gateway": is_gw,
-        })
-
-    edges = []
-    for zkey, hs in group.items():
-        gw = gw_by_zone.get(zkey)
-        if gw:
-            # The gateway is the physical link between internet and subnet:
-            # it connects up to the internet and down into the zone.
-            edges.append({"source": "internet", "target": str(gw.ip), "type": "gateway"})
-            edges.append({"source": str(gw.ip), "target": "zone:" + zkey, "type": "in_subnet"})
-        else:
-            # No gateway host identified: the zone still ties up to the internet.
-            edges.append({"source": "zone:" + zkey, "target": "internet", "type": "gateway"})
-        # Every host (incl. the gateway) lives inside its subnet zone.
-        for h in hs:
-            edges.append({"source": str(h.ip), "target": "zone:" + zkey, "type": "in_subnet"})
-
+    from ..services.topology import compute_topology
+    nodes, edges = compute_topology(scan, hosts, findings)
     return TopologyOut(nodes=nodes, edges=edges)
 
 @router.get("/scans/{scan_id}/findings", response_model=List[FindingOut])
@@ -522,7 +439,7 @@ async def list_findings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    query = select(Finding, Host.ip).join(Host, Finding.host_id == Host.id, isouter=True).where(Finding.scan_id == scan_id)
+    query = select(Finding, Host).join(Host, Finding.host_id == Host.id, isouter=True).where(Finding.scan_id == scan_id)
     if severity:
         query = query.where(Finding.severity == severity)
     if finding_type:
@@ -530,9 +447,12 @@ async def list_findings(
     
     result = await db.execute(query)
     findings = []
-    for f, ip in result.all():
+    for f, host in result.all():
         finding_dict = FindingOut.model_validate(f).model_dump()
-        finding_dict["host_ip"] = str(ip) if ip else None
+        finding_dict["host_ip"] = str(host.ip) if host else None
+        finding_dict["host_hostname"] = host.hostname if host else None
+        finding_dict["host_device_type"] = host.device_type if host else None
+        finding_dict["host_mac"] = str(host.mac) if host and host.mac else None
         findings.append(FindingOut(**finding_dict))
     return findings
 
@@ -547,14 +467,74 @@ async def patch_finding(
     finding = result.scalar_one_or_none()
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
-    
+
+    # Fields whose analyst changes go into the audit trail.
+    audited_fields = {"status", "included_in_report", "severity", "cvss_score", "cvss_vector", "cwe"}
+
     patch_data = data.model_dump(exclude_unset=True)
+    changes = []
     for key, value in patch_data.items():
-        setattr(finding, key, value)
-    
+        old = getattr(finding, key, None)
+        new = value
+        if old == new:
+            continue
+        setattr(finding, key, new)
+        if key in audited_fields:
+            changes.append({"field": key, "old_value": old, "new_value": new})
+            db.add(FindingAudit(
+                finding_id=finding.id,
+                user_id=current_user.id,
+                action="updated",
+                field=key,
+                old_value=str(old) if old is not None else None,
+                new_value=str(new) if new is not None else None,
+            ))
+
+    finding.updated_at = datetime.now(timezone.utc)
     await db.commit()
     await db.refresh(finding)
+
+    if changes:
+        import threading
+        threading.Thread(
+            target=_deliver_finding_update,
+            args=(finding.id, current_user.id, changes),
+            daemon=True,
+        ).start()
     return finding
+
+def _deliver_finding_update(finding_id, user_id, changes):
+    """Post-commit webhook delivery in a background thread (sync session)."""
+    from ..services.db import SessionLocal
+    from ..services.webhook import deliver_finding_updated
+    try:
+        with SessionLocal() as s:
+            from ..models import Finding as SyncFinding, Host as SyncHost, Scan as SyncScan, Engagement as SyncEng, User as SyncUser
+            f = s.get(SyncFinding, finding_id)
+            if not f:
+                return
+            host = s.get(SyncHost, f.host_id) if f.host_id else None
+            scan = s.get(SyncScan, f.scan_id) if f.scan_id else None
+            engagement = s.get(SyncEng, scan.engagement_id) if scan else None
+            actor = s.get(SyncUser, user_id)
+            deliver_finding_updated(s, f, host, scan, engagement, actor, changes=changes)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).exception("finding_updated webhook delivery failed")
+
+@router.get("/scans/{scan_id}/findings/{finding_id}/audit", response_model=List[FindingAuditOut])
+async def finding_audit(
+    scan_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    result = await db.execute(
+        select(FindingAudit)
+        .where(FindingAudit.finding_id == finding_id)
+        .order_by(FindingAudit.created_at.asc())
+    )
+    return result.scalars().all()
 
 @router.get("/scans/{scan_id}/diff/{other_scan_id}", response_model=DiffResult)
 async def diff_scans(
@@ -615,6 +595,64 @@ async def get_host_ports(db: AsyncSession, host_id: uuid.UUID) -> list:
 async def get_scan_findings(db: AsyncSession, scan_id: uuid.UUID) -> list:
     result = await db.execute(select(Finding).where(Finding.scan_id == scan_id))
     return sorted([f"{f.type}:{f.host_id}:{f.port}" for f in result.scalars().all()])
+
+@router.get("/scans/{scan_id}/risk-rules", response_model=List[RiskRuleOut])
+async def list_risk_rules(
+    scan_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from ..services.risk_rules import merged_rules, to_json
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalar_one_or_none()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return to_json(merged_rules(scan.risk_rules))
+
+@router.put("/scans/{scan_id}/risk-rules", response_model=List[RiskRuleOut])
+async def update_risk_rules(
+    scan_id: uuid.UUID,
+    rules: List[RiskRulePatch],
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from ..services.risk_rules import merged_rules, to_json, store_overrides
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalar_one_or_none()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    scan.risk_rules = store_overrides(scan.risk_rules, [r.model_dump() for r in rules])
+    await db.commit()
+    await db.refresh(scan)
+    return to_json(merged_rules(scan.risk_rules))
+
+@router.post("/scans/{scan_id}/reanalyze", status_code=202)
+async def reanalyze_scan(
+    scan_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    from starlette.concurrency import run_in_threadpool
+    from ..services.scan_worker import run_risk_rules
+    result = await db.execute(select(Scan).where(Scan.id == scan_id))
+    scan = result.scalar_one_or_none()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if scan.status not in ("completed", "error"):
+        raise HTTPException(status_code=409, detail="Scan is still running")
+
+    await db.execute(delete(Finding).where(Finding.scan_id == scan_id))
+    await db.commit()
+
+    def _run():
+        from ..services.db import SessionLocal
+        with SessionLocal() as s:
+            s.expire_all()
+            sc = s.get(Scan, scan_id)
+            run_risk_rules(s, sc)
+
+    await run_in_threadpool(_run)
+    return {"status": "ok", "detail": "Risk analysis re-applied"}
 
 @router.websocket("/ws/scans/{scan_id}")
 async def websocket_endpoint(websocket: WebSocket, scan_id: str):
