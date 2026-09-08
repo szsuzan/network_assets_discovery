@@ -3,8 +3,9 @@ import { Link, useParams } from 'react-router-dom'
 import ForceGraph2D from 'react-force-graph-2d'
 import { useTopology, useFindings, useHostDetail } from '../hooks/useApi'
 import ScanNav from '../components/ScanNav'
-import { SEV_RING, EDGE_STYLE, deviceIcon, detectPivots, computeInternetFacing, type TopoNode } from '../lib/graphAnalysis'
+import { SEV_RING, EDGE_STYLE, EDGE_STYLE_LIGHT, deviceIcon, detectPivots, computeInternetFacing, type TopoNode } from '../lib/graphAnalysis'
 import { DEVICE_TYPE_LABELS, normalizeDeviceType } from '../lib/types'
+import { useTheme } from '../lib/theme'
 import TopologyMinimap from '../components/TopologyMinimap'
 
 type HostNode = {
@@ -181,7 +182,7 @@ function computeStaticLayout(nodes: HostNode[], links: { source: any; target: an
 // Canvas painting helpers
 // ────────────────────────────────────────────────────────────────────────
 
-function drawInternetCloud(ctx: CanvasRenderingContext2D, node: any, scale: number) {
+function drawInternetCloud(ctx: CanvasRenderingContext2D, node: any, scale: number, dark: boolean) {
   const x = node.x || 0
   const y = node.y || 0
   const u = 1 / scale // unit so size stays constant on screen
@@ -206,9 +207,9 @@ function drawInternetCloud(ctx: CanvasRenderingContext2D, node: any, scale: numb
   ctx.arcTo(-w / 2, h / 2, -w / 2, -h / 2, r)
   ctx.arcTo(-w / 2, -h / 2, w / 2, -h / 2, r)
   ctx.closePath()
-  ctx.fillStyle = 'rgba(51,65,85,0.85)'
+  ctx.fillStyle = dark ? 'rgba(51,65,85,0.85)' : 'rgba(255,255,255,0.96)'
   ctx.fill()
-  ctx.strokeStyle = 'rgba(148,163,184,0.6)'
+  ctx.strokeStyle = dark ? 'rgba(148,163,184,0.6)' : 'rgba(100,116,139,0.8)'
   ctx.lineWidth = 1.2 / scale
   ctx.stroke()
 
@@ -223,17 +224,17 @@ function drawInternetCloud(ctx: CanvasRenderingContext2D, node: any, scale: numb
   ctx.arc(cx + cr * 1.1, cy, cr * 0.75, Math.PI * 1.6, Math.PI * 0.6)
   ctx.arc(cx, cy, cr * 1.2, 0, Math.PI * 2)
   ctx.closePath()
-  ctx.fillStyle = '#94a3b8'
+  ctx.fillStyle = dark ? '#94a3b8' : '#475569'
   ctx.fill()
 
   // "Internet" text (right of cloud, clear of the logo)
-  ctx.fillStyle = '#e2e8f0'
+  ctx.fillStyle = dark ? '#e2e8f0' : '#111827'
   ctx.fillText('Internet', -w / 2 + 26 * u, 0)
 
   ctx.restore()
 }
 
-function drawZoneContainer(ctx: CanvasRenderingContext2D, node: any, scale: number) {
+function drawZoneContainer(ctx: CanvasRenderingContext2D, node: any, scale: number, dark: boolean) {
   const x = node.x || 0
   const y = node.y || 0
   const r = Math.max(30, node._zoneR || 60)
@@ -244,20 +245,20 @@ function drawZoneContainer(ctx: CanvasRenderingContext2D, node: any, scale: numb
   // Dotted circle — line width counter-scaled to stay thin
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
-  ctx.strokeStyle = 'rgba(129,140,248,0.45)'
+  ctx.strokeStyle = dark ? 'rgba(129,140,248,0.45)' : 'rgba(99,102,241,0.55)'
   ctx.lineWidth = 1.5 / scale
   ctx.setLineDash([4 / scale, 4 / scale])
   ctx.stroke()
   ctx.setLineDash([])
 
   // Subtle fill
-  ctx.fillStyle = 'rgba(99,102,241,0.03)'
+  ctx.fillStyle = dark ? 'rgba(99,102,241,0.03)' : 'rgba(99,102,241,0.05)'
   ctx.fill()
 
   // Label (subnet name) — constant size, centered at top of circle
   const label = node.name || ''
   const hostCount = node.host_count || 0
-  ctx.fillStyle = 'rgba(165,180,252,0.85)'
+  ctx.fillStyle = dark ? 'rgba(165,180,252,0.85)' : 'rgba(67,56,202,0.95)'
   ctx.font = `${12 / scale}px monospace`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'bottom'
@@ -267,7 +268,7 @@ function drawZoneContainer(ctx: CanvasRenderingContext2D, node: any, scale: numb
   ctx.restore()
 }
 
-function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _color: string) {
+function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _color: string, dark: boolean) {
   const x = node.x || 0
   const y = node.y || 0
   const r = 6 / scale
@@ -282,16 +283,16 @@ function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _
   ctx.fill()
 
   // Border
-  ctx.strokeStyle = 'rgba(0,0,0,0.3)'
+  ctx.strokeStyle = dark ? 'rgba(0,0,0,0.3)' : 'rgba(107,114,128,0.7)'
   ctx.lineWidth = 1 / scale
   ctx.stroke()
 
   // IP caption below node — constant size regardless of zoom
   const label = node.ip || (node.kind === 'host' ? node.id : '') || node.name || ''
-  ctx.font = `${9 / scale}px monospace`
+  ctx.font = `${dark ? '600 ' : ''}9 / scale}px monospace`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
-  ctx.fillStyle = 'rgba(226,232,240,0.9)'
+  ctx.fillStyle = dark ? 'rgba(226,232,240,0.9)' : '#111827'
   ctx.fillText(label, 0, r + 4 / scale)
 
   ctx.restore()
@@ -303,6 +304,8 @@ function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _
 
 export default function Topology() {
   const { engagementId, scanId } = useParams()
+  const { theme } = useTheme()
+  const dark = theme === 'dark'
   const { data, isLoading } = useTopology(scanId)
   const { data: findings } = useFindings(scanId)
   const graphRef = useRef<any>(null)
@@ -536,13 +539,13 @@ export default function Topology() {
   // the invisible default circles used for built-in hit-testing)
   const nodeCanvasObject = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
     if (node.kind === 'internet') {
-      drawInternetCloud(ctx, node, globalScale)
+      drawInternetCloud(ctx, node, globalScale, dark)
     } else if (node.kind === 'zone') {
-      drawZoneContainer(ctx, node, globalScale)
+      drawZoneContainer(ctx, node, globalScale, dark)
     } else if (node.kind === 'host') {
-      drawHostNode(ctx, node, globalScale, SEV_RING[node.severity] || SEV_RING.info)
+      drawHostNode(ctx, node, globalScale, SEV_RING[node.severity] || SEV_RING.info, dark)
     }
-  }, [])
+  }, [dark])
 
   // Node click
   const handleNodeClick = useCallback((node: HostNode) => {
@@ -639,7 +642,9 @@ export default function Topology() {
 
         <div
           ref={containerRef}
-          className="relative mt-3 min-h-[320px] flex-1 overflow-hidden rounded-lg border border-gray-800 bg-[#0b1020] touch-none select-none"
+          className={`relative mt-3 min-h-[320px] flex-1 overflow-hidden rounded-lg border touch-none select-none ${
+            dark ? 'border-gray-800 bg-[#0b1020]' : 'border-gray-200 bg-white shadow-sm'
+          }`}
         >
           {!graphNodes.length ? (
             <div className="py-24 text-center text-gray-400">
@@ -651,23 +656,23 @@ export default function Topology() {
               graphData={{ nodes: visibleNodes, links: visibleLinks }}
               width={size.w}
               height={size.h}
-              backgroundColor="#0b1020"
+              backgroundColor={dark ? '#0b1020' : '#ffffff'}
               nodeRelSize={1}
               nodeVal={getNodeVal}
               nodeColor={getNodeColor}
               nodeLabel={getNodeLabel}
               nodeCanvasObject={nodeCanvasObject}
               nodeCanvasObjectMode={() => 'after' as any}
-              linkColor={(l: any) => (EDGE_STYLE[l.type] || EDGE_STYLE.l2).color}
-              linkWidth={(l: any) => (EDGE_STYLE[l.type] || EDGE_STYLE.l2).width * 1.6}
-              linkLineDash={(l: any) => (EDGE_STYLE[l.type] || EDGE_STYLE.l2).dash}
+              linkColor={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.color || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.color}
+              linkWidth={(l: any) => ((dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.width || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.width) * 1.6}
+              linkLineDash={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.dash || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.dash}
               linkDirectionalParticles={(l: any) => (l.type === 'gateway' ? 5 : 3)}
               linkDirectionalParticleWidth={2.8}
               linkDirectionalParticleSpeed={0.008}
-              linkDirectionalParticleColor={(l: any) => (EDGE_STYLE[l.type] || EDGE_STYLE.l2).color}
+              linkDirectionalParticleColor={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.color || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.color}
               linkDirectionalArrowLength={7}
               linkDirectionalArrowRelPos={1}
-              linkDirectionalArrowColor={(l: any) => (EDGE_STYLE[l.type] || EDGE_STYLE.l2).color}
+              linkDirectionalArrowColor={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.color || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.color}
               linkCurvature={(l: any) => {
                 if (l.type === 'gateway') return 0
                 // in_subnet edges toward the zone are drawn host->zone, but a
@@ -747,6 +752,7 @@ export default function Topology() {
               width={size.w}
               height={size.h}
               viewport={viewport}
+              dark={dark}
               onNavigate={(x, y) => {
                 try { graphRef.current?.centerAt(x, y, 400) } catch {}
               }}
@@ -756,11 +762,13 @@ export default function Topology() {
           </div>
         </div>
 
-      <div className="ml-3 flex w-72 flex-shrink-0 flex-col rounded-lg border border-gray-800 bg-[#0b1020] p-4 overflow-y-auto">
+      <div className={`ml-3 flex w-72 flex-shrink-0 flex-col rounded-lg border p-4 overflow-y-auto ${
+          dark ? 'border-gray-800 bg-[#0b1020]' : 'border-gray-200 bg-gray-50 shadow-sm'
+        }`}>
         {selectedHostIp && hostDetail ? (
           <HostDetailPanel host={hostDetail as any} onClose={() => setSelectedHostIp(null)} />
         ) : showLegend ? (
-          <LegendPanel />
+          <LegendPanel dark={dark} />
         ) : (
           <div className="py-24 text-center text-sm text-gray-500">Click a host to view details</div>
         )}
@@ -829,7 +837,8 @@ function Row({ label, value, badge, badgeColor }: { label: string; value: string
   )
 }
 
-function LegendPanel() {
+function LegendPanel({ dark }: { dark: boolean }) {
+  const styles = dark ? EDGE_STYLE : EDGE_STYLE_LIGHT
   return (
     <div className="flex flex-col gap-4">
       <h3 className="text-sm font-bold text-white">Legend</h3>
@@ -865,7 +874,7 @@ function LegendPanel() {
         <h4 className="mb-2 text-xs font-semibold text-gray-300">Connection Types</h4>
         <div className="space-y-1.5">
           {(['gateway', 'l2', 'cdp_lldp', 'in_subnet'] as const).map((key) => {
-            const style = EDGE_STYLE[key]
+            const style = styles[key]
             return (
               <div key={key} className="flex items-center gap-2 text-xs">
                 <span

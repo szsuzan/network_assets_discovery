@@ -38,6 +38,18 @@ export const EDGE_STYLE: Record<string, { dash: number[]; color: string; width: 
   gateway: { dash: [6, 4], color: '#f59e0b', width: 2.6 },
 }
 
+// Same edge taxonomy, tuned for the light canvas: dark, saturated strokes
+// that stay visible against white without losing the type distinction.
+export const EDGE_STYLE_LIGHT: Record<string, { dash: number[]; color: string; width: number }> = {
+  l2: { dash: [], color: '#0891b2', width: 2 },
+  l2_adjacency: { dash: [], color: '#0e7490', width: 1.8 },
+  cdp_lldp: { dash: [6, 4], color: '#059669', width: 2.2 },
+  l3: { dash: [2, 4], color: 'rgba(71,85,105,0.7)', width: 1.4 },
+  inferred: { dash: [2, 5], color: 'rgba(71,85,105,0.65)', width: 1.3 },
+  in_subnet: { dash: [2, 5], color: 'rgba(71,85,105,0.6)', width: 1.2 },
+  gateway: { dash: [6, 4], color: '#b45309', width: 2.6 },
+}
+
 // Pivot points: hosts that bridge two otherwise-separated connected components.
 // A host is a pivot if removing it increases the number of connected components.
 export function detectPivots(
