@@ -1,27 +1,29 @@
 import asyncio
 from app.database import AsyncSessionLocal, engine
-from app.models import Base, User
-from sqlalchemy import select
+from app.models import User
+from sqlalchemy import func, select
 from app.routers.auth import hash_password
 
-async def seed():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    
+async def seed_users() -> None:
+    """Create the demo admin user if no users exist yet.
+
+    Safe to run on every startup: it is a no-op once the first user exists.
+    """
     async with AsyncSessionLocal() as db:
-        result = await db.execute(select(User).where(User.email == "demo@pentest.local"))
-        if not result.scalar_one_or_none():
-            user = User(
-                email="demo@pentest.local",
-                password_hash=hash_password("password123"),
-                role="admin"
-            )
-            db.add(user)
-            await db.commit()
-            print("Created demo user: demo@pentest.local / password123")
-        else:
-            print("Demo user already exists")
-    
+        count = await db.scalar(select(func.count(User.id)))
+        if count:
+            return
+        db.add(User(
+            email="demo@pentest.local",
+            password_hash=hash_password("password123"),
+            role="admin",
+        ))
+        await db.commit()
+        print("Created demo user: demo@pentest.local / password123")
+
+
+async def seed():
+    await seed_users()
     await engine.dispose()
 
 if __name__ == "__main__":

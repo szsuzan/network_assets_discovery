@@ -9,19 +9,20 @@ A professional-grade network asset discovery tool for penetration testing engage
 ## Table of Contents
 
 1. [Architecture](#architecture)
-2. [Quick start (start-all / stop-all)](#quick-start)
-3. [Manual start (docker compose)](#manual-start-docker-compose)
-4. [Scanner agents (full Layer-2 discovery)](#scanner-agents)
-5. [Using the platform](#using-the-platform)
-6. [Scan pipeline](#scan-pipeline)
-7. [REST API reference](#rest-api)
-8. [WebSocket live feed](#websocket-live-feed)
-9. [Frontend screens](#frontend-screens)
-10. [Safety / throttling](#safety--throttling)
-11. [Security of the tool itself](#security-of-the-tool-itself)
-12. [Data model](#data-model)
-13. [Troubleshooting](#troubleshooting)
-14. [Project layout](#project-layout)
+2. [Setup from a fresh clone](#setup-from-a-fresh-clone)
+3. [Quick start (start-all / stop-all)](#quick-start)
+4. [Manual start (docker compose)](#manual-start-docker-compose)
+5. [Scanner agents (full Layer-2 discovery)](#scanner-agents)
+6. [Using the platform](#using-the-platform)
+7. [Scan pipeline](#scan-pipeline)
+8. [REST API reference](#rest-api)
+9. [WebSocket live feed](#websocket-live-feed)
+10. [Frontend screens](#frontend-screens)
+11. [Safety / throttling](#safety--throttling)
+12. [Security of the tool itself](#security-of-the-tool-itself)
+13. [Data model](#data-model)
+14. [Troubleshooting](#troubleshooting)
+15. [Project layout](#project-layout)
 
 ---
 
@@ -46,17 +47,93 @@ A professional-grade network asset discovery tool for penetration testing engage
 - **Backend:** Python 3.11+, FastAPI, PostgreSQL (async SQLAlchemy), Redis + Celery (background scan jobs), WebSockets for live updates, JWT auth.
 - **Scanning tools:** Nmap (TCP/UDP port scans + service/OS fingerprinting) runs either in-container (L3-only) or, preferably, on a **scanner agent** placed on the target LAN for full Layer-2 (ARP → MAC/vendor + raw-SYN/`-O` → exact OS). **Scapy** (optional, agent-side) passively fingerprints the LAN without touching a single host: DHCP vendor-class-ID → brand/OS, ARP → IP↔MAC, and CDP/LLDP → network-gear identity (switch/AP/router platform + capabilities). Scapy is best-effort: `pip install scapy` (+ Npcap on Windows) enables it, otherwise the agent scans actively only. pysnmp/SNMP (walks).
 
-The stack runs five services:
+The stack runs three services:
 
 | Service | Purpose | Local port |
 |---------|---------|-----------|
-| `postgres` | Database (applies all migrations 001–008 on first boot) | 5432 |
+| `postgres` | Database (schema auto-applied by migrations on backend start) | 5432 |
 | `redis` | Celery message broker + pause/stop state | 16379 |
-| `backend` | FastAPI REST + WebSocket API | 8000 |
-| `celery_worker` | Runs scan jobs in the background | — |
-| `frontend` | React UI (built static site) | 3000 |
+| `backend` | FastAPI REST + WebSocket API, Celery scan worker, and serves the built web UI | 8000 |
+
+The backend container runs all three roles via `app/run_server.py` (a small supervisor that runs uvicorn + the Celery worker and restarts them if they crash). The UI is a static build of `frontend/` mounted at `/app/static` — build it on the host with `npm run build` and the backend serves it on the same port (no separate server).
 
 > **Networking note:** if you want a scan to actually find live hosts, run the stack on a machine/interface that can reach the target subnet. A VPN that cannot route to the target LAN will still let the scan *run*, but it will report no live hosts / no open ports.
+
+---
+
+## Setup from a fresh clone
+
+The platform is two runtimes: the **Docker stack** (Postgres, Redis, FastAPI backend that also runs the Celery scan worker and serves the built web UI) and an optional **scanner agent** (a plain Python script you can run on a machine that sits on the target LAN). Nothing else needs installing.
+
+### 1. Prerequisites
+
+| Tool | Needed for |
+|---|---|
+| Git | cloning the repo |
+| Docker Desktop (or Docker Engine + Compose v2) | the `postgres` / `redis` / `backend` stack |
+| Node.js ≥ 18 + npm | building the web UI on the host (`npm run build`) |
+| Python ≥ 3.11 | running the scanner agent directly (optional) |
+| Nmap + Npcap (Windows) / libpcap (Linux) | agent-side discovery & fingerprinting (optional) |
+
+Everything else (`nmap`, `weasyprint`, etc.) runs inside the Docker images.
+
+### 2. Clone
+
+```bash
+git clone https://github.com/szsuzan/network_assets_discovery.git
+cd network_assets_discovery
+```
+
+### 3. (Optional) Configure secrets
+
+Defaults work out of the box for local use. To override the Postgres password or JWT secret, copy the template and edit it (the file is gitignored and **never** committed):
+
+```bash
+# Windows:  Copy-Item .env.example .env
+cp .env.example .env
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `pentest` / `secret` / `asset_discovery` | Postgres access (used to build `DATABASE_URL`) |
+| `JWT_SECRET` | `change-me-in-production` | Auth token signing key — change for anything beyond local dev |
+| `JWT_ALGORITHM` / `JWT_EXPIRY_MINUTES` | `HS256` / `60` | Token settings |
+
+### 4. Start everything (Windows, one command)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File start-all.ps1
+```
+
+This builds the UI the first time (`npm install` + `npm run build`), starts the Compose stack, waits for the backend health check, then starts the LAN scanner agent in the background.
+
+### 5. Manual start (any OS)
+
+```bash
+cd frontend && npm install && npm run build && cd ..   # build the UI once
+docker compose up -d --build                           # start the stack
+docker compose ps                                      # postgres+redis (healthy), backend (Up)
+```
+
+Schema creation, migrations (001 → 009) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
+
+### 6. First login and first scan
+
+- Open <http://localhost:8000>, log in with `demo@pentest.local` / `password123`.
+- **Engagements → New Engagement** → add your network to **Authorized scope** (e.g. `192.168.1.0/24`).
+- **Engagement Detail → Start Scan** → target an IP/CIDR inside that scope, pick a `profile`, and watch the live scan.
+- Results appear under **Inventory**, **Topology**, **Findings**; generate a client report under **Report/Export**.
+
+### 7. (Recommended) Add a scanner agent
+
+Agent-delegated scans get real ARP → MAC/vendor and `-O` OS detection, which the container can't do from Docker's virtual network. Register one on the **Agents** page and run it from a machine that sits on the target LAN — see [Scanner agents](#scanner-agents).
+
+### 8. Stop (data preserved)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File stop-all.ps1   # Windows: agent + stack
+docker compose down                                     # any OS: stack only (no -v, data kept)
+```
 
 ---
 
@@ -72,17 +149,20 @@ powershell -ExecutionPolicy Bypass -File start-all.ps1
 
 This does, in order:
 
-1. Starts the Docker Compose stack (`postgres`, `redis`, `backend`, `celery_worker`, `frontend`) — `docker compose up -d`
-2. Waits for the backend API to become ready (~up to 60 s, health-polled)
-3. Starts the LAN scanner agent as a background process
+1. Builds the web UI: `cd frontend && npm install && npm run build` (only the first time, or after UI changes)
+2. Starts the Docker Compose stack (`postgres`, `redis`, `backend` — the backend container runs the API, the Celery scan worker, and serves the built UI on the same port) — `docker compose up -d`
+3. Waits for the backend API to become ready (~up to 60 s, health-polled)
+4. Starts the LAN scanner agent as a background process
 
 Data is **preserved across restarts** (`docker compose down` is never called with `-v`). The script is **idempotent** — re-running it is safe.
 
 Once started:
 
-- **Web UI:** <http://localhost:3000>
+- **Web UI + API:** <http://localhost:8000>
 - **API docs (Swagger):** <http://localhost:8000/docs>
 - **Health check:** <http://localhost:8000/health> → `{"status":"ok"}`
+
+Schema is set up **automatically** on first boot: the backend applies every `database/migrations/*.sql` in order and records applied versions in `schema_version`, so later runs are a no-op. No manual `psql` or `seed.py` steps are needed.
 
 ### Stop everything
 
@@ -94,11 +174,7 @@ This stops the LAN scanner agent first, then brings the Compose stack down **wit
 
 ### First login
 
-The stack ships with a **demo admin user**. On a fresh database, seed it once:
-
-```powershell
-docker compose exec backend python seed.py
-```
+The stack ships with a **demo admin user** that is created automatically on a fresh database at backend startup (only when no users exist yet — it never touches an existing database):
 
 | Field | Value |
 |-------|-------|
@@ -123,7 +199,7 @@ Verify everything is healthy:
 docker compose ps
 ```
 
-Expected: `postgres` and `redis` show `(healthy)`; the rest show `Up`.
+Expected: `postgres` and `redis` show `(healthy)`; `backend` shows `Up`.
 
 **Layer-2 note:** all containers run inside Docker's own virtual network. They are reachable from your LAN but are **not** on the target subnet's broadcast segment — so by default the container can only do Layer-3 (TCP/UDP) scanning. To get **ARP → MAC/vendor and exact OS detection**, deploy a [scanner agent](#scanner-agents) on a machine that sits on the target LAN. Without an agent, scans run L3-only and MAC/vendor/OS fields stay blank (that is correct behaviour, not a bug).
 
@@ -135,7 +211,8 @@ Backend:
 cd backend
 pip install -r requirements.txt
 # set DATABASE_URL, REDIS_URL, JWT_SECRET in environment or backend/.env
-python seed.py           # creates tables + demo user (requires running Postgres)
+# migrations + demo user are applied automatically at backend startup
+python seed.py           # (optional) same as the automatic startup seed
 uvicorn app.main:app --reload --port 8000
 celery -A app.services.scan_worker worker --loglevel=info
 ```
@@ -518,11 +595,11 @@ Core entities: `users`, `engagements`, `scans`, `hosts`, `ports`, `snmp_info`, `
 
 - Confirm the target is **reachable** from the current network. On a VPN that can't route to the LAN, the scan completes but returns no live hosts.
 - Try a **single IP** you know is up, `quick` profile, small port range.
-- Check the worker log: `docker compose logs -f celery_worker`.
+- Check the worker log: `docker compose logs -f backend`.
 
 ### "A scan is stuck in `queued`"
 
-The Celery worker isn't processing. Confirm it's up (`docker compose ps`), inspect logs, and restart if stale: `docker compose restart celery_worker`.
+The Celery worker isn't processing. Confirm it's up (`docker compose ps`), inspect logs, and restart if stale: `docker compose restart backend`.
 
 ### "Out-of-scope target rejected"
 
@@ -538,7 +615,7 @@ Agents are only used when one is **online** and its **subnets cover the targets*
 
 ### "I changed backend code — do I need to rebuild?"
 
-- **Python/code-only changes:** `./backend` is volume-mounted; uvicorn runs with `--reload`, so backend changes apply on save. Restart `celery_worker` to pick up worker code changes.
+- **Python/code-only changes:** `./backend` is volume-mounted and the API runs with `--reload`, so backend changes apply on save. The Celery worker shares the container — `docker compose restart backend` also picks up worker code changes.
 - **Dependency / Dockerfile changes:** rebuild with `docker compose up -d --build`.
 
 ### "The scan found the host but it's type `unknown`"
@@ -551,7 +628,7 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
 
 ### Frontend topology looks broken after `npm install`
 
-`react-force-graph` is patched at install time by `frontend/patch-force-graph.mjs` (wired as the package `postinstall` script and copied into the Docker image). **Never edit `node_modules/force-graph/` directly** — the patch chain also runs `patch-force-graph.mjs` in the frontend Docker build.
+`react-force-graph` is patched at install time by `frontend/patch-force-graph.mjs` (wired as the package `postinstall` script). **Never edit `node_modules/force-graph/` directly** — re-run `npm run build` from `frontend/` after any `npm install`.
 
 ---
 
@@ -559,23 +636,25 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
 
 ```
 .
-├── docker-compose.yml              # 5-service stack
+├── docker-compose.yml              # 3-service stack
 ├── .env.example                    # template for secrets (POSTGRES_*, JWT_SECRET, ...)
-├── start-all.ps1                   # start stack + agent (quick start)
+├── start-all.ps1                   # build UI + start stack + agent (quick start)
 ├── stop-all.ps1                    # stop agent + stack, data preserved
 ├── start-scanner-agent.ps1         # start the LAN agent as a background process
 ├── stop-scanner-agent.ps1          # stop the LAN agent
 ├── agent/
 │   ├── scanner_agent.py            # distributable LAN L2 scanner (CLI)
 │   └── Dockerfile                  # containerized agent (Linux, host-net)
-├── database/migrations/001_init.sql  # PostgreSQL schema (applied on first boot)
+├── database/migrations/            # ordered .sql migrations (applied automatically)
+│   └── 001_init.sql                #   from 001 to 009 on backend startup
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
-│   ├── seed.py                     # creates tables + demo admin user
+│   ├── seed.py                     # demo admin user CLI (auto-created at startup too)
 │   ├── reclassify_hosts.py         # one-off device-type reclassifier for existing scans
 │   └── app/
-│       ├── main.py                 # FastAPI app + CORS + routers
+│       ├── main.py                 # FastAPI app + CORS + routers + SPA static serving
+│       ├── run_server.py           # supervisor: uvicorn + Celery worker in one container
 │       ├── config.py               # settings (env-driven)
 │       ├── database.py             # async SQLAlchemy engine
 │       ├── models.py               # ORM models
@@ -583,12 +662,13 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
 │       ├── auth.py                 # JWT auth helpers
 │       ├── scope_utils.py          # CIDR in-scope validation
 │       ├── websocket.py            # connection manager (+ event timestamps)
-│       ├── routers/                # auth, engagements, scans, agents, export
+│       ├── routers/                # auth, engagements, scans, hosts, agents, exports,
+│       │                           # webhooks, settings
 │       └── services/               # scan_worker (Celery + pipeline + delegation),
-│                                   # scanners, report_generator
+│                                   # scanners, migrations (schema runner), report_generator
 └── frontend/
-    ├── Dockerfile
     ├── package.json
+    ├── vite.config.ts              # dev proxy: /api → http://localhost:8000
     ├── patch-force-graph.mjs       # postinstall force-graph patch (do not hand-edit node_modules)
     └── src/
         ├── hooks/useApi.ts         # TanStack Query hooks (+ agents)

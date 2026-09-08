@@ -79,7 +79,7 @@ export default function Report() {
   const handleExport = async (format: string) => {
     setExporting(format)
     const token = localStorage.getItem('token')
-    const base = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
+    const base = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
     const res = await fetch(`${base}/api/scans/${scanId}/export?format=${format}`, {
       headers: { Authorization: `Bearer ${token}` },
     })

@@ -1,6 +1,6 @@
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
-CREATE TABLE users (
+CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
@@ -8,7 +8,7 @@ CREATE TABLE users (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE engagements (
+CREATE TABLE IF NOT EXISTS engagements (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     client_name TEXT NOT NULL,
     engagement_name TEXT NOT NULL,
@@ -20,7 +20,7 @@ CREATE TABLE engagements (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE scans (
+CREATE TABLE IF NOT EXISTS scans (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     engagement_id UUID REFERENCES engagements(id) NOT NULL,
     targets TEXT[] NOT NULL,
@@ -39,7 +39,7 @@ CREATE TABLE scans (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE TABLE hosts (
+CREATE TABLE IF NOT EXISTS hosts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id) NOT NULL,
     ip INET NOT NULL,
@@ -58,7 +58,7 @@ CREATE TABLE hosts (
     UNIQUE(scan_id, ip)
 );
 
-CREATE TABLE ports (
+CREATE TABLE IF NOT EXISTS ports (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     host_id UUID REFERENCES hosts(id) ON DELETE CASCADE NOT NULL,
     port INT NOT NULL,
@@ -69,7 +69,7 @@ CREATE TABLE ports (
     banner TEXT
 );
 
-CREATE TABLE snmp_info (
+CREATE TABLE IF NOT EXISTS snmp_info (
     host_id UUID REFERENCES hosts(id) ON DELETE CASCADE PRIMARY KEY,
     sys_descr TEXT,
     sys_name TEXT,
@@ -79,7 +79,7 @@ CREATE TABLE snmp_info (
     default_community_found BOOLEAN DEFAULT false
 );
 
-CREATE TABLE findings (
+CREATE TABLE IF NOT EXISTS findings (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id) NOT NULL,
     host_id UUID REFERENCES hosts(id) ON DELETE CASCADE,
@@ -93,7 +93,7 @@ CREATE TABLE findings (
     included_in_report BOOLEAN DEFAULT true
 );
 
-CREATE TABLE topology_edges (
+CREATE TABLE IF NOT EXISTS topology_edges (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     scan_id UUID REFERENCES scans(id) NOT NULL,
     source_ip INET NOT NULL,
@@ -101,7 +101,7 @@ CREATE TABLE topology_edges (
     edge_type TEXT NOT NULL
 );
 
-CREATE TABLE audit_log (
+CREATE TABLE IF NOT EXISTS audit_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID REFERENCES users(id),
     engagement_id UUID REFERENCES engagements(id),
@@ -111,10 +111,10 @@ CREATE TABLE audit_log (
     created_at TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX idx_hosts_scan_id ON hosts(scan_id);
-CREATE INDEX idx_ports_host_id ON ports(host_id);
-CREATE INDEX idx_findings_scan_id ON findings(scan_id);
-CREATE INDEX idx_topology_scan_id ON topology_edges(scan_id);
-CREATE INDEX idx_audit_log_user_id ON audit_log(user_id);
-CREATE INDEX idx_audit_log_engagement_id ON audit_log(engagement_id);
-CREATE INDEX idx_audit_log_scan_id ON audit_log(scan_id);
+CREATE INDEX IF NOT EXISTS idx_hosts_scan_id ON hosts(scan_id);
+CREATE INDEX IF NOT EXISTS idx_ports_host_id ON ports(host_id);
+CREATE INDEX IF NOT EXISTS idx_findings_scan_id ON findings(scan_id);
+CREATE INDEX IF NOT EXISTS idx_topology_scan_id ON topology_edges(scan_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_user_id ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_engagement_id ON audit_log(engagement_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_scan_id ON audit_log(scan_id);

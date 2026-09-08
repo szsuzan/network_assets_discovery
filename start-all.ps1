@@ -1,7 +1,8 @@
 # =============================================================================
 #  start-all.ps1
 #  Clean startup of the Network Asset Discovery stack:
-#    1. Docker Compose stack  (postgres, redis, backend, celery worker, frontend)
+#    1. Docker Compose stack  (postgres, redis, backend = API + Celery worker
+#       + built web UI served on the same port)
 #    2. LAN scanner agent     (once the backend is ready)
 #
 #  Data is preserved across restarts (compose is never brought down with -v here).
@@ -10,7 +11,9 @@
 # =============================================================================
 $ErrorActionPreference = 'Stop'
 
-$DC          = 'C:\Users\sths2\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe'
+# Resolve docker.exe: prefer PATH, fall back to the author's Windows path.
+$DC = (Get-Command docker -ErrorAction SilentlyContinue).Source
+if (-not $DC) { $DC = 'C:\Users\sths2\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe' }
 $BackendProbe = 'http://localhost:8000/docs'
 
 if (-not (Test-Path $DC)) {
@@ -19,14 +22,31 @@ if (-not (Test-Path $DC)) {
     exit 1
 }
 
-Write-Host '=== [1/3] Starting Docker Compose stack ... ===' -ForegroundColor Cyan
+Write-Host '=== [1/4] Building web UI (skipped if already built) ... ===' -ForegroundColor Cyan
+$FrontendDist = Join-Path $PSScriptRoot 'frontend\dist\index.html'
+if (-not (Test-Path $FrontendDist)) {
+    Push-Location (Join-Path $PSScriptRoot 'frontend')
+    try {
+        Write-Host '  npm install + npm run build (first run) ...'
+        npm install --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw 'npm install failed' }
+        npm run build
+        if ($LASTEXITCODE -ne 0) { throw 'npm run build failed' }
+    } finally {
+        Pop-Location
+    }
+} else {
+    Write-Host '  web UI already built (frontend/dist present); set FORCE_UI_BUILD=1 to rebuild'
+}
+
+Write-Host '=== [2/4] Starting Docker Compose stack ... ===' -ForegroundColor Cyan
 Push-Location $PSScriptRoot
 try {
     if (-not (Test-Path (Join-Path $PSScriptRoot 'docker-compose.yml'))) {
         Write-Host 'ERROR: docker-compose.yml not found in this folder.' -ForegroundColor Red
         exit 1
     }
-    & $DC compose up -d
+    & $DC compose up -d --build
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'ERROR: docker compose up failed.' -ForegroundColor Red
         exit 1
@@ -36,7 +56,7 @@ try {
 }
 
 Write-Host ''
-Write-Host '=== [2/3] Waiting for backend to become ready ... ===' -ForegroundColor Cyan
+Write-Host '=== [3/4] Waiting for backend to become ready ... ===' -ForegroundColor Cyan
 $tries = 0
 do {
     Start-Sleep -Seconds 3
@@ -60,11 +80,11 @@ if (-not $ready) {
 Write-Host '  backend is up.'
 
 Write-Host ''
-Write-Host '=== [3/3] Starting LAN scanner agent ... ===' -ForegroundColor Cyan
+Write-Host '=== [4/4] Starting LAN scanner agent ... ===' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'start-scanner-agent.ps1')
 
 Write-Host ''
 Write-Host '=== Startup complete ===' -ForegroundColor Green
-Write-Host '  Web UI  : http://localhost:3000 (or the mapped frontend port)'
+Write-Host '  Web UI  : http://localhost:8000  (API + built web UI on the same port)'
 Write-Host '  This terminal can be closed; the stack and agent keep running.'
 Write-Host '  To shut everything down later:  powershell -ExecutionPolicy Bypass -File stop-all.ps1'

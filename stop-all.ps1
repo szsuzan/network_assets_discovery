@@ -2,7 +2,7 @@
 #  stop-all.ps1
 #  Clean shutdown of the Network Asset Discovery stack:
 #    1. LAN scanner agent  (background python process)
-#    2. Docker Compose stack (postgres, redis, backend, celery worker, frontend)
+#    2. Docker Compose stack (postgres, redis, backend = API + Celery worker + UI)
 #
 #  SAFETY: uses `docker compose down` WITHOUT -v, so the Postgres data volume
 #  (postgres_data) and all stored scans/hosts/findings are PRESERVED.
@@ -13,7 +13,9 @@
 # =============================================================================
 $ErrorActionPreference = 'Stop'
 
-$DC          = 'C:\Users\sths2\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe'
+# Resolve docker.exe: prefer PATH, fall back to the author's Windows path.
+$DC = (Get-Command docker -ErrorAction SilentlyContinue).Source
+if (-not $DC) { $DC = 'C:\Users\sths2\AppData\Local\Programs\DockerDesktop\resources\bin\docker.exe' }
 
 if (-not (Test-Path $DC)) {
     Write-Host "WARNING: docker.exe not found at:`n  $DC" -ForegroundColor Red

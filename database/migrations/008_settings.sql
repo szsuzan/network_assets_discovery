@@ -2,7 +2,7 @@
 -- behaviour, Nmap/NSE/SNMP knobs) editable from the Settings page.
 -- Every key is defined in backend/app/services/settings.py; the values seeded
 -- here match the runtime defaults that were previously hardcoded constants.
--- Applied manually like the other 002+ migrations.
+-- Applied automatically in order by the migration runner at backend startup.
 CREATE TABLE IF NOT EXISTS system_settings (
     key        TEXT PRIMARY KEY,
     value      JSONB NOT NULL,
