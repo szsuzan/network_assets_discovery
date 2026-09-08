@@ -122,10 +122,8 @@ export default function LiveScan() {
   const resumeScan = useResumeScan()
 
   const wsUrl = useMemo(() => {
-    const base = (import.meta.env.VITE_API_URL || 'http://localhost:8000').replace(/\/$/, '')
-    const wsScheme = base.startsWith('https') ? 'wss' : 'ws'
-    const host = base.replace(/^https?:\/\//, '')
-    return `${wsScheme}://${host}/api/ws/scans/${scanId}`
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    return `${wsScheme}://${window.location.host}/api/ws/scans/${scanId}`
   }, [scanId])
   const [connected, setConnected] = useState(false)
   const [feed, setFeed] = useState<FeedEntry[]>([])
