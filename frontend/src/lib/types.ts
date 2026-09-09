@@ -284,6 +284,47 @@ export const DEVICE_TYPE_LABELS: Record<string, string> = {
   unknown: 'Unidentified Host (Private MAC)',
 }
 
+// Stable, unique color per device type so pie/topology slices never repeat.
+// Each canonical key maps to its own color; unknown keys get a deterministic
+// spread from DEVICE_FALLBACK_COLORS via deviceTypeColor().
+export const DEVICE_TYPE_COLORS: Record<string, string> = {
+  router: '#3B82F6',
+  switch: '#14B8A6',
+  firewall: '#EF4444',
+  wireless_access_point: '#F59E0B',
+  workstation: '#8B5CF6',
+  laptop: '#06B6D4',
+  smartphone: '#EC4899',
+  tablet: '#84CC16',
+  physical_server: '#6B7280',
+  virtual_machine: '#0EA5E9',
+  nas: '#A855F7',
+  printer: '#F97316',
+  voip_phone: '#10B981',
+  conference: '#6366F1',
+  smart_tv: '#22C55E',
+  ip_camera: '#E11D48',
+  iot: '#EAB308',
+  smart_speaker: '#D946EF',
+  unidentified: '#94A3B8',
+  rogue: '#DC2626',
+  access_control: '#2DD4BF',
+}
+
+const DEVICE_FALLBACK_COLORS = [
+  '#3B82F6', '#14B8A6', '#F97316', '#8B5CF6', '#22C55E', '#EF4444', '#06B6D4',
+  '#EC4899', '#EAB308', '#6366F1', '#10B981', '#F43F5E', '#0EA5E9', '#A855F7',
+  '#84CC16', '#F59E0B', '#2DD4BF', '#D946EF', '#94A3B8', '#DC2626', '#0891B2',
+]
+
+export function deviceTypeColor(key: string): string {
+  const known = DEVICE_TYPE_COLORS[key]
+  if (known) return known
+  let h = 0
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0
+  return DEVICE_FALLBACK_COLORS[h % DEVICE_FALLBACK_COLORS.length]
+}
+
 // Map older stored device_type values onto the granular taxonomy so filters and
 // labels stay correct for scans captured before the finer classification.
 const DEVICE_ALIASES: Record<string, string> = {
