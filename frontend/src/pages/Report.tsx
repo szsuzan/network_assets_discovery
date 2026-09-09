@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useHosts, useFindings, useScan } from '../hooks/useApi'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
-import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, normalizeDeviceType, FINDING_TYPE_LABELS, FINDING_STATUS_LABELS } from '../lib/types'
+import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, deviceTypeColor, normalizeDeviceType, FINDING_TYPE_LABELS, FINDING_STATUS_LABELS } from '../lib/types'
 import { SeverityBadge } from '../components/SeverityBadge'
 import ScanNav from '../components/ScanNav'
 
@@ -30,10 +30,16 @@ export default function Report() {
   const deviceBreakdown = useMemo(() => {
     const map = new Map<string, number>()
     hosts?.forEach((h) => {
-      const type = DEVICE_TYPE_LABELS[normalizeDeviceType(h.device_type)] || 'Unknown'
-      map.set(type, (map.get(type) || 0) + 1)
+      const key = normalizeDeviceType(h.device_type)
+      map.set(key, (map.get(key) || 0) + 1)
     })
-    return Array.from(map.entries()).map(([name, value]) => ({ name, value }))
+    return Array.from(map.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([key, value]) => ({
+        name: DEVICE_TYPE_LABELS[key] || 'Unknown',
+        value,
+        color: deviceTypeColor(key),
+      }))
   }, [hosts])
 
   const reported = useMemo(() => findings?.filter((f) => f.included_in_report) || [], [findings])
@@ -141,11 +147,11 @@ export default function Report() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           <div className="rounded-lg border border-gray-800 bg-gray-900 p-6">
             <h3 className="mb-4 font-medium">Device Breakdown</h3>
-            <ResponsiveContainer width="100%" height={280}>
-              <PieChart>
+            <ResponsiveContainer width="100%" height={300}>
+              <PieChart margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
                 <Pie data={deviceBreakdown} dataKey="value" nameKey="name" cx="50%" cy="50%" outerRadius={90} label>
-                  {deviceBreakdown.map((entry, i) => (
-                    <Cell key={i} fill={['#3B82F6', '#8B5CF6', '#10B981', '#F59E0B', '#EF4444', '#06B6D4'][i % 6]} />
+                  {deviceBreakdown.map((entry) => (
+                    <Cell key={entry.name} fill={entry.color} />
                   ))}
                 </Pie>
                 <Tooltip contentStyle={{ backgroundColor: '#1F2937', border: 'none', borderRadius: '8px', color: '#fff' }} />

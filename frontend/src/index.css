@@ -28,6 +28,7 @@ body {
 :where(html:not(.dark)) .bg-gray-900 { background-color: #ffffff; }
 :where(html:not(.dark)) .bg-gray-900\/70 { background-color: rgba(249, 250, 251, 0.85); }
 :where(html:not(.dark)) .bg-gray-900\/50 { background-color: rgba(249, 250, 251, 0.65); }
+:where(html:not(.dark)) .bg-gray-900\/95 { background-color: rgba(249, 250, 251, 0.95); }
 :where(html:not(.dark)) .bg-gray-800 { background-color: #f9fafb; }
 :where(html:not(.dark)) .bg-gray-800\/70 { background-color: rgba(255, 255, 255, 0.85); }
 :where(html:not(.dark)) .bg-gray-800\/50 { background-color: rgba(243, 244, 246, 0.85); }
