@@ -310,7 +310,9 @@ export default function Topology() {
   const { data: findings } = useFindings(scanId)
   const graphRef = useRef<any>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const pageRef = useRef<HTMLDivElement>(null)
   const [size, setSize] = useState({ w: 960, h: 520 })
+  const [isFullscreen, setIsFullscreen] = useState(false)
   const [focusId, setFocusId] = useState<string | null>(null)
   const [selectedHostIp, setSelectedHostIp] = useState<string | null>(null)
   const [filterText, setFilterText] = useState('')
@@ -328,14 +330,59 @@ export default function Topology() {
   useEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const obs = new ResizeObserver(() => {
+    const measure = () => {
       const w = el.clientWidth || 960
       const top = el.getBoundingClientRect().top
       const h = Math.max(320, (window.innerHeight || 800) - top - 20)
       setSize({ w, h })
-    })
+    }
+    const obs = new ResizeObserver(measure)
     obs.observe(el)
     return () => obs.disconnect()
+  }, [])
+
+  // Fullscreen enter/exit: keep button state in sync, re-measure the graph
+  // card (it now fills the viewport) and refit so the diagram fills the screen.
+  const refitOnFsChange = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    const top = el.getBoundingClientRect().top
+    const w = el.clientWidth || 960
+    const h = Math.max(320, (window.innerHeight || 800) - top - 20)
+    setSize({ w, h })
+    setTimeout(() => {
+      try {
+        graphRef.current?.zoomToFit?.(0, 40)
+        graphRef.current?.flushShadowCanvas?.()
+      } catch {}
+    }, 80)
+  }, [])
+
+  useEffect(() => {
+    const onFsChange = () => {
+      const active = Boolean(document.fullscreenElement)
+      setIsFullscreen(active)
+      refitOnFsChange()
+    }
+    document.addEventListener('fullscreenchange', onFsChange)
+    document.addEventListener('webkitfullscreenchange', onFsChange as any)
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange)
+      document.removeEventListener('webkitfullscreenchange', onFsChange as any)
+    }
+  }, [refitOnFsChange])
+
+  const toggleFullscreen = useCallback(async () => {
+    const el = pageRef.current as any
+    try {
+      if (!document.fullscreenElement) {
+        if (el?.requestFullscreen) await el.requestFullscreen()
+        else if (el?.webkitRequestFullscreen) await el.webkitRequestFullscreen()
+      } else {
+        if (document.exitFullscreen) await document.exitFullscreen()
+        else if ((document as any).webkitExitFullscreen) await (document as any).webkitExitFullscreen()
+      }
+    } catch {}
   }, [])
 
   // Build enriched node/link arrays
@@ -581,6 +628,32 @@ export default function Topology() {
     try { graphRef.current?.zoomToFit(400, 60) } catch {}
   }, [])
 
+  // Length-based flow sizing: particle speed is a *ratio* of the link length
+  // per frame, so on long links it produces huge on-screen jumps per frame and
+  // the flow reads as a blur (invisible), while short links crawl visibly.
+  // Normalise to a constant world-unit distance per frame (4 units) and place
+  // one particle per ~36 units so the marching dots are equally dense and
+  // clearly visible at any diagram size.
+  const getLinkLength = useCallback((l: any) => {
+    const s = typeof l.source === 'string' ? l.source : (l.source as any)?.id
+    const t = typeof l.target === 'string' ? l.target : (l.target as any)?.id
+    const sn = graphNodes.find((n) => n.id === s)
+    const tn = graphNodes.find((n) => n.id === t)
+    if (!sn || !tn || sn.x == null || sn.y == null || tn.x == null || tn.y == null) return 400
+    return Math.hypot((tn.x as number) - (sn.x as number), (tn.y as number) - (sn.y as number))
+  }, [graphNodes])
+
+  const getParticleCount = useCallback((l: any) => {
+    return Math.max(7, Math.min(80, Math.round(getLinkLength(l) / 36)))
+  }, [getLinkLength])
+
+  const getParticleSpeed = useCallback((l: any) => {
+    const len = Math.max(60, getLinkLength(l))
+    // Clamp the ratio so short links don't loop instantly and long links never
+    // leap ahead of the eye.
+    return Math.max(0.0006, Math.min(0.012, 4 / len))
+  }, [getLinkLength])
+
   // Fit to the architecture IMMEDIATELY (no transition) so the first painted
   // frame is already the final view. Then force a reheat/refresh so the shadow
   // (hit-test) canvas repaints with the SAME transform as the visible canvas —
@@ -615,7 +688,10 @@ export default function Topology() {
   const zoneCount = graphNodes.filter((n) => n.kind === 'zone').length
 
   return (
-    <div className="flex h-full">
+    <div
+      ref={pageRef}
+      className={`flex h-full ${isFullscreen ? (dark ? 'bg-[#0b1020]' : 'bg-gray-50') : ''}`}
+    >
       <div className="flex flex-1 flex-col">
         <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">← Back to engagement</Link>
         <ScanNav engagementId={engagementId!} scanId={scanId!} />
@@ -634,6 +710,9 @@ export default function Topology() {
               className="w-48 rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs text-gray-200 placeholder-gray-500 focus:border-blue-500 focus:outline-none"
             />
             <button onClick={handleFitAll} className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700">Fit View</button>
+            <button onClick={toggleFullscreen} className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700">
+              {isFullscreen ? 'Exit Fullscreen' : '⛶ Fullscreen'}
+            </button>
             <button onClick={() => setShowLegend(!showLegend)} className="rounded-md border border-gray-700 bg-gray-800 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-700">
               {showLegend ? 'Hide Legend' : 'Show Legend'}
             </button>
@@ -666,9 +745,9 @@ export default function Topology() {
               linkColor={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.color || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.color}
               linkWidth={(l: any) => ((dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.width || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.width) * 1.6}
               linkLineDash={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.dash || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.dash}
-              linkDirectionalParticles={(l: any) => (l.type === 'gateway' ? 5 : 3)}
-              linkDirectionalParticleWidth={2.8}
-              linkDirectionalParticleSpeed={0.008}
+              linkDirectionalParticles={(l: any) => (l.type === 'gateway' ? getParticleCount(l) : 3)}
+              linkDirectionalParticleWidth={(l: any) => (l.type === 'gateway' ? 4.5 : 2.8)}
+              linkDirectionalParticleSpeed={(l: any) => (l.type === 'gateway' ? getParticleSpeed(l) : 0.008)}
               linkDirectionalParticleColor={(l: any) => (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT)[l.type]?.color || (dark ? EDGE_STYLE : EDGE_STYLE_LIGHT).l2.color}
               linkDirectionalArrowLength={7}
               linkDirectionalArrowRelPos={1}
