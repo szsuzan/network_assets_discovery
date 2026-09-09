@@ -26,7 +26,10 @@ def histogram(hosts):
 
 def main():
     scan_id = sys.argv[1] if len(sys.argv) > 1 else None
-    query = select(Host).options(selectinload(Host.ports))
+    query = select(Host).options(
+        selectinload(Host.ports),
+        selectinload(Host.snmp),
+    )
     if scan_id:
         query = query.where(Host.scan_id == UUID(scan_id))
 

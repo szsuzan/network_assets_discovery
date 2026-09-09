@@ -1373,15 +1373,24 @@ def fingerprint_hosts(db, scan: Scan, hosts: list):
 # --------------------------------------------------------------------------- #
 
 def classify_device_type(host: Host):
-    """Heuristic classification based on MAC vendor, hostname, OS hint and open
-    ports. Ordered so specific devices (cameras, fingerprint/access-control
-    terminals, NAS, printers, VMs) win over generic server/workstation guesses.
+    """Heuristic classifier over every probe datapoint the platform collects.
 
-    Emits a granular taxonomy (router/switch/firewall/AP, laptop vs phone/tablet,
-    physical_server vs virtual_machine, smart TV/speaker, VoIP...) so hosts are
-    no longer lumped into coarse "mobile"/"network_gear" buckets. Apple/Android
-    hosts are only classified as phones/tablets when the name/OS actually says
-    so -- MacBooks and Chromebooks are laptops, never "mobile"."""
+    Signal order (highest first):
+      * open services/ports (JetDirect/IPP/LPD -> printer, SIP -> VoIP,
+        RTSP/Dahua -> camera, ZKTeco TTL -> access control),
+      * the *name* the device publishes itself -- mDNS hostname/instance
+        ("HP Officejet Pro 9010", "OnePlus Nord CE 3 5G", "Android_XXXX"),
+        SNMP sysDescr/sysName/sysLocation, and service banners/versions,
+      * MAC OUI manufacturer + well-known gateway addresses,
+      * the Nmap OS fingerprint (last resort): -O routinely mislabels a
+        handset's stack as a router/WAP and printer stacks as plain Linux.
+
+    A host that names itself a phone/tablet/printer is typed that way even when
+    the OS guess disagrees, because published names are far more reliable."""
+
+    def _any(frags, text):
+        return any(f in text for f in frags)
+
     standard_ips = ["192.168.1.1", "10.0.0.1", "192.168.0.1", "10.0.1.1", "172.16.0.1"]
     vendor = (host.vendor or "").lower()
     hostname = (host.hostname or "").lower()
@@ -1391,20 +1400,117 @@ def classify_device_type(host: Host):
     last_octet = str(host.ip).rsplit(".", 1)[-1]
     admin_ports = {22, 80, 443, 445, 139, 3389, 3306, 5432, 6379, 8000, 8080, 8443, 3000}
 
+    # -- aggregate every textual datapoint we have on this host --------------
+    snmp_name = snmp_descr = snmp_loc = ""
+    try:
+        snmp_rec = getattr(host, "snmp", None)
+        if snmp_rec is not None:
+            snmp_name = snmp_rec.sys_name or ""
+            snmp_descr = snmp_rec.sys_descr or ""
+            snmp_loc = snmp_rec.sys_location or ""
+    except Exception:
+        pass
+    service_parts = []
+    for p in host.ports:
+        if p.state != "open":
+            continue
+        for bit in (p.service, p.version, p.banner):
+            if bit:
+                service_parts.append(str(bit))
+    name_text = " ".join(x.lower() for x in (hostname, snmp_name, snmp_descr, snmp_loc) if x)
+    all_text = " ".join(x for x in (name_text, " ".join(service_parts).lower()) if x)
+
     # Gateway/router hosts by well-known address first.
     if str(host.ip) in standard_ips:
         host.device_type = "router"
         return
 
-    # --- printers / copiers ------------------------------------------------
-    # JetDirect/RAW (9100), IPP (631) and LPD (515) are the classic proof.
-    if any(v in vendor for v in ("brother", "canon", "epson", "kyocera", "ricoh",
-                                 "lexmark", "xerox", "zebra", "okidata", "oki data",
-                                 "oki electric", "oki printing", "minolta",
-                                 "konica", "fuji xerox")) \
-       or "print" in vendor or "print" in hostname \
+# --- printers / copiers ------------------------------------------------
+    # JetDirect/RAW (9100), IPP (631) and LPD (515) are the classic proof; the
+    # device's own published name (mDNS instance, sysDescr, banner) catches the
+    # rest -- including models whose brand+family is not the word "print", e.g.
+    # "HP Officejet Pro 9010", "Brother MFC-L3750", "Epson EcoTank ET-2850".
+    printer_vendors = ("brother", "canon", "epson", "kyocera", "ricoh", "lexmark",
+                       "xerox", "zebra", "okidata", "oki data", "oki electric",
+                       "oki printing", "minolta", "konica", "fuji xerox",
+                       "hewlett", "hp")
+    printer_names = ("officejet", "laserjet", "deskjet", "designjet", "inkjet",
+                     "pagewide", "photosmart", "ecotank", "surecolor", "multifunction",
+                     "workcentre", "workcenter", "docuprint", "bizhub", "magicolor",
+                     "imageclass", "pixma", "prograf", "stylus", "dcp-", "mfc-",
+                     "hl-", "laser", "plotter", "scanner", "print", "printer", "mfp")
+    if _any(printer_names, all_text) \
+       or any(v in vendor for v in printer_vendors) \
        or bool(ports & {9100, 631, 515, 6001}):
         host.device_type = "printer"
+        return
+
+    # --- phones / tablets by their own published name -----------------------
+    # Android/iOS handsets publicly identify as "Android_XXXX", "OnePlus Nord CE
+    # 3 5G", "SM-G991B" or "iPhone 14" -- far more trustworthy than the -O stack
+    # guess that so often calls a handset's stack a WAP/router. Excluded: names
+    # that self-describe fixed hardware (TV/stick/speaker/projector, network or
+    # imaging gear), which phones never do.
+    phone_names = ("android", "iphone", "ipad", "ipod", "pixel", "galaxy", "redmi",
+                   "oneplus", "poco", "realme", "xiaomi", "oppo", "vivo", "huawei",
+                   "honor", "infinix", "tecno", "itel", "fairphone", "nothing",
+                   "xperia", "motorola", "moto ", "sm-g", "sm-n", "sm-a", "sm-s",
+                   "sm-m", "sm-f", "sm-t", "matepad")
+    tablet_names = ("ipad", "ipod", "tablet", "kindle", "fire tablet", "sm-t",
+                    "galaxy tab", "matepad", "mi pad", "yoga tab")
+    nonphone_names = ("tv", "chromecast", "roku", "shield", "stick", "dongle",
+                      "box", "fire stick", "fire tv", "soundbar", "projector",
+                      "speaker", "alexa", "echo", "homepod", "router", "gateway",
+                      "modem", "gpon", "ont", "switch", "access point", "wap",
+                      "wireless", "wifi", "wi-fi", "extender", "repeater", "mesh",
+                      "ap-", "cctv", "camera", "nvr", "dvr", "printer", "scan",
+                      "nas", "ipcam")
+    if _any(phone_names, name_text) and not _any(nonphone_names, name_text):
+        if _any(tablet_names, name_text):
+            host.device_type = "tablet"
+        else:
+            host.device_type = "smartphone"
+        return
+
+    # --- Apple computers by their own published name -------------------------
+    # Privacy MACs erase the Apple OUI and a MacBook advertises the same
+    # AirPlay/_device-info mDNS services as an iPhone, so without this a MacBook
+    # Air can be mis-typed a smartphone. The published name settles it before
+    # the "mobile" service hint can.
+    mac_laptop_names = ("macbook", "mac book", "macbook air", "mac air")
+    mac_desktop_names = ("imac", "mac mini", "mac pro", "mac studio",
+                         "mac-mini", "mac-pro", "mac-studio")
+    if _any(mac_laptop_names, name_text):
+        host.device_type = "laptop"
+        return
+    if _any(mac_desktop_names, name_text):
+        host.device_type = "workstation"
+        return
+
+    # --- probe/service identity hints from mDNS / NSE ------------------------
+    # The scanner agent already reports *service-level* identity for this host
+    # ("_ipp"._printer._adisk._smb._ssh._meshcop...) and it is the strongest
+    # datapoint we have -- trust it unless open ports contradict it (a Linux
+    # box that also runs _smb and 445 is a server, not a NAS).
+    _hint = (host.device_type or "").strip().lower()
+    if _hint == "printer":
+        host.device_type = "printer"
+        return
+    if _hint == "nas" and not ({445, 139} & ports):
+        host.device_type = "nas"
+        return
+    if _hint == "network_gear":
+        host.device_type = "router"
+        return
+    if _hint == "mobile" \
+       and not any(x in os_guess for x in ("tvos", "webos", "tizen", "vidaa",
+                                           "android tv", "openwrt", "dd-wrt", "tomato",
+                                           "routeros", "fritz!", "vxworks", "chromeos",
+                                           "macos", "mac os", "darwin", "osx")):
+        host.device_type = "smartphone"
+        return
+    if _hint == "server" and not ({445, 139} & ports):
+        host.device_type = "physical_server"
         return
 
     # Nominal gateway addresses (first/last of the subnet) answering DNS/DHCP
@@ -1414,8 +1520,8 @@ def classify_device_type(host: Host):
         return
 
     # --- routers / modems / ONTs by name ------------------------------------
-    if any(kw in hostname for kw in ("router", "gateway", "modem", "ont-", "-ont",
-                                     "gpon", "fritzbox", "network-hub")):
+    if _any(("router", "gateway", "modem", "ont-", "-ont", "gpon", "fritzbox",
+             "network-hub"), name_text):
         host.device_type = "router"
         return
 
@@ -1423,20 +1529,21 @@ def classify_device_type(host: Host):
     if any(v in vendor for v in ("fortinet", "fortigate", "paloalto", "palo alto",
                                  "sonicwall", "sophos", "checkpoint", "pfsense",
                                  "opnsense", "watchguard", "barracuda", "cyberoam")) \
-       or any(kw in hostname for kw in ("firewall", "fw-", "sandgate")):
+       or any(kw in name_text for kw in ("firewall", "fw-", "sandgate")):
         host.device_type = "firewall"
         return
 
     # --- wireless access points / range extenders ----------------------------
     if any(v in vendor for v in ("ruckus", "aerohive", "cambium", "radwin", "mimosa",
                                  "engenius", "airties", "hnc")) \
-       or any(kw in hostname for kw in ("access point", "ap-", "uap-", "wireless",
-                                        "wifi", "hotspot", "repeater", "extender", "mesh-")):
+       or any(kw in name_text for kw in ("access point", "ap-", "uap-", "wireless",
+                                         "wifi", "hotspot", "repeater", "extender",
+                                         "mesh-")):
         host.device_type = "wireless_access_point"
         return
 
     # --- switches ------------------------------------------------------------
-    if "switch" in vendor or "switch" in hostname \
+    if "switch" in vendor or "switch" in name_text \
        or any(v in vendor for v in ("cisco", "juniper", "extreme", "brocade",
                                     "force10", "arista", "mellanox")):
         host.device_type = "switch"
@@ -1448,7 +1555,7 @@ def classify_device_type(host: Host):
                                  "alphion", "fiberhome", "utstarcom", "innacomm",
                                  "aztech", "ubiquiti", "sagem", "sagemcom",
                                  "technicolor", "aiptonet", "tahoe", "nokia")) \
-       or any(kw in hostname for kw in ("-router", "router-", "ont", "modem")) \
+       or any(kw in name_text for kw in ("-router", "router-", "ont", "modem")) \
        or any(x in os_guess for x in ("openwrt", "dd-wrt", "ddwrt", "tomato")):
         host.device_type = "router"
         return
@@ -1456,12 +1563,14 @@ def classify_device_type(host: Host):
     # --- IP cameras / NVRs / CCTV --------------------------------------------
     # Classic CCTV vendors plus tell-tale ports: RTSP (554/8554), Dahua TCP
     # (37777/34567), ONVIF discovery (3702/8899).
-    if any(v in vendor for v in (
+    camera_vendors = (
         "hikvision", "dahua", "axis", "foscam", "reolink", "amcrest",
         "orei", "annke", "avertx", "vstarcam", "wanscam", "cctv", "nvr", "dvr",
         "uniview", "zhejiang", "hunt", "imou", "tplink ipc", "arlo",
-    )) or any(kw in hostname for kw in ("cam", "cctv", "nvr", "dvr", "ipcam", "ip-cam",
-                                        "ipc-", "arlo")):
+    )
+    if any(v in vendor for v in camera_vendors) \
+       or any(kw in name_text for kw in ("cam", "cctv", "nvr", "dvr", "ipcam",
+                                         "ip-cam", "ipc-", "arlo")):
         host.device_type = "camera"
         return
     if ports & {554, 8554, 37777, 34567, 8899}:
@@ -1475,8 +1584,8 @@ def classify_device_type(host: Host):
         "zkt", "zkteco", "biometric", "fingerprint", "fingertime", "realtime",
         "suprema", "idteck", "essl", "verge", "palmary", "ahan", "anviz",
         "finger max", "door", "access control",
-    )) or any(kw in hostname for kw in ("finger", "biometric", "access", "attendance",
-                                        "door", "zk")):
+    )) or any(kw in name_text for kw in ("finger", "biometric", "access", "attendance",
+                                         "door", "zk")):
         host.device_type = "access_control"
         return
     if ports & {4370, 4371, 8091}:
@@ -1486,7 +1595,8 @@ def classify_device_type(host: Host):
     # --- NAS -----------------------------------------------------------------
     if any(v in vendor for v in ("synology", "qnap", "asustor", "westerndigital", "wd ",
                                  "buffalo", "thecus", "netgear readynas", "nas")) \
-       or "nas" in hostname:
+       or any(kw in name_text for kw in ("nas", "my cloud", "mycloud", "cloudstation",
+                                         "time capsule", "readynas")):
         host.device_type = "nas"
         return
 
@@ -1506,14 +1616,15 @@ def classify_device_type(host: Host):
        or any(v in vendor for v in ("polycom", "yealink", "grandstream", "snom",
                                     "obihai", "fanvil", "mitel", "avaya", "nortel",
                                     "cisco spa", "cisco cp-", "gigaset")) \
-       or any(kw in hostname for kw in ("sip", "voip", "ipphone", "ip-phone", "yealink",
-                                        "polycom", "grandstream", "ext-")):
+       or any(kw in name_text for kw in ("sip", "voip", "ipphone", "ip-phone", "yealink",
+                                         "polycom", "grandstream", "ext-")):
         host.device_type = "voip_phone"
         return
 
     # --- virtual assistants / smart speakers ---------------------------------
-    if any(kw in hostname for kw in ("echo", "alexa", "sonos", "nest mini", "google home",
-                                     "google mini", "jbl", "harman kardon", "i home")) \
+    if any(kw in name_text for kw in ("echo", "alexa", "sonos", "nest mini", "google home",
+                                      "google mini", "nest audio", "jbl", "harman kardon",
+                                      "i home")) \
        or any(v in vendor for v in ("sonos", "alexa", "harman kardon")):
         host.device_type = "smart_speaker"
         return
@@ -1524,20 +1635,21 @@ def classify_device_type(host: Host):
     if (any(x in os_guess for x in ("webos", "tizen", "vidaa", "smart tv", "android tv",
                                    "tvos", "netcast", "roku", "fire os", "google tv",
                                    "chromecast", "smart-tv")) \
-        or any(kw in hostname for kw in ("tv-", "bravia", "roku", "fire tv", "apple tv",
-                                         "chromecast", "nvidia shield", "amazon fire",
-                                         "tivo", "smarttv", "smart tv", "android tv")) \
-        or ("tv" in hostname and any(v in vendor for v in ("samsung", "lg", "sony",
-                                                           "hisense", "tcl", "vizio",
-                                                           "panasonic", "sharp")))) \
+        or any(kw in name_text for kw in ("tv-", "bravia", "roku", "fire tv", "apple tv",
+                                          "chromecast", "nvidia shield", "amazon fire",
+                                          "tivo", "smarttv", "smart tv", "android tv",
+                                          "media box", "mi box", "droidbox", "box")) \
+        or ("tv" in name_text and any(v in vendor for v in ("samsung", "lg", "sony",
+                                                            "hisense", "tcl", "vizio",
+                                                            "panasonic", "sharp")))) \
        and not any(x in os_guess for x in ("windows", "mac os", "macos", "darwin")):
         host.device_type = "smart_tv"
         return
 
     # --- conference / media systems ------------------------------------------
-    if any(kw in hostname for kw in ("conference", "videoconf", "vc-", "meeting",
-                                     "codec", "poly studio", "poly trio", "logitech",
-                                     "neat", "teams room", "zoom room")) \
+    if any(kw in name_text for kw in ("conference", "videoconf", "vc-", "meeting",
+                                      "codec", "poly studio", "poly trio", "logitech",
+                                      "neat", "teams room", "zoom room")) \
        or any(v in vendor for v in ("logitech", "neat", "birddog", "yasnoy",
                                     "cisco telepresence")):
         host.device_type = "conference"
@@ -1627,22 +1739,17 @@ def classify_device_type(host: Host):
             host.device_type = "laptop"
         return
 
-    # --- other phones / tablets ------------------------------------------------
-    # Soft phone evidence (an mDNS hostname like "Android_XXX" or a phone-OEM
-    # vendor) is only trusted when the OS does not contradict it. A privacy-MAC
-    # box named "Android" that the stack fingerprints as OpenWrt / tvOS is far
-    # more likely to be a TV stick or embedded device, not a handset.
+    # --- other phones / tablets by MAC-vendor OUI ---------------------------
+    # The early name-based check catches self-described handsets; here the OUI
+    # vendor alone is enough, still gated so a phone-vendor chip that runs a
+    # TV/embedded OS (tvOS, WebOS, OpenWrt, RouterOS...) isn't typed a handset.
     _os_phone_contradict = ("windows", "mac os", "macos", "darwin", "tvos", "webos",
                             "tizen", "vidaa", "openwrt", "dd-wrt", "ddwrt", "tomato",
                             "routeros", "fritz!", "freebsd", "netbsd", "openbsd",
                             "solaris", "vxworks", "chromeos")
     phone_vendors = ("samsung", "oppo", "vivo", "oneplus", "xiaomi", "huawei", "honor",
                      "realme", "motorola", "moto", "poco", "nothing", "google")
-    android_hostname = hostname.startswith(("android", "pixel", "redmi", "xiaomi", "oppo",
-                                            "vivo", "motorola", "moto", "samsung", "sm-",
-                                            "huawei", "honor", "nokia", "iphone", "ipad",
-                                            "ipod")) or "galaxy" in hostname
-    if (any(v in vendor for v in phone_vendors) or android_hostname) \
+    if any(v in vendor for v in phone_vendors) \
        and not any(x in os_guess for x in _os_phone_contradict):
         if "tab" in hostname or hostname.startswith("sm-t") or "galaxy tab" in hostname \
            or "kindle" in hostname or "ipad" in hostname:
