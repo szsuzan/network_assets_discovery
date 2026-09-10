@@ -61,7 +61,9 @@ export interface Host {
   id: string
   scan_id: string
   ip: string
+  secondary_ips?: string[] | null
   mac: string | null
+  macs?: string[] | null
   vendor: string | null
   hostname: string | null
   device_type: string | null

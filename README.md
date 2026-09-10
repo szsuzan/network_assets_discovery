@@ -52,7 +52,7 @@ The stack runs three services:
 | Service | Purpose | Local port |
 |---------|---------|-----------|
 | `postgres` | Database (schema auto-applied by migrations on backend start) | 5432 |
-| `redis` | Celery message broker + pause/stop state | 16379 |
+| `redis` | Celery message broker + pause/stop state | 6380 |
 | `backend` | FastAPI REST + WebSocket API, Celery scan worker, and serves the built web UI | 8000 |
 
 The backend container runs all three roles via `app/run_server.py` (a small supervisor that runs uvicorn + the Celery worker and restarts them if they crash). The UI is a static build of `frontend/` mounted at `/app/static` — build it on the host with `npm run build` and the backend serves it on the same port (no separate server).

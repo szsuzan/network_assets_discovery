@@ -40,6 +40,7 @@ export default function AssetInventory() {
       list = list.filter(
         (h) =>
           h.ip.toLowerCase().includes(q) ||
+          (h.secondary_ips || []).some((s) => s.toLowerCase().includes(q)) ||
           (h.mac || '').toLowerCase().includes(q) ||
           (h.hostname || '').toLowerCase().includes(q) ||
           (h.vendor || '').toLowerCase().includes(q)
@@ -110,6 +111,14 @@ export default function AssetInventory() {
                       >
                         {h.ip}
                       </Link>
+                      {(h.secondary_ips?.length || 0) > 0 && (
+                        <span
+                          className="ml-2 rounded bg-gray-700/60 px-1.5 py-0.5 text-[10px] text-gray-300"
+                          title={`Also seen at: ${h.secondary_ips!.join(', ')}`}
+                        >
+                          +{h.secondary_ips!.length} addr
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">

@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Response
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete, Text, cast, func
+from sqlalchemy import select, delete, Text, cast, func, or_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import INET
 from datetime import datetime, timezone
@@ -395,7 +395,11 @@ async def get_host_detail(
     result = await db.execute(
         select(Host)
         .options(selectinload(Host.ports), selectinload(Host.snmp))
-        .where(Host.scan_id == scan_id, Host.ip == _host_ip_eq(host_ip))
+        .where(
+            Host.scan_id == scan_id,
+            or_(Host.ip == _host_ip_eq(host_ip),
+                Host.secondary_ips.contains([host_ip])),
+        )
     )
     host = result.scalar_one_or_none()
     if not host:
@@ -419,7 +423,11 @@ async def patch_host(
     current_user: User = Depends(get_current_user)
 ):
     result = await db.execute(
-        select(Host).where(Host.scan_id == scan_id, Host.ip == _host_ip_eq(host_ip))
+        select(Host).where(
+            Host.scan_id == scan_id,
+            or_(Host.ip == _host_ip_eq(host_ip),
+                Host.secondary_ips.contains([host_ip])),
+        )
     )
     host = result.scalar_one_or_none()
     if not host:

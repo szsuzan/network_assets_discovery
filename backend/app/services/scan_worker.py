@@ -1399,6 +1399,15 @@ def classify_device_type(host: Host):
     mac = (host.mac or "").lower()
     last_octet = str(host.ip).rsplit(".", 1)[-1]
     admin_ports = {22, 80, 443, 445, 139, 3389, 3306, 5432, 6379, 8000, 8080, 8443, 3000}
+    # Consumer/CPE gateways, PON/ONT makers and the like. Vendors here are
+    # router-shaped even at non-nominal addresses, and (with the address rule
+    # below) identify the default gateway when it only exposes admin ports.
+    cpe_vendors = ("mikrotik", "d-link", "netgear", "tp-link", "tplink", "linksys",
+                   "tenda", "totolink", "avm", "fritz", "zyxel", "ubiquiti",
+                   "sagem", "technicolor", "nokia", "huawei", "zte",
+                   "taicang t&w", "t&w electronics", "alphion", "fiberhome",
+                   "utstarcom", "gongjin", "shenzhen gongjin", "proscend",
+                   "raisecom", "sumavision")
 
     # -- aggregate every textual datapoint we have on this host --------------
     snmp_name = snmp_descr = snmp_loc = ""
@@ -1513,9 +1522,14 @@ def classify_device_type(host: Host):
         host.device_type = "physical_server"
         return
 
-    # Nominal gateway addresses (first/last of the subnet) answering DNS/DHCP
-    # are almost certainly routers/ONTs.
-    if last_octet in ("1", "254") and ports & {53, 67, 68, 546, 547}:
+    # Nominal gateway addresses (first/last of the subnet). Most routers/ONTs
+    # keep an SSH + web admin UI open and do NOT expose a DNS/DHCP listener, so
+    # accept admin ports here instead of only 53/67/68. Desktop OS fingerprints
+    # (Windows/macOS) are never the gateway and fall through to the PC rules.
+    if last_octet in ("1", "254") \
+       and (ports & {53, 67, 68, 546, 547, 80, 443, 22, 161, 8080, 8443}
+            or any(v in vendor for v in cpe_vendors)) \
+       and not any(x in os_guess for x in ("windows", "mac os", "macos", "darwin", "chromeos")):
         host.device_type = "router"
         return
 
@@ -1554,7 +1568,9 @@ def classify_device_type(host: Host):
                                  "linksys", "tenda", "totolink", "avm", "zyxel",
                                  "alphion", "fiberhome", "utstarcom", "innacomm",
                                  "aztech", "ubiquiti", "sagem", "sagemcom",
-                                 "technicolor", "aiptonet", "tahoe", "nokia")) \
+                                 "technicolor", "aiptonet", "tahoe", "nokia",
+                                 "taicang t&w", "t&w electronics", "gongjin",
+                                 "proscend", "raisecom", "sumavision", "huawei", "zte")) \
        or any(kw in name_text for kw in ("-router", "router-", "ont", "modem")) \
        or any(x in os_guess for x in ("openwrt", "dd-wrt", "ddwrt", "tomato")):
         host.device_type = "router"
