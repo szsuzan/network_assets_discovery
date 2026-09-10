@@ -82,8 +82,7 @@ SubNex is a network asset discovery platform for penetration testing engagements
     <td align="center"><img src="assets/screenshots/agents.png" alt="Scanner agents" width="100%"><br><sub>Scanner agents — LAN L2 workers</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="assets/screenshots/report-pdf.png" alt="PDF client report" width="100%"><br><sub>PDF client report — WeasyPrint rendered</sub></td>
-    <td align="center" valign="middle"><a href="assets/screenshots/SubNex-scan-report.pdf"><b>Download the sample PDF report ›</b></a><br><sub>A real generated client report (↑)</sub></td>
+    <td align="center" colspan="2"><img src="assets/screenshots/report-pdf.png" alt="PDF client report" width="70%"><br><sub>PDF client report — WeasyPrint rendered (exportable from the Report page)</sub></td>
   </tr>
 </table>
 
@@ -342,7 +341,7 @@ Windows). If it's missing, the agent logs once and continues active-only — it 
 always best-effort. Passive evidence is merged **fill-if-blank**: a stronger
 `nmap -O` / SNMP result always wins.
 
-**Verified behaviour** (live run against `192.168.1.0/24`, shown in the screenshots above): an agent on the Windows LAN produced **43 live hosts** that the L3-only container could not characterize — real **MAC + vendor** bindings (Hikvision / Dahua / Uniview cameras, Xiaomi, Apple, Cisco, CyberTAN…), **hostnames** via mDNS/DHCP (e.g. the `DS-2CD1023G0E-20230404AAWRL…` camera names), exact **OS** fingerprints (Windows 11 24H2, macOS/iOS 16–17, Linux 4.15–5.19), **92 open ports** across 32 hosts, and **34 risk findings**. A device-class report of that scan lives in `assets/screenshots/SubNex-scan-report.pdf`.
+**Verified behaviour** (live run against `192.168.1.0/24`, shown in the screenshots above): an agent on the Windows LAN produced **43 live hosts** that the L3-only container could not characterize — real **MAC + vendor** bindings (Hikvision / Dahua / Uniview cameras, Xiaomi, Apple, Cisco, CyberTAN…), **hostnames** via mDNS/DHCP (e.g. the `DS-2CD1023G0E-20230404AAWRL…` camera names), exact **OS** fingerprints (Windows 11 24H2, macOS/iOS 16–17, Linux 4.15–5.19), **92 open ports** across 32 hosts, and **34 risk findings**. The PDF export of that scan is pictured in the screenshot gallery above.
 
 ---
 
