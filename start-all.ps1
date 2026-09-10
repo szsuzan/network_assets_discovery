@@ -1,9 +1,11 @@
 # =============================================================================
 #  start-all.ps1
 #  Clean startup of the SubNex stack:
-#    1. Docker Compose stack  (postgres, redis, backend = API + Celery worker
+#    1. Docker engine (starts Docker Desktop automatically if it is not
+#       running yet, then waits until the engine answers)
+#    2. Docker Compose stack  (postgres, redis, backend = API + Celery worker
 #       + built web UI served on the same port)
-#    2. LAN scanner agent     (once the backend is ready)
+#    3. LAN scanner agent     (once the backend is ready)
 #
 #  Data is preserved across restarts (compose is never brought down with -v here).
 #  Idempotent - re-running is safe.
@@ -18,11 +20,45 @@ $BackendProbe = 'http://localhost:8000/docs'
 
 if (-not (Test-Path $DC)) {
     Write-Host "ERROR: docker.exe not found at:`n  $DC" -ForegroundColor Red
-    Write-Host 'Start Docker Desktop first, then re-run this script.' -ForegroundColor Yellow
+    Write-Host 'Install Docker Desktop, then re-run this script.' -ForegroundColor Yellow
     exit 1
 }
 
-Write-Host '=== [1/4] Building web UI (skipped if already built) ... ===' -ForegroundColor Cyan
+Write-Host '=== [1/5] Ensuring Docker engine is running ... ===' -ForegroundColor Cyan
+& $DC info *> $null
+if ($LASTEXITCODE -ne 0) {
+    $Candidates = @(
+        'C:\Program Files\Docker\Docker\Docker Desktop.exe',
+        (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker Desktop.exe')
+    )
+    $Desktop = $Candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+    if (-not $Desktop) {
+        Write-Host 'ERROR: Docker engine is not running and Docker Desktop.exe was not found.' -ForegroundColor Red
+        Write-Host 'Start Docker Desktop manually, then re-run this script.' -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host '  Docker engine is down - launching Docker Desktop ...'
+    Start-Process -FilePath $Desktop
+    Write-Host '  waiting for the Docker engine to become reachable (up to 120s) ...'
+    $EngineReady = $false
+    for ($i = 1; $i -le 24; $i++) {
+        Start-Sleep -Seconds 5
+        & $DC info *> $null
+        if ($LASTEXITCODE -eq 0) { $EngineReady = $true; break }
+        Write-Host "  engine not ready yet ... (${i}x5s)"
+        # Give up early if Docker Desktop already exited right after launch.
+        if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) { break }
+    }
+    if (-not $EngineReady) {
+        Write-Host 'ERROR: Docker engine did not become ready within ~120s.' -ForegroundColor Red
+        Write-Host 'Start Docker Desktop manually, then re-run this script.' -ForegroundColor Yellow
+        exit 1
+    }
+}
+Write-Host '  Docker engine is up.'
+
+Write-Host '=== [2/5] Building web UI (skipped if already built) ... ===' -ForegroundColor Cyan
 $FrontendDist = Join-Path $PSScriptRoot 'frontend\dist\index.html'
 if (-not (Test-Path $FrontendDist)) {
     Push-Location (Join-Path $PSScriptRoot 'frontend')
@@ -39,7 +75,7 @@ if (-not (Test-Path $FrontendDist)) {
     Write-Host '  web UI already built (frontend/dist present); set FORCE_UI_BUILD=1 to rebuild'
 }
 
-Write-Host '=== [2/4] Starting Docker Compose stack ... ===' -ForegroundColor Cyan
+Write-Host '=== [3/5] Starting Docker Compose stack ... ===' -ForegroundColor Cyan
 Push-Location $PSScriptRoot
 try {
     if (-not (Test-Path (Join-Path $PSScriptRoot 'docker-compose.yml'))) {
@@ -56,7 +92,7 @@ try {
 }
 
 Write-Host ''
-Write-Host '=== [3/4] Waiting for backend to become ready ... ===' -ForegroundColor Cyan
+Write-Host '=== [4/5] Waiting for backend to become ready ... ===' -ForegroundColor Cyan
 $tries = 0
 do {
     Start-Sleep -Seconds 3
@@ -80,7 +116,7 @@ if (-not $ready) {
 Write-Host '  backend is up.'
 
 Write-Host ''
-Write-Host '=== [4/4] Starting LAN scanner agent ... ===' -ForegroundColor Cyan
+Write-Host '=== [5/5] Starting LAN scanner agent ... ===' -ForegroundColor Cyan
 & (Join-Path $PSScriptRoot 'start-scanner-agent.ps1')
 
 Write-Host ''

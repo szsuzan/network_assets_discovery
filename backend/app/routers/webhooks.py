@@ -9,6 +9,7 @@ from ..database import get_db
 from ..models import User, Webhook
 from ..schemas import WebhookOut, WebhookCreate, WebhookPatch
 from ..auth import get_current_user
+from ..services.webhook import validate_webhook_url
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
@@ -36,6 +37,10 @@ async def create_webhook(
     current_user: User = Depends(get_current_user)
 ):
     await _require_manager(current_user)
+    try:
+        validate_webhook_url(data.url.strip())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     wh = Webhook(
         name=data.name.strip(),
         url=data.url.strip(),
@@ -63,6 +68,11 @@ async def update_webhook(
     if not wh:
         raise HTTPException(status_code=404, detail="Webhook not found")
     patch = data.model_dump(exclude_unset=True)
+    if "url" in patch:
+        try:
+            validate_webhook_url(str(patch["url"]).strip())
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
     for key, value in patch.items():
         setattr(wh, key, value)
     await db.commit()

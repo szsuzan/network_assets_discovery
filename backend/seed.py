@@ -17,9 +17,10 @@ async def seed_users() -> None:
             email="demo@pentest.local",
             password_hash=hash_password("password123"),
             role="admin",
+            must_change_password=True,
         ))
         await db.commit()
-        print("Created demo user: demo@pentest.local / password123")
+        print("Seeded default admin user demo@pentest.local - a password change is required on first login.")
 
 
 async def seed():

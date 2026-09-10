@@ -10,10 +10,15 @@ class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     role: str
+    must_change_password: bool = False
 
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str
+    new_password: str
 
 class UserOut(BaseModel):
     id: uuid.UUID
@@ -87,6 +92,25 @@ class ReverifyIn(BaseModel):
     port_range: Optional[str] = None
     recheck_down_hosts: Optional[bool] = None
     sweep_remaining_ports: Optional[bool] = None
+
+    @field_validator("port_range")
+    @classmethod
+    def _port_range_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = "".join(v.split()) if isinstance(v, str) else v
+        if not PORT_RANGE_RE.match(v):
+            raise ValueError("port_range must be nmap-style ranges, e.g. '1-1000' or '22,80,443-445'")
+        for part in v.split(","):
+            lo, _, hi = part.partition("-")
+            lo_v = int(lo)
+            if not (0 < lo_v <= 65535):
+                raise ValueError("port numbers must be between 1 and 65535")
+            if hi:
+                hi_v = int(hi)
+                if not (0 < hi_v <= 65535) or hi_v < lo_v:
+                    raise ValueError("invalid port range bounds")
+        return v
 
 class SettingOut(BaseModel):
     key: str

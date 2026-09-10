@@ -27,6 +27,7 @@ Flags:
 import argparse
 import ipaddress
 import json
+import re
 import shlex
 import socket
 import struct
@@ -67,6 +68,43 @@ def _set_runtime_workers(task: dict):
         _RUNTIME_WORKERS = int(task.get("workers")) if task.get("workers") else None
     except (TypeError, ValueError):
         _RUNTIME_WORKERS = None
+
+# nmap-style port range grammar, mirror of the server-side schema validator.
+_PORT_RANGE_RE = re.compile(r"^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*$")
+
+
+def _valid_target(t: str) -> bool:
+    """True only if the string is a well-formed IP or CIDR network.
+
+    Anything unparseable (a stray nmap option like ``--script=...``, a hostname,
+    whitespace) is rejected so a malicious/compromised server can never smuggle
+    extra arguments into the nmap argv we execute locally.
+    """
+    if not isinstance(t, str) or not t.strip():
+        return False
+    try:
+        ipaddress.ip_network(t.strip(), strict=False)
+        return True
+    except ValueError:
+        return False
+
+
+def _sane_port_range(port_range: str) -> str:
+    """Parse-and-normalise a port range, raising ValueError on anything nan-map
+    could interpret as an option rather than a plain -p value."""
+    v = "".join(str(port_range).split()) if port_range else ""
+    if not v:
+        return "1-10000"
+    if not _PORT_RANGE_RE.match(v):
+        raise ValueError(f"invalid port_range {port_range!r}")
+    for part in v.split(","):
+        lo, _, hi = part.partition("-")
+        lo_v = int(lo)
+        if not (0 < lo_v <= 65535):
+            raise ValueError("port numbers must be 1-65535")
+        if hi and (int(hi) > 65535 or (0 < int(hi) < lo_v)):
+            raise ValueError("invalid port range bounds")
+    return v
 
 # A lone `nmap -O --osscan-guess` guess on a host with no open ports is only
 # kept when nmap reports at least this accuracy. (Real-world no-port responders
@@ -933,10 +971,18 @@ def _await_go(client: ApiClient, task_id: str) -> bool:
 def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     task_id = task["id"]
     scan_id = task["scan_id"]
-    targets = task["targets"] or []
+    targets = [t for t in (task["targets"] or []) if _valid_target(t)]
     profile = task.get("profile") or "quick"
-    port_range = task.get("port_range") or "1-10000"
+    port_range = _sane_port_range(task.get("port_range") or "1-10000")
     _set_runtime_workers(task)
+
+    if not targets:
+        client.log(task_id, "Task rejected: no valid targets provided", level="err")
+        try:
+            client.result(task_id, [], status="failed", notes="invalid targets")
+        except Exception:
+            pass
+        return
 
     client.log(task_id, f"=== Agent scan started (scan={scan_id}, targets={', '.join(targets)}) ===")
     client.log(task_id, f"Phase 1/3: L2/ARP discovery -> live hosts + MAC/vendor", level="cmd")
@@ -1284,9 +1330,9 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
     scan_id = task["scan_id"]
     profile = task.get("profile") or "quick"
     rv = task.get("reverify") or {}
-    down_ips = rv.get("down_ips") or []
-    up_ips = rv.get("up_ips") or []
-    already_ports = rv.get("already_ports") or "1-65535"
+    down_ips = [ip for ip in (rv.get("down_ips") or []) if _valid_target(ip)]
+    up_ips = [ip for ip in (rv.get("up_ips") or []) if _valid_target(ip)]
+    already_ports = _sane_port_range(rv.get("already_ports") or "1-65535")
     _set_runtime_workers(task)
     # The component range(s) to sweep: complement of what was already checked.
     sweep_spec = _leftover_ports_spec(_range_to_ports_set(already_ports))

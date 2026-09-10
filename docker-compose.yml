@@ -3,7 +3,7 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pentest}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secret}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-subnex}
     ports:
       - "5432:5432"
@@ -17,8 +17,9 @@ services:
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6380:6379"
+    # No host port published: only the backend talks to Redis, over the
+    # internal docker network (backend's REDIS_URL uses the service name).
+    # Host-only access is not needed and LAN exposure is undesired.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -32,9 +33,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pentest}:${POSTGRES_PASSWORD:-secret}@postgres:5432/${POSTGRES_DB:-subnex}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-pentest}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-subnex}
       REDIS_URL: redis://redis:6379/0
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env}
       JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
       JWT_EXPIRY_MINUTES: ${JWT_EXPIRY_MINUTES:-60}
     depends_on:

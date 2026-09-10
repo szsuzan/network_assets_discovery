@@ -26,6 +26,9 @@ from ..celery_app import celery_app
 SCAN_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "scan_output"
 
 
+_console_log_lock = threading.Lock()
+
+
 def _console_log_file(scan_id) -> Path:
     """Persistent per-scan console log path. Used so the LiveScan console can
     replay the full history (including the initial scan's lines) even after a
@@ -35,12 +38,19 @@ def _console_log_file(scan_id) -> Path:
 
 
 def append_console_log(scan_id, line: str, level: str = "info"):
-    """Append a console line to the scan's persistent log file. Best-effort."""
+    """Append a console line to the scan's persistent log file. Best-effort.
+
+    The whole append (format + single write) is guarded by a process-wide lock:
+    Python's append-mode open() records EOF at open time, so concurrent threads
+    (parallel fingerprint workers) would otherwise interleave mid-line.
+    """
     try:
         p = _console_log_file(scan_id)
         p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now(timezone.utc).isoformat()}][{level}] {line}\n")
+        entry = f"[{datetime.now(timezone.utc).isoformat()}][{level}] {line}\n"
+        with _console_log_lock:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(entry)
     except Exception:
         pass
 

@@ -123,7 +123,8 @@ export default function LiveScan() {
 
   const wsUrl = useMemo(() => {
     const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    return `${wsScheme}://${window.location.host}/api/ws/scans/${scanId}`
+    const token = localStorage.getItem('token') || ''
+    return `${wsScheme}://${window.location.host}/api/ws/scans/${scanId}?token=${encodeURIComponent(token)}`
   }, [scanId])
   const [connected, setConnected] = useState(false)
   const [feed, setFeed] = useState<FeedEntry[]>([])

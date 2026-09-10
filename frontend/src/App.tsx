@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
 
 const Login = lazy(() => import('./pages/Login'))
+const ChangePassword = lazy(() => import('./pages/ChangePassword'))
 const Engagements = lazy(() => import('./pages/Engagements'))
 const EngagementDetail = lazy(() => import('./pages/EngagementDetail'))
 const LiveScan = lazy(() => import('./pages/LiveScan'))
@@ -37,6 +38,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LazyPage><Login /></LazyPage>} />
+      <Route path="/change-password" element={<LazyPage><ChangePassword /></LazyPage>} />
       <Route
         element={
           <RequireAuth>

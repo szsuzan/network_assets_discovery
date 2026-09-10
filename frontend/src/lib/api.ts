@@ -22,6 +22,14 @@ api.interceptors.response.use(
       localStorage.removeItem('token')
       localStorage.removeItem('role')
       window.location.href = '/login'
+    } else if (
+      error.response?.status === 403 &&
+      (error.response?.headers?.['x-require-password-change'] === 'true' ||
+        error.response?.data?.detail === 'Password change required')
+    ) {
+      if (window.location.pathname !== '/change-password') {
+        window.location.href = '/change-password'
+      }
     }
     return Promise.reject(error)
   }

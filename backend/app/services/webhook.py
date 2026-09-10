@@ -7,11 +7,14 @@ result is persisted for the Integrations UI.
 """
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
+import socket
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -22,6 +25,33 @@ logger = logging.getLogger(__name__)
 
 EVENT_CREATED = "finding_created"
 EVENT_UPDATED = "finding_updated"
+
+
+def validate_webhook_url(url: str) -> str:
+    """Reject webhook URLs that could be used for SSRF.
+
+    Only http/https schemes are accepted, and the host must resolve to a public
+    (non-private, non-loopback, non-link-local, non-multicast) address. Loopback
+    is explicitly allowed so a local test receiver keeps working.
+    """
+    parsed = urlsplit(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("Webhook URL must use http or https")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("Webhook URL must include a host")
+    try:
+        if host.lower() == "localhost":
+            return url
+        infos = socket.getaddrinfo(host, parsed.port or 80, type=socket.SOCK_STREAM)
+    except (socket.gaierror, OSError):
+        raise ValueError("Webhook URL host could not be resolved") from None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or
+                ip.is_multicast or ip.is_unspecified or ip.is_reserved):
+            raise ValueError("Webhook URL must point to a public address")
+    return url
 
 
 def finding_payload(finding, host=None, scan=None, engagement=None, actor=None) -> dict:
@@ -64,6 +94,7 @@ def finding_payload(finding, host=None, scan=None, engagement=None, actor=None) 
 
 
 def _deliver(webhook: Webhook, event: str, payload: dict) -> int:
+    validate_webhook_url(webhook.url)
     body = json.dumps(payload, default=str).encode("utf-8")
     req = Request(
         webhook.url,

@@ -9,6 +9,13 @@ export function useLogin() {
   })
 }
 
+export function useChangePassword() {
+  return useMutation({
+    mutationFn: (data: { current_password: string; new_password: string }) =>
+      api.post('/api/auth/change-password', data).then((r) => r.data),
+  })
+}
+
 export function useEngagements() {
   return useQuery({
     queryKey: ['engagements'],
