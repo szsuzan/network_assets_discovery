@@ -66,20 +66,20 @@ SubNex is a network asset discovery platform for penetration testing engagements
 
 <table>
   <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/login.png" alt="Login" width="100%"><br><sub>Login — JWT auth</sub></td>
     <td align="center" width="50%"><img src="assets/screenshots/engagements.png" alt="Engagements" width="100%"><br><sub>Engagements — scoped clients &amp; scan lists</sub></td>
-    <td align="center" width="50%"><img src="assets/screenshots/inventory.png" alt="Asset inventory" width="100%"><br><sub>Asset inventory — every host, port, and tag</sub></td>
   </tr>
   <tr>
+    <td align="center"><img src="assets/screenshots/inventory.png" alt="Asset inventory" width="100%"><br><sub>Asset inventory — every host, port, and tag</sub></td>
     <td align="center"><img src="assets/screenshots/topology.png" alt="Network topology" width="100%"><br><sub>Network topology — live force-directed graph</sub></td>
+  </tr>
+  <tr>
     <td align="center"><img src="assets/screenshots/findings.png" alt="Findings" width="100%"><br><sub>Findings — severity-sorted risk summary</sub></td>
-  </tr>
-  <tr>
     <td align="center"><img src="assets/screenshots/report.png" alt="Client report" width="100%"><br><sub>Client report — charts &amp; executive summary</sub></td>
-    <td align="center"><img src="assets/screenshots/engagement-detail.png" alt="Engagement detail" width="100%"><br><sub>Engagement detail — start &amp; compare scans</sub></td>
   </tr>
   <tr>
+    <td align="center"><img src="assets/screenshots/engagement-detail.png" alt="Engagement detail" width="100%"><br><sub>Engagement detail — start &amp; compare scans</sub></td>
     <td align="center"><img src="assets/screenshots/agents.png" alt="Scanner agents" width="100%"><br><sub>Scanner agents — LAN L2 workers</sub></td>
-    <td align="center"><img src="assets/screenshots/login.png" alt="Login" width="100%"><br><sub>Login — JWT auth</sub></td>
   </tr>
 </table>
 
