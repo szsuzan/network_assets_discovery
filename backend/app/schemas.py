@@ -128,7 +128,9 @@ class HostOut(BaseModel):
     id: uuid.UUID
     scan_id: uuid.UUID
     ip: object
+    secondary_ips: Optional[List[str]] = None
     mac: Optional[str] = None
+    macs: Optional[List[str]] = None
     vendor: Optional[str] = None
     hostname: Optional[str] = None
     device_type: Optional[str] = None
@@ -140,6 +142,13 @@ class HostOut(BaseModel):
     last_seen: datetime
     notes: str
     tags: Optional[List[str]] = None
+
+    @field_validator("secondary_ips", "macs", mode="before")
+    @classmethod
+    def _stringify_array(cls, v):
+        if v is None:
+            return None
+        return [str(x) for x in v]
 
     class Config:
         from_attributes = True

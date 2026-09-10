@@ -40,6 +40,9 @@ def _hash_key(key: str) -> str:
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+from ..services.identity import identity_hostname  # noqa: E402  (single source of truth)
+
+
 async def get_agent(
     x_api_key: Optional[str] = Header(default=None),
     db: AsyncSession = Depends(get_db),
@@ -413,28 +416,60 @@ async def agent_result(
         select(Host).where(Host.scan_id == scan.id)
     )).scalars().all()}
 
+    def _by_identity():
+        m = {}
+        for h in existing.values():
+            p = identity_hostname(h.hostname)
+            if p:
+                m.setdefault(p, h)
+        return m
+    by_identity = _by_identity()
+
     partial = data.status == "partial"
     up_count = 0
     open_ports_total = 0
     for hd in data.hosts:
         host = existing.get(hd.ip)
         if not host:
-            host = Host(scan_id=scan.id, ip=hd.ip, status=hd.status or "up",
-                        discovery_method=["agent"])
-            db.add(host)
-            await db.flush()
-            existing[hd.ip] = host
+            # Same non-generic published hostname as a host already in this
+            # scan = the same physical device seen on another interface /
+            # privacy-MAC. Fold the new address and MAC into that row instead
+            # of creating a duplicate Host for the report.
+            prof = identity_hostname(hd.hostname)
+            canon = by_identity.get(prof) if prof else None
+            if canon is not None:
+                host = canon
+                sec = [str(x) for x in (list(host.secondary_ips) if host.secondary_ips else [])]
+                if hd.ip not in sec:
+                    sec.append(hd.ip)
+                host.secondary_ips = sec
+                macs = list(host.macs or [])
+                if not any(hd.mac and m == hd.mac for m in macs + [str(host.mac or "").lower()]):
+                    if hd.mac:
+                        macs.append(hd.mac)
+                host.macs = macs
+                existing[hd.ip] = canon  # later batches keep routing here
+            else:
+                host = Host(scan_id=scan.id, ip=hd.ip, status=hd.status or "up",
+                            discovery_method=["agent"])
+                db.add(host)
+                await db.flush()
+                existing[hd.ip] = host
+                by_identity = _by_identity()
         if "agent" not in (host.discovery_method or []):
             host.discovery_method = list(host.discovery_method or []) + ["agent"]
         host.status = hd.status or "up"
-        if hd.mac:
-            host.mac = hd.mac
-        if hd.vendor:
+        if hd.mac and not host.mac:
+            host.mac = hd.mac  # keep the primary (first-seen) MAC, history lives in macs
+        if hd.vendor and not host.vendor:
             host.vendor = hd.vendor
         if hd.hostname:
             host.hostname = hd.hostname
         if hd.device_type:
-            host.device_type = hd.device_type
+            # Prefer an existing specific type over a generic hint arriving later
+            # (keeps e.g. "laptop" after an alias posts with device_type "unknown").
+            if not host.device_type or host.device_type == "unknown":
+                host.device_type = hd.device_type
         if hd.os_guess:
             host.os_guess = hd.os_guess
         if hd.os_confidence is not None:
