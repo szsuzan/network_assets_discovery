@@ -1,6 +1,30 @@
-# SubNex
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/subnex-logo-light.svg">
+    <img src="assets/subnex-logo.svg" alt="SubNex — network asset discovery for penetration testing engagements" width="430">
+  </picture>
+</p>
 
-SubNex is a network asset discovery platform for penetration testing engagements. Discovers live assets on an in-scope network, fingerprints each host, maps network topology, surfaces risk-relevant findings, and produces a client-ready initial discovery report.
+<p align="center"><i>Where your assets hide, SubNex finds.</i></p>
+
+<p align="center">
+  <a href="#features"><b>Features</b></a> ·
+  <a href="#screenshots"><b>Screenshots</b></a> ·
+  <a href="#architecture"><b>Architecture</b></a> ·
+  <a href="#quick-start"><b>Quick start</b></a> ·
+  <a href="#scanner-agents"><b>Scanner agents</b></a> ·
+  <a href="#rest-api"><b>REST API</b></a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Frontend-React%20%2B%20TypeScript-6366f1" alt="Frontend: React + TypeScript">
+  <img src="https://img.shields.io/badge/Backend-FastAPI-10b981" alt="Backend: FastAPI">
+  <img src="https://img.shields.io/badge/Scanning-Nmap%20%2B%20Scapy-ef4444" alt="Scanning: Nmap + Scapy">
+  <img src="https://img.shields.io/badge/Database-PostgreSQL-2563eb" alt="Database: PostgreSQL">
+  <img src="https://img.shields.io/badge/Jobs-Redis%20%2B%20Celery-dc2626" alt="Jobs: Redis + Celery">
+</p>
+
+SubNex is a network asset discovery platform for penetration testing engagements. It discovers live assets on an in-scope network, fingerprints each host, maps the network topology, surfaces risk-relevant findings, and produces a client-ready initial discovery report — with live-scan streaming and a full REST API.
 
 > **Out of scope for this entire system:** exploitation, credential brute-forcing, or any attack-execution capability. This is a *discovery, fingerprinting, and reporting* platform only.
 
@@ -8,40 +32,64 @@ SubNex is a network asset discovery platform for penetration testing engagements
 
 ## Table of Contents
 
-1. [Architecture](#architecture)
-2. [Setup from a fresh clone](#setup-from-a-fresh-clone)
-3. [Quick start (start-all / stop-all)](#quick-start)
-4. [Manual start (docker compose)](#manual-start-docker-compose)
-5. [Scanner agents (full Layer-2 discovery)](#scanner-agents)
-6. [Using the platform](#using-the-platform)
-7. [Scan pipeline](#scan-pipeline)
-8. [REST API reference](#rest-api)
-9. [WebSocket live feed](#websocket-live-feed)
-10. [Frontend screens](#frontend-screens)
-11. [Safety / throttling](#safety--throttling)
-12. [Security of the tool itself](#security-of-the-tool-itself)
-13. [Data model](#data-model)
-14. [Troubleshooting](#troubleshooting)
-15. [Project layout](#project-layout)
+1. [Features](#features)
+2. [Screenshots](#screenshots)
+3. [Architecture](#architecture)
+4. [Setup from a fresh clone](#setup-from-a-fresh-clone)
+5. [Quick start (start-all / stop-all)](#quick-start)
+6. [Manual start (docker compose)](#manual-start-docker-compose)
+7. [Scanner agents (full Layer-2 discovery)](#scanner-agents)
+8. [Using the platform](#using-the-platform)
+9. [Scan pipeline](#scan-pipeline)
+10. [REST API reference](#rest-api)
+11. [WebSocket live feed](#websocket-live-feed)
+12. [Safety / throttling](#safety--throttling)
+13. [Security of the tool itself](#security-of-the-tool-itself)
+14. [Data model](#data-model)
+15. [Troubleshooting](#troubleshooting)
+16. [Project layout](#project-layout)
+
+---
+
+## Features
+
+- **One command to start** — `start-all.ps1` builds the UI, starts the Postgres/Redis/backend stack, and launches the LAN agent.
+- **Agent-aided Layer-2 discovery** — a small CLI agent on the target LAN turns ARP into real MAC/vendor bindings and raw-SYN `-O` into exact OS fingerprints; scans are delegated to it automatically.
+- **Passive fingerprinting** — optional Scapy sniffing harvests DHCP vendor-class, ARP, and CDP/LLDP identity evidence without touching a single host.
+- **Nmap-driven port/service/OS fingerprinting** — TCP + UDP, with tiered `quick` / `full` / `stealth` / `passive_only` profiles.
+- **Network topology graph** — a force-directed map of the subnet with risk-severity coloring, subnet-zone rings, gateway/internet edges, and device-type icons (fullscreen view).
+- **Risk findings** — default SNMP communities, unencrypted protocols, outdated software, exposed admin panels — severity-ranked and report-includable.
+- **Two-scan diffing** — see exactly what appeared, vanished, and changed between scans.
+- **Client-ready reports** — executive summary with device + severity charts, exported as JSON, CSV, or a rendered PDF.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td align="center" width="50%"><img src="assets/screenshots/engagements.png" alt="Engagements" width="100%"><br><sub>Engagements — scoped clients &amp; scan lists</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/inventory.png" alt="Asset inventory" width="100%"><br><sub>Asset inventory — every host, port, and tag</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/topology.png" alt="Network topology" width="100%"><br><sub>Network topology — live force-directed graph</sub></td>
+    <td align="center"><img src="assets/screenshots/findings.png" alt="Findings" width="100%"><br><sub>Findings — severity-sorted risk summary</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/report.png" alt="Client report" width="100%"><br><sub>Client report — charts &amp; executive summary</sub></td>
+    <td align="center"><img src="assets/screenshots/engagement-detail.png" alt="Engagement detail" width="100%"><br><sub>Engagement detail — start &amp; compare scans</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/agents.png" alt="Scanner agents" width="100%"><br><sub>Scanner agents — LAN L2 workers</sub></td>
+    <td align="center"><img src="assets/screenshots/login.png" alt="Login" width="100%"><br><sub>Login — JWT auth</sub></td>
+  </tr>
+</table>
 
 ---
 
 ## Architecture
 
-```
-┌─────────────────┐      REST + WebSocket      ┌──────────────────────┐
-│  React Frontend │ ◄────────────────────────► │  FastAPI Backend      │
-│                 │                            │  + Scan Orchestrator  │
-└─────────────────┘                            └──────────┬───────────┘
-                                                          │
-        ┌─────────────────────────────────────────────────┼─────────────────────┐
-        ▼                                                 ▼                     ▼
-┌──────────────┐   HTTPS + API key              Nmap (container,      PostgreSQL
-│ scanner-agent│ ◄──────────────────            L3 fallback) +        (persistence)
-│ on target LAN│   claims tasks, posts results   Redis/Celery broker
-│ ARP + SYN -O │                                 + WebSocket relay
-└──────────────┘
-```
+<div align="center">
+  <img src="assets/architecture.svg" alt="SubNex architecture" width="860">
+</div>
 
 - **Frontend:** React + TypeScript + Tailwind CSS, TanStack Query, `react-force-graph` (topology), `recharts` (report charts), native WebSocket client.
 - **Backend:** Python 3.11+, FastAPI, PostgreSQL (async SQLAlchemy), Redis + Celery (background scan jobs), WebSockets for live updates, JWT auth.
@@ -548,23 +596,6 @@ Every event also carries a `ts` (ISO-8601 server timestamp) applied at emission 
 
 ---
 
-## Frontend screens
-
-- **Login** — JWT email/password.
-- **Engagements List** — create/list client engagements with authorized scope.
-- **Engagement Detail** — scan list, New Scan setup, re-verify, two-scan diff picker.
-- **Live Scan View** — WebSocket counters, progress, timestamped activity feed, console pane, Pause/Resume/Stop, re-verify view.
-- **Asset Inventory** — virtualized table (IP, MAC, vendor, device type, OS, ports, risk, tags), search/filter/sort, bulk export/tag.
-- **Network Topology** — force-directed graph with severity coloring, device-type icons, subnet-zone rings, gateway/internet edges, responsive sizing, zoom/pan.
-- **Host Detail Drawer** — full host info, ports table (service/version/banner), SNMP block, editable notes/tags.
-- **Findings Summary** — severity-sorted, group-by (severity/type/host), include-in-report toggles, editable recommendations, risk-rule tuning, change history.
-- **Agents** — register/manage scanner agents, one-time keys, live online/offline status, run instructions.
-- **Integrations** — webhook subscriptions (HMAC-signed events), delivery status + test fire.
-- **Settings** — scan/re-verify/agent defaults and advanced toggles (persisted, applied to all scans).
-- **Report/Export** — executive summary, device + severity charts, coverage & limitations, export JSON/CSV/PDF.
-
----
-
 ## Safety / throttling
 
 - **Scan profiles control request rate**, not just port count: `stealth` is heavily throttled to protect fragile OT/IoT devices that can crash under aggressive scanning.
@@ -639,6 +670,7 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
 .
 ├── docker-compose.yml              # 3-service stack
 ├── .env.example                    # template for secrets (POSTGRES_*, JWT_SECRET, ...)
+├── assets/                         # README assets: logos, architecture diagram, screenshots
 ├── start-all.ps1                   # build UI + start stack + agent (quick start)
 ├── stop-all.ps1                    # stop agent + stack, data preserved
 ├── start-scanner-agent.ps1         # start the LAN agent as a background process
