@@ -81,6 +81,10 @@ SubNex is a network asset discovery platform for penetration testing engagements
     <td align="center"><img src="assets/screenshots/engagement-detail.png" alt="Engagement detail" width="100%"><br><sub>Engagement detail — start &amp; compare scans</sub></td>
     <td align="center"><img src="assets/screenshots/agents.png" alt="Scanner agents" width="100%"><br><sub>Scanner agents — LAN L2 workers</sub></td>
   </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/report-pdf.png" alt="PDF client report" width="100%"><br><sub>PDF client report — WeasyPrint rendered</sub></td>
+    <td align="center" valign="middle"><a href="assets/screenshots/SubNex-scan-report.pdf"><b>Download the sample PDF report ›</b></a><br><sub>A real generated client report (↑)</sub></td>
+  </tr>
 </table>
 
 ---
@@ -99,8 +103,8 @@ The stack runs three services:
 
 | Service | Purpose | Local port |
 |---------|---------|-----------|
-| `postgres` | Database (schema auto-applied by migrations on backend start) | 5432 |
-| `redis` | Celery message broker + pause/stop state | 6380 |
+| `postgres` | Database (schema auto-applied by migrations on backend start); host access via `docker compose exec postgres psql` | 5432 |
+| `redis` | Celery message broker + pause/stop state (internal network only — not published to the host) | — |
 | `backend` | FastAPI REST + WebSocket API, Celery scan worker, and serves the built web UI | 8000 |
 
 The backend container runs all three roles via `app/run_server.py` (a small supervisor that runs uvicorn + the Celery worker and restarts them if they crash). The UI is a static build of `frontend/` mounted at `/app/static` — build it on the host with `npm run build` and the backend serves it on the same port (no separate server).
@@ -133,19 +137,21 @@ cd network_assets_discovery
 ```
 > Note: the repo/clone directory will still be named `network_assets_discovery` until you rename it on GitHub; the product itself is **SubNex**.
 
-### 3. (Optional) Configure secrets
+### 3. Configure secrets (required)
 
-Defaults work out of the box for local use. To override the Postgres password or JWT secret, copy the template and edit it (the file is gitignored and **never** committed):
+`docker-compose.yml` deliberately has **no placeholder secrets** — the stack refuses to start (`${VAR:?...}` fail-fast) if `POSTGRES_PASSWORD` / `JWT_SECRET` aren't set. Copy the template and fill it in:
 
 ```bash
 # Windows:  Copy-Item .env.example .env
 cp .env.example .env
 ```
 
+The file is gitignored and **never** committed.
+
 | Variable | Default | Purpose |
 |---|---|---|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `pentest` / `secret` / `subnex` | Postgres access (used to build `DATABASE_URL`) |
-| `JWT_SECRET` | `change-me-in-production` | Auth token signing key — change for anything beyond local dev |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `pentest` / *(required)* / `subnex` | Postgres access (used to build `DATABASE_URL`) |
+| `JWT_SECRET` | *(required, ≥ 16 chars)* | Auth token signing key |
 | `JWT_ALGORITHM` / `JWT_EXPIRY_MINUTES` | `HS256` / `60` | Token settings |
 
 ### 4. Start everything (Windows, one command)
@@ -154,7 +160,7 @@ cp .env.example .env
 powershell -ExecutionPolicy Bypass -File start-all.ps1
 ```
 
-This builds the UI the first time (`npm install` + `npm run build`), starts the Compose stack, waits for the backend health check, then starts the LAN scanner agent in the background.
+This builds the UI the first time (`npm install` + `npm run build`), **starts Docker Desktop automatically if the engine isn't running yet** (then waits up to ~120 s for it), brings up the Compose stack, waits for the backend health check, then starts the LAN scanner agent in the background.
 
 ### 5. Manual start (any OS)
 
@@ -164,11 +170,11 @@ docker compose up -d --build                           # start the stack
 docker compose ps                                      # postgres+redis (healthy), backend (Up)
 ```
 
-Schema creation, migrations (001 → 009) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
+Schema creation, migrations (001 → 012) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
 
 ### 6. First login and first scan
 
-- Open <http://localhost:8000>, log in with `demo@pentest.local` / `password123`.
+- Open <http://localhost:8000> and log in with the bootstrap account `demo@pentest.local` / `password123`. The first login forces you to set your own password before the app unlocks.
 - **Engagements → New Engagement** → add your network to **Authorized scope** (e.g. `192.168.1.0/24`).
 - **Engagement Detail → Start Scan** → target an IP/CIDR inside that scope, pick a `profile`, and watch the live scan.
 - Results appear under **Inventory**, **Topology**, **Findings**; generate a client report under **Report/Export**.
@@ -198,10 +204,11 @@ powershell -ExecutionPolicy Bypass -File start-all.ps1
 
 This does, in order:
 
-1. Builds the web UI: `cd frontend && npm install && npm run build` (only the first time, or after UI changes)
-2. Starts the Docker Compose stack (`postgres`, `redis`, `backend` — the backend container runs the API, the Celery scan worker, and serves the built UI on the same port) — `docker compose up -d`
-3. Waits for the backend API to become ready (~up to 60 s, health-polled)
-4. Starts the LAN scanner agent as a background process
+1. Ensures the **Docker engine is running** — if it isn't, Docker Desktop is launched automatically and the script waits (up to ~120 s) for the engine to answer.
+2. Builds the web UI: `cd frontend && npm install && npm run build` (only the first time, or after UI changes)
+3. Starts the Docker Compose stack (`postgres`, `redis`, `backend` — the backend container runs the API, the Celery scan worker, and serves the built UI on the same port) — `docker compose up -d`
+4. Waits for the backend API to become ready (~up to 60 s, health-polled).
+5. Starts the LAN scanner agent as a background process (API key resolved from `SCANNER_AGENT_KEY`, then `SCANNER_AGENT_API_KEY`, then the local key file — never from the repo or a visible command line).
 
 Data is **preserved across restarts** (`docker compose down` is never called with `-v`). The script is **idempotent** — re-running it is safe.
 
@@ -228,7 +235,9 @@ The stack ships with a **demo admin user** that is created automatically on a fr
 | Field | Value |
 |-------|-------|
 | Email | `demo@pentest.local` |
-| Password | `password123` |
+| Password | `password123` (bootstrap only) |
+
+A password change is **enforced on the first login**: every authenticated API/WebSocket call is refused with `403 Password change required` (the frontend auto-redirects to the change-password screen) until you set a personal password. The bootstrap password above only works for that first login.
 
 The UI redirects to `/login` if you aren't authenticated.
 
@@ -295,8 +304,8 @@ The **scanner agent** is a small, self-contained CLI in `agent/` that you run **
 On the LAN machine (Windows/macOS/Linux with **nmap** installed; Windows needs **Npcap**):
 
 ```bash
-python agent/scanner_agent.py --server http://<SERVER_IP>:8000 --name my-lan \
-  --api-key <KEY> --subnets 192.168.1.0/24
+export SCANNER_AGENT_KEY="<KEY>"   # keeps the key out of argv / process listings
+python agent/scanner_agent.py --server http://<SERVER_IP>:8000 --name my-lan --subnets 192.168.1.0/24
 ```
 
 Or as a container on a Linux LAN host (host networking + raw sockets = real L2):
@@ -333,7 +342,7 @@ Windows). If it's missing, the agent logs once and continues active-only — it 
 always best-effort. Passive evidence is merged **fill-if-blank**: a stronger
 `nmap -O` / SNMP result always wins.
 
-**Verified behaviour** (end-to-end run against this LAN): an agent on the Windows host produced results the L3-only container never could — a real **OS** (`Microsoft Windows 11 23H2`) + 10 open ports (SMB 445, postgres, redis, etc.) on one target, and a real **MAC + vendor** (`6c:f1:7e` → Zhejiang Uniview) on an IP camera target.
+**Verified behaviour** (live run against `192.168.1.0/24`, shown in the screenshots above): an agent on the Windows LAN produced **43 live hosts** that the L3-only container could not characterize — real **MAC + vendor** bindings (Hikvision / Dahua / Uniview cameras, Xiaomi, Apple, Cisco, CyberTAN…), **hostnames** via mDNS/DHCP (e.g. the `DS-2CD1023G0E-20230404AAWRL…` camera names), exact **OS** fingerprints (Windows 11 24H2, macOS/iOS 16–17, Linux 4.15–5.19), **92 open ports** across 32 hosts, and **34 risk findings**. A device-class report of that scan lives in `assets/screenshots/SubNex-scan-report.pdf`.
 
 ---
 
@@ -480,7 +489,8 @@ Base URL: `http://localhost:8000` (Swagger at `/docs`). Endpoints marked 🔒 re
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/auth/login` | Login → returns `access_token` + `role` (no token needed) |
+| `POST` | `/api/auth/login` | Login → returns `access_token` + `role` + `must_change_password` (no token needed) |
+| `POST` | `/api/auth/change-password` | Set a new password; clears `must_change_password` and **revokes every previously issued token** 🔒 |
 | `POST` | `/api/auth/refresh` | Refresh token flow (returns 501 by design) |
 
 ### Engagements
@@ -554,10 +564,10 @@ Base URL: `http://localhost:8000` (Swagger at `/docs`). Endpoints marked 🔒 re
 ### Example: start a scan (PowerShell)
 
 ```powershell
-# 1. Login
+# 1. Login (use the password you set after the enforced first-login change)
 $login = Invoke-RestMethod -Uri "http://localhost:8000/api/auth/login" `
   -Method Post -ContentType "application/json" `
-  -Body (@{ email="demo@pentest.local"; password="password123" } | ConvertTo-Json)
+  -Body (@{ email="demo@pentest.local"; password="<YOUR_PASSWORD>" } | ConvertTo-Json)
 $headers = @{ Authorization = "Bearer $($login.access_token)" }
 
 # 2. Start a scan on an engagement
@@ -580,7 +590,7 @@ Invoke-WebRequest -Uri "http://localhost:8000/api/scans/$($scan.id)/export?forma
 
 ## WebSocket live feed
 
-Connect to `ws://localhost:8000/ws/scans/{scan_id}` (swap `http` → `ws`) to receive live scan events:
+Connect to `ws://localhost:8000/ws/scans/{scan_id}` (swap `http` → `ws`) to receive live scan events. **Authentication is required:** pass your JWT as a `?token=<jwt>` query parameter or an `Authorization: Bearer` header. Connections without a valid token (or from an account that still owes its first-login password change) are rejected with `403` / WS `4401`:
 
 ```json
 {"type": "scan_started", "scan_id": "..."}
@@ -604,9 +614,16 @@ Every event also carries a `ts` (ISO-8601 server timestamp) applied at emission 
 
 ## Security of the tool itself
 
-- JWT expiry + role checks (only `admin` can delete engagements).
-- Passwords hashed with bcrypt.
-- HTTPS-only in any non-local deployment.
+- **Enforced first-login password change** — the seed account (and any account flagged `must_change_password`) is locked out of every API/WebSocket call (`403 Password change required`) until `POST /api/auth/change-password` is completed. The login page no longer advertises the bootstrap password.
+- **JWT is hard to steal and easy to revoke** — tokens carry no role claim (authorization is always read from the database), expiries are enforced, and a `jwt_version` is embedded in every token. Changing a password bumps the version, instantly invalidating *all* previously issued tokens, including ones captured before the change.
+- **Brute-force protection** — login is rate-limited (10 failures / 15 min / IP → `429`) and passwords are bcrypt-hashed with 13 rounds; weak new passwords (`password123`, `changeme`, < 10 chars, same-as-current) are rejected server-side.
+- **JWT expiry + role checks** — only `admin` can delete engagements; mutating scan/host/finding endpoints enforce engagement ownership for non-admin users.
+- **WebSocket auth** — the live scan feed verifies the JWT and the target scan on every connection.
+- **Injection-safe scanning** — port ranges are validated against a strict regex (`nmap` argv is never assembled from raw input) and agent-side target/profile values are sanity-checked before any `nmap` invocation.
+- **Webhook SSRF guard** — webhook URLs must be `http(s)` and resolve to public IPs; private/link-local/metadata endpoints are rejected (`422`), and deliveries sign their payloads with the configured HMAC secret.
+- **Client-side hygiene** — CORS is restricted to configured origins, text rendered into the topology SVG is escaped, and the frontend stores only the JWT (no session secrets in `localStorage`).
+- **Key secrecy** — agent API keys are passed via environment variable / one-shot display, never through `argv` or the repository; secrets are required (no placeholder fallback) in `docker-compose.yml` and gitignored in `.env`.
+- **HTTPS-only in any non-local deployment.**
 - `audit_log` retained for the life of the engagement — every scan action is recorded.
 - `archived` engagements can have raw scan data exported then purged.
 - Keep `.env` out of version control (already gitignored); rotate any agent API keys that ever leave a trusted machine.
@@ -679,7 +696,7 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
 │   ├── scanner_agent.py            # distributable LAN L2 scanner (CLI)
 │   └── Dockerfile                  # containerized agent (Linux, host-net)
 ├── database/migrations/            # ordered .sql migrations (applied automatically)
-│   └── 001_init.sql                #   from 001 to 009 on backend startup
+│   └── 001_init.sql                #   from 001 to 012 on backend startup
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt
@@ -707,6 +724,6 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
         ├── hooks/useApi.ts         # TanStack Query hooks (+ agents)
         ├── lib/                    # api client, types (device taxonomy), graph analysis, theme
         ├── components/             # Layout, badges, ScanNav, TopologyMinimap, SeverityBadge
-        └── pages/                  # Login, Engagements, EngagementDetail, LiveScan,
+        └── pages/                  # Login, ChangePassword, Engagements, EngagementDetail, LiveScan,
                                     # AssetInventory, HostDrawer, Topology, Findings, Report, Agents
 ```
