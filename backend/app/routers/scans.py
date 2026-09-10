@@ -12,7 +12,7 @@ def _host_ip_eq(host_ip: str):
     """Compare an INET column against a string IP by casting the string to inet."""
     return cast(host_ip, INET)
 
-from ..database import get_db
+from ..database import get_db, AsyncSessionLocal
 from ..models import User, Engagement, Scan, Host, Port, SNMPInfo, Finding, FindingAudit, AuditLog
 from ..schemas import (
     ScanCreate, ReverifyIn, ScanOut, HostOut, HostDetail, HostPatch,
@@ -26,6 +26,37 @@ from ..services import settings as settings_svc
 
 router = APIRouter(prefix="/api", tags=["scans"])
 
+
+async def _load_scan_for_user(db: AsyncSession, scan_id: uuid.UUID, user: User) -> Scan:
+    """Load a scan and enforce engagement ownership for non-admin users.
+
+    Admins (and the pentester role) can operate on any scan; viewers are
+    read-only. Non-admin users may only mutate scans inside engagements they
+    created.
+    """
+    scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if user.role != "admin":
+        engagement = (await db.execute(
+            select(Engagement).where(Engagement.id == scan.engagement_id))).scalar_one_or_none()
+        if engagement is None or engagement.created_by != user.id:
+            raise HTTPException(status_code=403, detail="No access to this scan's engagement")
+    return scan
+
+
+async def _require_engagement_access(db: AsyncSession, engagement_id: uuid.UUID, user: User) -> Engagement:
+    engagement = (await db.execute(select(Engagement).where(Engagement.id == engagement_id))).scalar_one_or_none()
+    if not engagement:
+        raise HTTPException(status_code=404, detail="Engagement not found")
+    if user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if user.role != "admin" and engagement.created_by != user.id:
+        raise HTTPException(status_code=403, detail="No access to this engagement")
+    return engagement
+
 @router.post("/engagements/{engagement_id}/scans", response_model=ScanOut, status_code=201)
 async def start_scan(
     engagement_id: uuid.UUID,
@@ -33,10 +64,7 @@ async def start_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
-    engagement = result.scalar_one_or_none()
-    if not engagement:
-        raise HTTPException(status_code=404, detail="Engagement not found")
+    engagement = await _require_engagement_access(db, engagement_id, current_user)
     
     try:
         validate_targets_in_scope(data.targets, engagement.authorized_scope)
@@ -104,10 +132,7 @@ async def reverify_scan(
     Newly found hosts/ports/findings are upserted into the SAME scan record so
     there is a single authoritative report with no duplicates.
     """
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _load_scan_for_user(db, scan_id, current_user)
 
     if scan.status in ("queued", "discovering", "scanning", "fingerprinting",
                        "analyzing", "agent_running", "paused"):
@@ -212,9 +237,7 @@ async def pause_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _load_scan_for_user(db, scan_id, current_user)
     if scan.status in ("completed", "failed", "stopped"):
         raise HTTPException(status_code=400, detail="Scan already finished")
 
@@ -251,9 +274,7 @@ async def resume_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _load_scan_for_user(db, scan_id, current_user)
     if scan.status != "paused":
         raise HTTPException(status_code=400, detail="Scan is not paused")
 
@@ -292,10 +313,7 @@ async def stop_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _load_scan_for_user(db, scan_id, current_user)
     
     scan.status = "stopped"
     scan.completed_at = datetime.now(timezone.utc)
@@ -422,6 +440,7 @@ async def patch_host(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    scan = await _load_scan_for_user(db, scan_id, current_user)
     result = await db.execute(
         select(Host).where(
             Host.scan_id == scan_id,
@@ -439,7 +458,7 @@ async def patch_host(
     
     db.add(AuditLog(
         user_id=current_user.id,
-        engagement_id=None,
+        engagement_id=scan.engagement_id,
         scan_id=scan_id,
         action="host_annotated",
         detail={"ip": host_ip, "changes": patch_data}
@@ -501,6 +520,7 @@ async def patch_finding(
     finding = result.scalar_one_or_none()
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
+    await _load_scan_for_user(db, finding.scan_id, current_user)
 
     # Fields whose analyst changes go into the audit trail.
     audited_fields = {"status", "included_in_report", "severity", "cvss_score", "cvss_vector", "cwe"}
@@ -651,10 +671,7 @@ async def update_risk_rules(
     current_user: User = Depends(get_current_user)
 ):
     from ..services.risk_rules import merged_rules, to_json, store_overrides
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _load_scan_for_user(db, scan_id, current_user)
     scan.risk_rules = store_overrides(scan.risk_rules, [r.model_dump() for r in rules])
     await db.commit()
     await db.refresh(scan)
@@ -668,10 +685,7 @@ async def reanalyze_scan(
 ):
     from starlette.concurrency import run_in_threadpool
     from ..services.scan_worker import run_risk_rules
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _load_scan_for_user(db, scan_id, current_user)
     if scan.status not in ("completed", "error"):
         raise HTTPException(status_code=409, detail="Scan is still running")
 
@@ -690,6 +704,42 @@ async def reanalyze_scan(
 
 @router.websocket("/ws/scans/{scan_id}")
 async def websocket_endpoint(websocket: WebSocket, scan_id: str):
+    from jose import jwt as jose_jwt, JWTError
+    from ..auth import settings as auth_settings
+    from ..models import Scan as ScanModel, User as UserModel
+
+    token = websocket.query_params.get("token") or ""
+    if not token:
+        auth_header = websocket.headers.get("authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = jose_jwt.decode(token, auth_settings.JWT_SECRET, algorithms=[auth_settings.JWT_ALGORITHM])
+        user_id = uuid.UUID(payload.get("sub"))
+    except (JWTError, ValueError, TypeError):
+        await websocket.close(code=4401)
+        return
+    try:
+        scan_uuid = uuid.UUID(scan_id)
+    except (ValueError, TypeError):
+        await websocket.close(code=4401)
+        return
+
+    allowed = False
+    async with AsyncSessionLocal() as db:
+        user = (await db.execute(select(UserModel).where(UserModel.id == user_id))).scalar_one_or_none()
+        if user is not None and not getattr(user, "must_change_password", False):
+            scan_row = (await db.execute(
+                select(ScanModel).where(ScanModel.id == scan_uuid))).scalar_one_or_none()
+            allowed = scan_row is not None
+
+    if not allowed:
+        await websocket.close(code=4401)
+        return
+
     from ..websocket import manager
     await manager.connect(scan_id, websocket)
     try:

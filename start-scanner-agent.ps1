@@ -18,17 +18,20 @@ $OutLog     = Join-Path $env:TEMP 'opencode\agent_out.log'
 $ErrLog     = Join-Path $env:TEMP 'opencode\agent_err.log'
 $KeyFile    = Join-Path $env:TEMP 'opencode\new_agent_key.txt'   # local-only fallback (never committed)
 
-# API key resolution order: 1) SCANNER_AGENT_API_KEY env var, 2) the local key
-# file written when the agent was (re)created. Keeps the secret out of the repo.
+# API key resolution order: 1) SCANNER_AGENT_KEY env var, 2) SCANNER_AGENT_API_KEY
+# env var, 3) the local key file written when the agent was (re)created. Keeps
+# the secret out of the repo AND out of the process command line.
 $ApiKey = ''
-if (-not [string]::IsNullOrWhiteSpace($env:SCANNER_AGENT_API_KEY)) {
+if (-not [string]::IsNullOrWhiteSpace($env:SCANNER_AGENT_KEY)) {
+    $ApiKey = ($env:SCANNER_AGENT_KEY).Trim()
+} elseif (-not [string]::IsNullOrWhiteSpace($env:SCANNER_AGENT_API_KEY)) {
     $ApiKey = ($env:SCANNER_AGENT_API_KEY).Trim()
 } elseif (Test-Path -LiteralPath $KeyFile) {
     $ApiKey = (Get-Content -Raw -LiteralPath $KeyFile).Trim()
 }
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
-    Write-Host "ERROR: agent API key not found. Set env SCANNER_AGENT_API_KEY, or place the key in:`n  $KeyFile" -ForegroundColor Red
+    Write-Host "ERROR: agent API key not found. Set env SCANNER_AGENT_KEY, or place the key in:`n  $KeyFile" -ForegroundColor Red
     exit 1
 }
 
@@ -56,11 +59,22 @@ Set-Content -Path $OutLog -Value '' -NoNewline
 Set-Content -Path $ErrLog -Value '' -NoNewline
 
 Write-Host '=== Starting LAN scanner agent ... ===' -ForegroundColor Cyan
+# Hand the key over via the inherited environment (SCANNER_AGENT_KEY) instead of
+# an --api-key argv flag so it never shows up in process listings / CIM snapshots.
+$PreviousKey = $env:SCANNER_AGENT_KEY
+$env:SCANNER_AGENT_KEY = $ApiKey
 $proc = Start-Process -FilePath 'python' `
-    -ArgumentList @('-u', "`"$AgentPy`"", '--server', $Server, "--api-key=$ApiKey",
+    -ArgumentList @('-u', "`"$AgentPy`"", '--server', $Server,
                     '--name', $Name, '--subnets', $Subnets) `
     -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog `
     -PassThru -WindowStyle Hidden
+if ($null -eq $PreviousKey) {
+    Remove-Item Env:SCANNER_AGENT_KEY -ErrorAction SilentlyContinue
+} elseif ([string]::IsNullOrWhiteSpace($PreviousKey)) {
+    $env:SCANNER_AGENT_KEY = ''
+} else {
+    $env:SCANNER_AGENT_KEY = $PreviousKey
+}
 
 $proc.Id | Set-Content -Path $PidFile -NoNewline
 Start-Sleep -Seconds 5

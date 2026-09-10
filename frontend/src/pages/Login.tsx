@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useLogin } from '../hooks/useApi'
 import { useTheme } from '../lib/theme'
 import subnexLogo from '../assets/subnex-logo.svg'
@@ -10,8 +10,10 @@ export default function Login() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const navigate = useNavigate()
+  const location = useLocation()
   const login = useLogin()
   const { theme } = useTheme()
+  const justChanged = (location.state as { passwordChanged?: boolean })?.passwordChanged
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -20,7 +22,11 @@ export default function Login() {
       const res = await login.mutateAsync({ email, password })
       localStorage.setItem('token', res.access_token)
       localStorage.setItem('role', res.role)
-      navigate('/')
+      if (res.must_change_password) {
+        navigate('/change-password', { replace: true })
+      } else {
+        navigate('/')
+      }
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Login failed')
     }
@@ -64,6 +70,12 @@ export default function Login() {
             </div>
           )}
 
+          {justChanged && (
+            <div className="rounded border border-green-800 bg-green-900/30 px-3 py-2 text-sm text-green-400">
+              Password updated — log in with your new password.
+            </div>
+          )}
+
           <button
             type="submit"
             disabled={login.isPending}
@@ -72,10 +84,6 @@ export default function Login() {
             {login.isPending ? 'Signing in...' : 'Sign in'}
           </button>
         </form>
-
-        <p className="mt-6 text-center text-xs text-gray-500">
-          Demo: demo@pentest.local / password123
-        </p>
       </div>
     </div>
   )

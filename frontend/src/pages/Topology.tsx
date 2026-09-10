@@ -8,6 +8,14 @@ import { DEVICE_TYPE_LABELS, normalizeDeviceType } from '../lib/types'
 import { useTheme } from '../lib/theme'
 import TopologyMinimap from '../components/TopologyMinimap'
 
+// Escape text for safe insertion into the hover tooltip's innerHTML. Values
+// originate from scan data / device labels, so the five HTML-significant chars
+// must always be escaped to keep stored XSS (e.g. a hostile hostname) inert.
+const esc = (s: unknown): string =>
+  String(s ?? '').replace(/[&<>"']/g, (c) =>
+    (({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }) as Record<string, string>)[c],
+  )
+
 type HostNode = {
   id: string
   kind: 'host' | 'zone' | 'internet'
@@ -565,17 +573,17 @@ export default function Topology() {
     const icon = n.kind === 'host' ? deviceIcon(n.device_type) : n.kind === 'internet' ? '🌍' : '🔷'
     if (n.kind === 'internet') return `<b>${icon} Internet</b>`
     if (n.kind === 'zone') {
-      const parts = [`<b>${icon} ${n.name}</b>`, `${n.host_count} hosts`]
-      if (n.severity && n.severity !== 'info') parts.push(`Severity: ${n.severity}`)
+      const parts = [`<b>${icon} ${esc(n.name)}</b>`, `${esc(n.host_count)} hosts`]
+      if (n.severity && n.severity !== 'info') parts.push(`Severity: ${esc(n.severity)}`)
       return parts.join('<br/>')
     }
     const parts = [
-      `<b>${icon} ${n.name}</b>`,
-      n.ip,
-      DEVICE_TYPE_LABELS[normalizeDeviceType(n.device_type)] || n.device_type || 'Unknown device',
-      `Severity: ${n.severity}`,
+      `<b>${icon} ${esc(n.name)}</b>`,
+      esc(n.ip),
+      esc(DEVICE_TYPE_LABELS[normalizeDeviceType(n.device_type)] || n.device_type || 'Unknown device'),
+      `Severity: ${esc(n.severity)}`,
     ]
-    if (n.finding_count) parts.push(`${n.finding_count} finding${n.finding_count > 1 ? 's' : ''}`)
+    if (n.finding_count) parts.push(`${esc(n.finding_count)} finding${n.finding_count > 1 ? 's' : ''}`)
     if ((n as any).is_pivot) parts.push('⚠️ Pivot host')
     if ((n as any).internet_facing) parts.push('🌐 Internet-facing')
     if (n.is_gateway) parts.push('🔗 Gateway')
