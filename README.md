@@ -67,7 +67,11 @@ SubNex is a network asset discovery platform for penetration testing engagements
 <table>
   <tr>
     <td align="center" width="50%"><img src="assets/screenshots/login.png" alt="Login" width="100%"><br><sub>Login — JWT auth</sub></td>
-    <td align="center" width="50%"><img src="assets/screenshots/engagements.png" alt="Engagements" width="100%"><br><sub>Engagements — scoped clients &amp; scan lists</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/live-scan.png" alt="Live scan" width="100%"><br><sub>Live scan — streaming event feed</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/engagements.png" alt="Engagements" width="100%"><br><sub>Engagements — scoped clients &amp; scan lists</sub></td>
+    <td align="center"><img src="assets/screenshots/engagement-detail.png" alt="Engagement detail" width="100%"><br><sub>Engagement detail — start &amp; compare scans</sub></td>
   </tr>
   <tr>
     <td align="center"><img src="assets/screenshots/inventory.png" alt="Asset inventory" width="100%"><br><sub>Asset inventory — every host, port, and tag</sub></td>
@@ -78,8 +82,8 @@ SubNex is a network asset discovery platform for penetration testing engagements
     <td align="center"><img src="assets/screenshots/report.png" alt="Client report" width="100%"><br><sub>Client report — charts &amp; executive summary</sub></td>
   </tr>
   <tr>
-    <td align="center"><img src="assets/screenshots/engagement-detail.png" alt="Engagement detail" width="100%"><br><sub>Engagement detail — start &amp; compare scans</sub></td>
     <td align="center"><img src="assets/screenshots/agents.png" alt="Scanner agents" width="100%"><br><sub>Scanner agents — LAN L2 workers</sub></td>
+    <td align="center">&nbsp;</td>
   </tr>
   <tr>
     <td align="center" colspan="2"><img src="assets/screenshots/report-pdf.png" alt="PDF client report" width="70%"><br><sub>PDF client report — WeasyPrint rendered (exportable from the Report page)</sub></td>
