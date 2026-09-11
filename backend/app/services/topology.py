@@ -216,7 +216,7 @@ def render_topology_svg(nodes, edges, cols_per_row: int = 6, col_spacing: int = 
             f'fill="#64748B">{len(kids)} host(s)</text>'
         )
 
-    # host cards  (hostname  ·  IP  ·  device type)
+    # host cards  (IP  ·  device type)
     rw = min(120, col_spacing - 8)
     rh = 38
     for n in hosts:
@@ -229,19 +229,14 @@ def render_topology_svg(nodes, edges, cols_per_row: int = 6, col_spacing: int = 
             f'<rect x="{x-rw/2:.1f}" y="{y-rh/2:.1f}" width="{rw}" height="{rh}" rx="8" '
             f'fill="#FFFFFF" stroke="{color}" stroke-width="2"/>'
         )
-        hostname = _truncate(n.get("label") or ip, 20)
         rows_out.append(
-            f'<text x="{x:.1f}" y="{y-5:.1f}" text-anchor="middle" font-size="10" '
-            f'font-weight="bold" fill="#1F2430">{_esc(hostname)}</text>'
-        )
-        rows_out.append(
-            f'<text x="{x:.1f}" y="{y+10:.1f}" text-anchor="middle" font-size="8" '
-            f'fill="#475569" font-family="DejaVu Sans Mono, monospace">{_esc(ip)}</text>'
+            f'<text x="{x:.1f}" y="{y+5:.1f}" text-anchor="middle" font-size="10" '
+            f'font-weight="bold" fill="#1F2430" font-family="DejaVu Sans Mono, monospace">{_esc(ip)}</text>'
         )
         dev = (n.get("device_type") or "unknown").replace("_", " ")
         if dev not in ("unknown", "unidentified"):
             rows_out.append(
-                f'<text x="{x:.1f}" y="{y+22:.1f}" text-anchor="middle" font-size="7.5" '
+                f'<text x="{x:.1f}" y="{y+19:.1f}" text-anchor="middle" font-size="7.5" '
                 f'fill="#94A3B8">{_esc(dev)}</text>'
             )
 
