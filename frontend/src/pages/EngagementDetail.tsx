@@ -9,6 +9,7 @@ import {
   usePauseScan,
   useResumeScan,
   useReverifyScan,
+  useDeleteScan,
   useUpdateEngagement,
   useSettings,
 } from '../hooks/useApi'
@@ -42,6 +43,9 @@ export default function EngagementDetail() {
   const { data: engagement } = useEngagement(engagementId)
   const { data: scans } = useEngagementScans(engagementId)
   const startScan = useStartScan(engagementId!)
+  const deleteScan = useDeleteScan()
+
+  const [confirmDeleteScan, setConfirmDeleteScan] = useState<string | null>(null)
 
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
@@ -115,18 +119,25 @@ export default function EngagementDetail() {
   const [diffScanB, setDiffScanB] = useState('')
   const diff = useScanDiff(diffScanA || undefined, diffScanB || undefined)
 
+  const [startError, setStartError] = useState<string | null>(null)
+
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!form.scope_confirmed) return
     const targets = form.targets.split(/[\s,]+/).filter(Boolean)
     if (targets.length === 0) return
-    const scan = await startScan.mutateAsync({
-      targets,
-      profile: form.profile,
-      port_range: form.port_range,
-      protocol: form.protocol,
-    })
-    navigate(`/engagements/${engagementId}/scans/${scan.id}/live`)
+    setStartError(null)
+    try {
+      const scan = await startScan.mutateAsync({
+        targets,
+        profile: form.profile,
+        port_range: form.port_range,
+        protocol: form.protocol,
+      })
+      navigate(`/engagements/${engagementId}/scans/${scan.id}/live`)
+    } catch (err: any) {
+      setStartError(err?.response?.data?.detail || 'Failed to start scan')
+    }
   }
 
   return (
@@ -212,7 +223,7 @@ export default function EngagementDetail() {
             </div>
           </div>
           {editError && (
-            <p className="mt-3 text-sm text-red-400">{editError}</p>
+            <p className="mt-3 whitespace-pre-line text-sm text-red-400">{editError}</p>
           )}
           <button
             type="submit"
@@ -315,6 +326,11 @@ export default function EngagementDetail() {
           >
             {startScan.isPending ? 'Starting...' : 'Start Scan'}
           </button>
+          {startError && (
+            <div className="mt-3 whitespace-pre-line rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-400">
+              {startError}
+            </div>
+          )}
           {!form.targets.trim() && (
             <p className="mt-2 text-xs text-amber-400">Enter at least one target (IP or CIDR) to start a scan.</p>
           )}
@@ -380,6 +396,34 @@ export default function EngagementDetail() {
                         >
                           Stop
                         </button>
+                        {confirmDeleteScan === s.id ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <button
+                              onClick={async () => {
+                                await deleteScan.mutateAsync(s.id)
+                                setConfirmDeleteScan(null)
+                              }}
+                              disabled={deleteScan.isPending}
+                              className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteScan(null)}
+                              className="rounded bg-gray-700 px-2 py-1 text-xs font-medium text-white hover:bg-gray-600"
+                            >
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDeleteScan(s.id)}
+                            className="rounded border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                            title="Permanently delete this scan and all its hosts, findings, and audit trail"
+                          >
+                            Delete
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <div className="flex items-center gap-1.5">
@@ -395,6 +439,34 @@ export default function EngagementDetail() {
                         >
                           Re-verify
                         </button>
+                        {confirmDeleteScan === s.id ? (
+                          <span className="inline-flex items-center gap-1.5">
+                            <button
+                              onClick={async () => {
+                                await deleteScan.mutateAsync(s.id)
+                                setConfirmDeleteScan(null)
+                              }}
+                              disabled={deleteScan.isPending}
+                              className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setConfirmDeleteScan(null)}
+                              className="rounded bg-gray-700 px-2 py-1 text-xs font-medium text-white hover:bg-gray-600"
+                            >
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => setConfirmDeleteScan(s.id)}
+                            className="rounded border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+                            title="Permanently delete this scan and all its hosts, findings, and audit trail"
+                          >
+                            Delete
+                          </button>
+                        )}
                       </div>
                     )}
                   </td>

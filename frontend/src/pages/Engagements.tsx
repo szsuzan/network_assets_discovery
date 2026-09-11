@@ -19,6 +19,7 @@ export default function Engagements() {
     start_date: '',
     end_date: '',
   })
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({
@@ -65,15 +66,20 @@ export default function Engagements() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
     const scope = form.authorized_scope.split(',').map((s) => s.trim()).filter(Boolean)
-    await createEngagement.mutateAsync({
-      client_name: form.client_name,
-      engagement_name: form.engagement_name,
-      authorized_scope: scope,
-      start_date: form.start_date || null,
-      end_date: form.end_date || null,
-    })
-    setShowForm(false)
-    setForm({ client_name: '', engagement_name: '', authorized_scope: '', start_date: '', end_date: '' })
+    setCreateError(null)
+    try {
+      await createEngagement.mutateAsync({
+        client_name: form.client_name,
+        engagement_name: form.engagement_name,
+        authorized_scope: scope,
+        start_date: form.start_date || null,
+        end_date: form.end_date || null,
+      })
+      setShowForm(false)
+      setForm({ client_name: '', engagement_name: '', authorized_scope: '', start_date: '', end_date: '' })
+    } catch (err: any) {
+      setCreateError(err?.response?.data?.detail || 'Failed to create engagement')
+    }
   }
 
   const handleDelete = async (id: string) => {
@@ -155,6 +161,11 @@ export default function Engagements() {
           >
             {createEngagement.isPending ? 'Creating...' : 'Create Engagement'}
           </button>
+          {createError && (
+            <div className="mt-3 whitespace-pre-line rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-400">
+              {createError}
+            </div>
+          )}
         </form>
       )}
 
@@ -221,7 +232,7 @@ export default function Engagements() {
             </div>
           </div>
           {editError && (
-            <p className="mt-3 text-sm text-red-400">{editError}</p>
+            <p className="mt-3 whitespace-pre-line text-sm text-red-400">{editError}</p>
           )}
           <button
             type="submit"
