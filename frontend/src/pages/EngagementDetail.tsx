@@ -18,9 +18,17 @@ const ACTIVE_STATUSES = ['queued', 'discovering', 'scanning', 'fingerprinting', 
 
 const PROFILE_NOTES: Record<string, string> = {
   quick: 'Fast top-1000 port scan, standard timing. For most engagements.',
-  full: 'Comprehensive top-10000 port scan with deep fingerprinting. Slower but thorough.',
+  full: 'Comprehensive top-10000 port scan with deep fingerprinting. Default.',
   stealth: 'Heavily throttled. Safer for fragile OT/IoT devices that can crash under aggressive scanning.',
   passive_only: 'No active probes. Passive CDP/LLDP/mDNS capture only. Slowest, zero footprint.',
+}
+
+// Port range each profile implies, applied when the profile is selected.
+const PROFILE_PORT_RANGES: Record<string, string> = {
+  quick: '1-1000',
+  full: '1-10000',
+  stealth: '1-1000',
+  passive_only: '1-10000',
 }
 
 export default function EngagementDetail() {
@@ -37,7 +45,7 @@ export default function EngagementDetail() {
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
     targets: '',
-    profile: 'quick',
+    profile: 'full',
     port_range: '1-10000',
     protocol: 'tcp',
     scope_confirmed: false,
@@ -159,7 +167,7 @@ export default function EngagementDetail() {
                   key={key}
                   onClick={() => {
                         setTouched(true)
-                        setForm({ ...form, profile: key })
+                        setForm({ ...form, profile: key, port_range: PROFILE_PORT_RANGES[key] })
                       }}
                   className={`rounded border p-3 text-left transition-colors ${
                     form.profile === key

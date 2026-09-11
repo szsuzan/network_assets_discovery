@@ -47,7 +47,7 @@ SETTINGS_CATALOG = [
     _s("scan.default_profile", "scan", "Default scan profile",
        "Profile the New Scan form (and the API when no profile is sent) starts with. "
        "quick/full/stealth scan top-1000/top-10000 at increasing throttle; passive_only runs no active probes.",
-       "select", "quick", options=["quick", "full", "stealth", "passive_only"]),
+       "select", "full", options=["quick", "full", "stealth", "passive_only"]),
     _s("scan.default_port_range", "scan", "Default port range",
        "Port range the New Scan form (and the API when none is sent) starts with, e.g. '1-10000'.",
        "text", "1-10000"),
