@@ -6,8 +6,9 @@ import uuid
 
 from ..database import get_db
 from ..models import User, Engagement, Scan, AuditLog, AgentTask
-from ..schemas import EngagementCreate, EngagementOut, ScanOut
+from ..schemas import EngagementCreate, EngagementUpdate, EngagementOut, ScanOut
 from ..auth import get_current_user
+from ..scope_utils import validate_scope
 
 router = APIRouter(prefix="/api/engagements", tags=["engagements"])
 
@@ -17,10 +18,15 @@ async def create_engagement(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    scope = [s.strip() for s in (data.authorized_scope or []) if s and s.strip()]
+    try:
+        validate_scope(scope)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     engagement = Engagement(
         client_name=data.client_name,
         engagement_name=data.engagement_name,
-        authorized_scope=data.authorized_scope,
+        authorized_scope=scope,
         start_date=data.start_date,
         end_date=data.end_date,
         created_by=current_user.id
@@ -31,11 +37,67 @@ async def create_engagement(
         user_id=current_user.id,
         engagement_id=engagement.id,
         action="engagement_created",
-        detail={"client_name": data.client_name, "scope": data.authorized_scope}
+        detail={"client_name": data.client_name, "scope": scope}
     ))
     
     await db.commit()
     await db.refresh(engagement)
+    return engagement
+
+@router.patch("/{engagement_id}", response_model=EngagementOut)
+async def update_engagement(
+    engagement_id: uuid.UUID,
+    data: EngagementUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Partially edit an engagement (name, dates, authorized scope).
+
+    Only the creator (pentester) or an admin may edit. Scope entries are
+    validated so typos such as ``192.168.1.0./24`` are caught here instead of
+    silently rejecting scan targets later.
+    """
+    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
+    engagement = result.scalar_one_or_none()
+    if not engagement:
+        raise HTTPException(status_code=404, detail="Engagement not found")
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    if current_user.role != "admin" and engagement.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="No access to this engagement")
+
+    changes = {}
+    if data.client_name is not None and data.client_name != engagement.client_name:
+        engagement.client_name = data.client_name
+        changes["client_name"] = data.client_name
+    if data.engagement_name is not None and data.engagement_name != engagement.engagement_name:
+        engagement.engagement_name = data.engagement_name
+        changes["engagement_name"] = data.engagement_name
+    if data.start_date is not None and str(data.start_date) != (str(engagement.start_date) if engagement.start_date else None):
+        engagement.start_date = data.start_date
+        changes["start_date"] = str(data.start_date)
+    if data.end_date is not None and str(data.end_date) != (str(engagement.end_date) if engagement.end_date else None):
+        engagement.end_date = data.end_date
+        changes["end_date"] = str(data.end_date)
+    if data.authorized_scope is not None:
+        scope = [s.strip() for s in data.authorized_scope if s and s.strip()]
+        try:
+            validate_scope(scope)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        if scope != engagement.authorized_scope:
+            engagement.authorized_scope = scope
+            changes["scope"] = scope
+
+    if changes:
+        db.add(AuditLog(
+            user_id=current_user.id,
+            engagement_id=engagement.id,
+            action="engagement_updated",
+            detail=changes
+        ))
+        await db.commit()
+        await db.refresh(engagement)
     return engagement
 
 @router.get("", response_model=List[EngagementOut])

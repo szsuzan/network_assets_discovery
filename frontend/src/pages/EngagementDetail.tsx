@@ -9,6 +9,7 @@ import {
   usePauseScan,
   useResumeScan,
   useReverifyScan,
+  useUpdateEngagement,
   useSettings,
 } from '../hooks/useApi'
 import { StatusBadge } from '../components/Badge'
@@ -52,6 +53,49 @@ export default function EngagementDetail() {
   })
   const [touched, setTouched] = useState(false)
   const { data: globalSettings } = useSettings()
+  const updateEngagement = useUpdateEngagement()
+
+  const [editing, setEditing] = useState(false)
+  const [editForm, setEditForm] = useState({
+    client_name: '',
+    engagement_name: '',
+    authorized_scope: '',
+    start_date: '',
+    end_date: '',
+  })
+  const [editError, setEditError] = useState<string | null>(null)
+
+  const startEdit = () => {
+    if (!engagement) return
+    setEditForm({
+      client_name: engagement.client_name,
+      engagement_name: engagement.engagement_name,
+      authorized_scope: engagement.authorized_scope.join(', '),
+      start_date: engagement.start_date || '',
+      end_date: engagement.end_date || '',
+    })
+    setEditError(null)
+    setEditing(true)
+  }
+
+  const handleUpdate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setEditError(null)
+    const scope = editForm.authorized_scope.split(/[\s,]+/).filter(Boolean)
+    try {
+      await updateEngagement.mutateAsync({
+        id: engagementId!,
+        client_name: editForm.client_name,
+        engagement_name: editForm.engagement_name,
+        authorized_scope: scope,
+        start_date: editForm.start_date || null,
+        end_date: editForm.end_date || null,
+      })
+      setEditing(false)
+    } catch (err: any) {
+      setEditError(err?.response?.data?.detail || 'Failed to update engagement')
+    }
+  }
 
   // Prefill the new-scan form with the defaults configured in Settings (only
   // until the user starts editing those fields themselves).
@@ -100,6 +144,12 @@ export default function EngagementDetail() {
         <div className="flex items-center gap-3">
           <StatusBadge status={engagement?.status || 'active'} />
           <button
+            onClick={() => (editing ? setEditing(false) : startEdit())}
+            className="rounded border border-blue-600 px-4 py-2 text-sm font-medium text-blue-400 hover:bg-blue-600/20"
+          >
+            {editing ? 'Cancel Edit' : 'Edit'}
+          </button>
+          <button
             onClick={() => setShowForm(!showForm)}
             className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
           >
@@ -107,6 +157,72 @@ export default function EngagementDetail() {
           </button>
         </div>
       </div>
+
+      {editing && (
+        <form onSubmit={handleUpdate} className="mb-6 rounded-lg border border-blue-800 bg-gray-900 p-4">
+          <h2 className="mb-3 font-medium">Edit Engagement</h2>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Client Name *</label>
+              <input
+                value={editForm.client_name}
+                onChange={(e) => setEditForm({ ...editForm, client_name: e.target.value })}
+                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                required
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Engagement Name *</label>
+              <input
+                value={editForm.engagement_name}
+                onChange={(e) => setEditForm({ ...editForm, engagement_name: e.target.value })}
+                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                required
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Authorized Scope (CIDR list)</label>
+              <input
+                value={editForm.authorized_scope}
+                onChange={(e) => setEditForm({ ...editForm, authorized_scope: e.target.value })}
+                placeholder="10.0.0.0/24, 192.168.1.0/24"
+                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white mono"
+                required
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="mb-1 block text-sm text-gray-300">Start Date</label>
+                <input
+                  type="date"
+                  value={editForm.start_date}
+                  onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
+                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm text-gray-300">End Date</label>
+                <input
+                  type="date"
+                  value={editForm.end_date}
+                  onChange={(e) => setEditForm({ ...editForm, end_date: e.target.value })}
+                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                />
+              </div>
+            </div>
+          </div>
+          {editError && (
+            <p className="mt-3 text-sm text-red-400">{editError}</p>
+          )}
+          <button
+            type="submit"
+            disabled={updateEngagement.isPending}
+            className="mt-4 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {updateEngagement.isPending ? 'Saving...' : 'Save Changes'}
+          </button>
+        </form>
+      )}
 
       {showForm && (
         <form onSubmit={handleStart} className="mb-6 rounded-lg border border-gray-800 bg-gray-900 p-4">

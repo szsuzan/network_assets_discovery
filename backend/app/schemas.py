@@ -36,6 +36,13 @@ class EngagementCreate(BaseModel):
     start_date: Optional[date] = None
     end_date: Optional[date] = None
 
+class EngagementUpdate(BaseModel):
+    client_name: Optional[str] = None
+    engagement_name: Optional[str] = None
+    authorized_scope: Optional[List[str]] = None
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+
 class EngagementOut(BaseModel):
     id: uuid.UUID
     client_name: str

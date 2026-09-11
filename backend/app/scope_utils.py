@@ -47,3 +47,38 @@ def count_hosts_in_scope(targets: List[str]) -> int:
         else:
             total += net.num_addresses
     return total
+
+
+def validate_scope(scope: List[str]) -> None:
+    """Validate an engagement's authorized scope list, raising ValueError with
+    the offending entries.
+
+    Entries that clearly describe numeric IP targets must parse as an IP
+    address or CIDR network (an easy typo like ``192.168.1.0./24`` is rejected
+    here instead of silently never matching at scan time). Non-numeric entries
+    (hostnames such as ``fileserver.lan``) are allowed through as-is.
+    """
+    if not scope:
+        return
+    bad = []
+    for entry in scope:
+        entry = (entry or "").strip()
+        if not entry:
+            continue
+        # Contains alphabetic chars -> assume hostname, accept.
+        if any(ch.isalpha() for ch in entry):
+            continue
+        try:
+            ipaddress.ip_address(entry)
+            continue
+        except ValueError:
+            pass
+        try:
+            ipaddress.ip_network(entry, strict=False)
+        except ValueError:
+            bad.append(entry)
+    if bad:
+        raise ValueError(
+            "Invalid scope entries (expected IP or CIDR, e.g. 192.168.1.0/24): "
+            + ", ".join(bad)
+        )
