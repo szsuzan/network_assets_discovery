@@ -239,7 +239,7 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
           <td>{_esc(h.os_guess or "—")}</td>
           <td>{cells_for_open_ports(_open_ports_for(h, ports_lookup))}</td>
           <td>{len([f for f in reported if f.host_id and str(f.host_id) == str(h.id)])}</td>
-          <td class="nowrap">{_esc(h.last_seen.strftime("%Y-%m-%d %H:%M") if getattr(h, "last_seen", None) else "—")}</td>
+          <td>{_esc(h.last_seen.strftime("%Y-%m-%d %H:%M") if getattr(h, "last_seen", None) else "—")}</td>
         </tr>"""
         for h in sorted(hosts, key=lambda x: (SEVERITY_ORDER.get(worst.get(str(x.id), "info"), 9), str(x.ip)))
     )
@@ -248,10 +248,13 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   <p class="meta">{len(hosts)} asset(s) discovered · {with_findings} with findings · {
       _esc(', '.join(scan.targets))} · snapshots below are per host last-seen</p>
   <table>
+    <colgroup><col style="width:9%"/><col style="width:13%"/><col style="width:12%"/>
+      <col style="width:11%"/><col style="width:8%"/><col style="width:10%"/>
+      <col style="width:13%"/><col style="width:11%"/><col style="width:5%"/><col style="width:8%"/></colgroup>
     <thead><tr>
-      <th style="width:9%">Risk</th><th style="width:13%">IP</th><th style="width:10%">Hostname</th>
-      <th style="width:10%">Type</th><th style="width:11%">MAC</th><th style="width:9%">Vendor</th>
-      <th style="width:12%">OS</th><th style="width:11%">Open Ports</th><th style="width:7%">Findings</th><th style="width:8%">Last Seen</th>
+      <th>Risk</th><th>IP</th><th>Hostname</th>
+      <th>Type</th><th>MAC</th><th>Vendor</th>
+      <th>OS</th><th>Open Ports</th><th>Findings</th><th>Last Seen</th>
     </tr></thead>
     <tbody>{inv_rows}</tbody>
   </table>"""
@@ -273,7 +276,8 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   the authorized scope were probed; service reachability does not imply a confirmed
   vulnerability.</p>
   <table>
-    <thead><tr><th style="width:18%">Host</th><th style="width:20%">Type</th><th style="width:42%">Exposure</th><th style="width:20%">Open Ports</th></tr></thead>
+    <colgroup><col style="width:18%"/><col style="width:20%"/><col style="width:42%"/><col style="width:20%"/></colgroup>
+    <thead><tr><th>Host</th><th>Type</th><th>Exposure</th><th>Open Ports</th></tr></thead>
     <tbody>{''.join(exposure_rows)}</tbody>
   </table>"""
 
