@@ -73,7 +73,7 @@ def compute_topology(scan, hosts, findings) -> tuple[list, list]:
         zone_nodes.append({
             "id": "zone:" + zkey,
             "kind": "zone",
-            "label": zkey.replace("/", " mask "),
+            "label": zkey,
             "host_count": len(hs),
             "device_type": "router" if gw else None,
             "severity": next(s for s, o in SEV_ORDER.items() if o == sev),

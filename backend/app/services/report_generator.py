@@ -249,9 +249,9 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
       _esc(', '.join(scan.targets))} · snapshots below are per host last-seen</p>
   <table>
     <thead><tr>
-      <th style="width:6%">Risk</th><th style="width:13%">IP</th><th style="width:11%">Hostname</th>
-      <th style="width:11%">Type</th><th style="width:11%">MAC</th><th style="width:10%">Vendor</th>
-      <th style="width:12%">OS</th><th style="width:12%">Open Ports</th><th style="width:7%">Findings</th><th style="width:7%">Last Seen</th>
+      <th style="width:9%">Risk</th><th style="width:13%">IP</th><th style="width:10%">Hostname</th>
+      <th style="width:10%">Type</th><th style="width:11%">MAC</th><th style="width:9%">Vendor</th>
+      <th style="width:12%">OS</th><th style="width:11%">Open Ports</th><th style="width:7%">Findings</th><th style="width:8%">Last Seen</th>
     </tr></thead>
     <tbody>{inv_rows}</tbody>
   </table>"""
@@ -392,15 +392,15 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   .nowrap {{ white-space: nowrap; }}
   .mono {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
   table {{ width: 100%; max-width: 100%; border-collapse: collapse; margin: 8px 0; table-layout: fixed; }}
-  th, td {{ text-align: left; padding: 4px 6px; border-bottom: 1px solid #E5E7EB; font-size: 8.5px; overflow-wrap: break-word; word-break: break-word; }}
+  th, td {{ text-align: left; padding: 3px 4px; border-bottom: 1px solid #E5E7EB; font-size: 8.5px; overflow-wrap: anywhere; word-break: break-word; }}
   th {{ background: #F3F4F6; font-weight: 600; color: #374151; }}
   .grid {{ display: flex; flex-wrap: wrap; gap: 10px; }}
   .grid > div {{ flex: 1 1 130px; min-width: 0; }}
   .stat {{ background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 9px; min-width: 0; }}
-  .stat .num {{ font-size: 21px; font-weight: 700; color: #101623; overflow-wrap: break-word; word-break: break-word; }}
-  .stat .lbl {{ font-size: 8px; color: #6B7280; text-transform: uppercase; letter-spacing: .4px; }}
-  .badge {{ display: inline-block; padding: 1px 6px; border-radius: 4px; color: #fff; font-size: 7.5px; font-weight: 600; text-transform: uppercase; }}
-  .badge.pill {{ min-width: 40px; text-align: center; }}
+  .stat .num {{ font-size: 16px; font-weight: 700; color: #101623; overflow-wrap: break-word; word-break: break-word; }}
+  .stat .lbl {{ font-size: 6px; color: #6B7280; text-transform: uppercase; letter-spacing: .4px; }}
+  .badge {{ display: inline-block; padding: 1px 4px; border-radius: 4px; color: #fff; font-size: 7px; font-weight: 600; white-space: normal; line-height: 1.2; }}
+  .badge.pill {{ display: block; min-width: 0; text-align: center; }}
   .chip.port {{ border-color: #94A3B8; color: #475569; }}
   .ev-label {{ font-size: 7.5px; color: #8B95A1; text-transform: uppercase; letter-spacing: .5px; margin: 7px 0 2px; }}
   .evidence {{ background: #0B1220; color: #C9D3E0; border: 1px solid #252F40; border-radius: 6px; padding: 6px 8px; font-size: 7px; line-height: 1.45; white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
