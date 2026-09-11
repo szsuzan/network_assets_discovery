@@ -249,9 +249,9 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
       _esc(', '.join(scan.targets))} · snapshots below are per host last-seen</p>
   <table>
     <thead><tr>
-      <th style="width:11%">Risk</th><th style="width:14%">IP</th><th style="width:12%">Hostname</th>
-      <th style="width:12%">Type</th><th style="width:12%">MAC</th><th style="width:11%">Vendor</th>
-      <th style="width:14%">OS</th><th style="width:10%">Open Ports</th><th style="width:8%">Findings</th><th style="width:9%">Last Seen</th>
+      <th style="width:6%">Risk</th><th style="width:13%">IP</th><th style="width:11%">Hostname</th>
+      <th style="width:11%">Type</th><th style="width:11%">MAC</th><th style="width:10%">Vendor</th>
+      <th style="width:12%">OS</th><th style="width:12%">Open Ports</th><th style="width:7%">Findings</th><th style="width:7%">Last Seen</th>
     </tr></thead>
     <tbody>{inv_rows}</tbody>
   </table>"""
@@ -376,43 +376,43 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
 <meta charset="utf-8">
 <style>
   @page {{ size: A4; margin: 18mm 16mm; @bottom-center {{ content: "Page " counter(page) " of " counter(pages); font-size: 9px; color: #8B95A1; }} }}
-  body {{ font-family: "Inter", "Helvetica Neue", Arial, sans-serif; color: #1F2430; font-size: 11px; line-height: 1.45; }}
-  h1 {{ font-size: 24px; margin: 0 0 4px; color: #101623; }}
-  h2 {{ font-size: 16px; border-bottom: 2px solid #E5E7EB; padding-bottom: 6px; margin: 28px 0 12px; color: #101623; }}
-  h3 {{ font-size: 13px; margin: 16px 0 8px; color: #101623; }}
-  .subtitle {{ color: #5B6472; font-size: 12px; margin-bottom: 6px; }}
-  .meta {{ color: #8B95A1; font-size: 10px; line-height: 1.6; }}
-  .confidential {{ margin-top: 10px; padding: 6px 10px; background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; color: #9A3412; font-size: 9px; }}
+  body {{ font-family: "Inter", "Helvetica Neue", Arial, sans-serif; color: #1F2430; font-size: 9.5px; line-height: 1.4; }}
+  h1 {{ font-size: 20px; margin: 0 0 4px; color: #101623; }}
+  h2 {{ font-size: 13.5px; border-bottom: 2px solid #E5E7EB; padding-bottom: 5px; margin: 22px 0 10px; color: #101623; }}
+  h3 {{ font-size: 11px; margin: 12px 0 6px; color: #101623; }}
+  .subtitle {{ color: #5B6472; font-size: 10.5px; margin-bottom: 5px; }}
+  .meta {{ color: #8B95A1; font-size: 8.5px; line-height: 1.6; }}
+  .confidential {{ margin-top: 10px; padding: 5px 9px; background: #FFF7ED; border: 1px solid #FED7AA; border-radius: 6px; color: #9A3412; font-size: 8px; }}
   .narrative {{ color: #374151; margin-top: 10px; }}
-  .chip {{ display: inline-block; padding: 1px 6px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 9px; }}
+  .chip {{ display: inline-block; padding: 1px 5px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 8px; }}
   .chip-note {{ margin-top: 4px; }}
-  .chips {{ font-size: 10px; color: #374151; margin: 2px 0 4px; }}
-  .thingy {{ display: inline-block; padding: 1px 6px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 9px; }}
-  .dim {{ color: #9CA3AF; font-size: 8px; }}
+  .chips {{ font-size: 8.5px; color: #374151; margin: 2px 0 4px; }}
+  .thingy {{ display: inline-block; padding: 1px 5px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 8px; }}
+  .dim {{ color: #9CA3AF; font-size: 7px; }}
   .nowrap {{ white-space: nowrap; }}
   .mono {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
   table {{ width: 100%; max-width: 100%; border-collapse: collapse; margin: 8px 0; table-layout: fixed; }}
-  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #E5E7EB; font-size: 10px; overflow-wrap: break-word; word-break: break-word; }}
+  th, td {{ text-align: left; padding: 4px 6px; border-bottom: 1px solid #E5E7EB; font-size: 8.5px; overflow-wrap: break-word; word-break: break-word; }}
   th {{ background: #F3F4F6; font-weight: 600; color: #374151; }}
-  .grid {{ display: flex; flex-wrap: wrap; gap: 12px; }}
-  .grid > div {{ flex: 1 1 150px; min-width: 0; }}
-  .stat {{ background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 12px; min-width: 0; }}
-  .stat .num {{ font-size: 26px; font-weight: 700; color: #101623; overflow-wrap: break-word; word-break: break-word; }}
-  .stat .lbl {{ font-size: 10px; color: #6B7280; text-transform: uppercase; letter-spacing: .5px; }}
-  .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; color: #fff; font-size: 9px; font-weight: 600; text-transform: uppercase; }}
-  .badge.pill {{ min-width: 58px; text-align: center; }}
+  .grid {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+  .grid > div {{ flex: 1 1 130px; min-width: 0; }}
+  .stat {{ background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 9px; min-width: 0; }}
+  .stat .num {{ font-size: 21px; font-weight: 700; color: #101623; overflow-wrap: break-word; word-break: break-word; }}
+  .stat .lbl {{ font-size: 8px; color: #6B7280; text-transform: uppercase; letter-spacing: .4px; }}
+  .badge {{ display: inline-block; padding: 1px 6px; border-radius: 4px; color: #fff; font-size: 7.5px; font-weight: 600; text-transform: uppercase; }}
+  .badge.pill {{ min-width: 40px; text-align: center; }}
   .chip.port {{ border-color: #94A3B8; color: #475569; }}
-  .ev-label {{ font-size: 9px; color: #8B95A1; text-transform: uppercase; letter-spacing: .5px; margin: 8px 0 2px; }}
-  .evidence {{ background: #0B1220; color: #C9D3E0; border: 1px solid #252F40; border-radius: 6px; padding: 8px 10px; font-size: 8.5px; line-height: 1.5; white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
-  .finding {{ border: 1px solid #E5E7EB; border-left: 4px solid #8B95A1; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }}
-  .finding-head {{ margin-bottom: 6px; }}
-  .finding-host {{ font-size: 10px; color: #6B7280; margin-bottom: 6px; }}
-  .finding p {{ margin: 4px 0; color: #374151; }}
+  .ev-label {{ font-size: 7.5px; color: #8B95A1; text-transform: uppercase; letter-spacing: .5px; margin: 7px 0 2px; }}
+  .evidence {{ background: #0B1220; color: #C9D3E0; border: 1px solid #252F40; border-radius: 6px; padding: 6px 8px; font-size: 7px; line-height: 1.45; white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
+  .finding {{ border: 1px solid #E5E7EB; border-left: 4px solid #8B95A1; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }}
+  .finding-head {{ margin-bottom: 5px; }}
+  .finding-host {{ font-size: 8.5px; color: #6B7280; margin-bottom: 5px; }}
+  .finding p {{ margin: 3px 0; color: #374151; }}
   .rec {{ color: #0F766E; }}
   .muted {{ color: #8B95A1; }}
-  ul {{ margin: 6px 0 6px 18px; }}
-  li {{ margin-bottom: 4px; }}
-  .appendix {{ background: #F9FAFB; border-radius: 6px; padding: 12px; }}
+  ul {{ margin: 4px 0 4px 16px; }}
+  li {{ margin-bottom: 3px; }}
+  .appendix {{ background: #F9FAFB; border-radius: 6px; padding: 10px; }}
   .topo-block {{ margin: 6px 0 4px; }}
   .topo-img {{ width: 100%; }}
 </style>
