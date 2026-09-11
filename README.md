@@ -67,7 +67,7 @@ SubNex is a network asset discovery platform for penetration testing engagements
 <table>
   <tr>
     <td align="center" width="50%"><img src="assets/screenshots/login.png" alt="Login" width="100%"><br><sub>Login — JWT auth</sub></td>
-    <td align="center" width="50%"><img src="assets/screenshots/live-scan.png" alt="Live scan" width="100%"><br><sub>Live scan — streaming event feed</sub></td>
+    <td align="center" width="50%"><img src="assets/screenshots/live-scan-v2.png" alt="Live scan" width="100%"><br><sub>Live scan — streaming event feed</sub></td>
   </tr>
   <tr>
     <td align="center"><img src="assets/screenshots/engagements.png" alt="Engagements" width="100%"><br><sub>Engagements — scoped clients &amp; scan lists</sub></td>
