@@ -13,6 +13,8 @@ backend/scan_output/
 frontend/node_modules/
 frontend/dist/
 frontend/verify/
+frontend/tsconfig.tsbuildinfo
+frontend/*.tsbuildinfo
 
 # OS / editors
 Thumbs.db
