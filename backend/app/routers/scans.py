@@ -13,14 +13,14 @@ def _host_ip_eq(host_ip: str):
     return cast(host_ip, INET)
 
 from ..database import get_db, AsyncSessionLocal
-from ..models import User, Engagement, Scan, Host, Port, SNMPInfo, Finding, FindingAudit, AuditLog
+from ..models import User, Engagement, Scan, Host, Port, SNMPInfo, Finding, FindingAudit, AuditLog, AgentTask, TopologyEdge
 from ..schemas import (
     ScanCreate, ReverifyIn, ScanOut, HostOut, HostDetail, HostPatch,
     FindingOut, FindingPatch, FindingAuditOut, RiskRuleOut, RiskRulePatch,
     TopologyOut, DiffResult
 )
 from ..auth import get_current_user
-from ..scope_utils import validate_targets_in_scope, count_hosts_in_scope
+from ..scope_utils import validate_scan_targets, count_hosts_in_scope
 from ..services.scan_worker import run_scan, read_console_log, _dispatch_run
 from ..services import settings as settings_svc
 
@@ -67,7 +67,7 @@ async def start_scan(
     engagement = await _require_engagement_access(db, engagement_id, current_user)
     
     try:
-        validate_targets_in_scope(data.targets, engagement.authorized_scope)
+        validate_scan_targets(data.targets, engagement.authorized_scope)
     except ValueError as e:
         db.add(AuditLog(
             user_id=current_user.id,
@@ -307,7 +307,7 @@ async def resume_scan(
     return scan
 
 
-@router.delete("/scans/{scan_id}", response_model=ScanOut)
+@router.post("/scans/{scan_id}/stop", response_model=ScanOut)
 async def stop_scan(
     scan_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
@@ -341,6 +341,54 @@ async def stop_scan(
 
     await db.refresh(scan)
     return scan
+
+
+@router.delete("/scans/{scan_id}", status_code=204)
+async def delete_scan(
+    scan_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Permanently delete a scan and all of its data (hosts, ports, findings,
+    audit trail, agent tasks). An in-progress scan is cancelled first.
+
+    Admins and the scan's engagement creator may delete. This is a hard delete —
+    the scan and its report data are gone, so confirmation is expected on the
+    client.
+    """
+    scan = await _load_scan_for_user(db, scan_id, current_user)
+
+    # Kill any queued/running work before removing the rows, so no worker or agent
+    # keeps writing into a scan that no longer exists.
+    from ..services.scan_worker import cancel_scan
+    cancel_scan(str(scan.id))
+
+    engagement_id = scan.engagement_id
+    scan_id_uuid = scan.id
+
+    # agent_tasks / audit_log / topology_edges reference scans with NO ACTION and
+    # audit_log also FK-locks scan deletes, so remove them (and rows that cascade
+    # from hosts: ports, snmp_info, findings, finding_audit) before the scan row.
+    await db.execute(AgentTask.__table__.delete().where(AgentTask.scan_id == scan_id_uuid))
+    await db.execute(AuditLog.__table__.delete().where(AuditLog.scan_id == scan_id_uuid))
+    await db.execute(TopologyEdge.__table__.delete().where(TopologyEdge.scan_id == scan_id_uuid))
+    await db.execute(Host.__table__.delete().where(Host.scan_id == scan_id_uuid))
+    await db.execute(Scan.__table__.delete().where(Scan.id == scan_id_uuid))
+    await db.commit()
+
+    # Drop per-scan transient keys (task mapping / pause flag).
+    try:
+        from ..websocket import _redis_client
+        rc = _redis_client()
+        rc.delete(f"scan:task:{scan_id_uuid}", f"scan:paused:{scan_id_uuid}")
+        rc.close()
+    except Exception:
+        pass
+
+    from ..websocket import manager
+    manager.broadcast_sync(str(scan_id_uuid), {
+        "type": "scan_deleted", "scan_id": str(scan_id_uuid), "engagement_id": str(engagement_id),
+    })
 
 # Canonical device_type queried from the UI/API -> all legacy spellings the DB
 # may still hold, so filters like device_type=ip_camera match rows stored as

@@ -301,8 +301,16 @@ export function useScanDiff(scanId: string | undefined, otherScanId: string | un
 export function useStopScan() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (scanId: string) => api.delete(`/api/scans/${scanId}`),
+    mutationFn: (scanId: string) => api.post(`/api/scans/${scanId}/stop`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scan'] }),
+  })
+}
+
+export function useDeleteScan() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (scanId: string) => api.delete(`/api/scans/${scanId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['engagement'] }),
   })
 }
 
