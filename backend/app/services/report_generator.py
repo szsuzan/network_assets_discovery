@@ -249,8 +249,9 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
       _esc(', '.join(scan.targets))} · snapshots below are per host last-seen</p>
   <table>
     <thead><tr>
-      <th>Risk</th><th>IP</th><th>Hostname</th><th>Type</th><th>MAC</th><th>Vendor</th>
-      <th>OS</th><th>Open Ports</th><th>Findings</th><th>Last Seen</th>
+      <th style="width:11%">Risk</th><th style="width:14%">IP</th><th style="width:12%">Hostname</th>
+      <th style="width:12%">Type</th><th style="width:12%">MAC</th><th style="width:11%">Vendor</th>
+      <th style="width:14%">OS</th><th style="width:10%">Open Ports</th><th style="width:8%">Findings</th><th style="width:9%">Last Seen</th>
     </tr></thead>
     <tbody>{inv_rows}</tbody>
   </table>"""
@@ -272,7 +273,7 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   the authorized scope were probed; service reachability does not imply a confirmed
   vulnerability.</p>
   <table>
-    <thead><tr><th>Host</th><th>Type</th><th>Exposure</th><th>Open Ports</th></tr></thead>
+    <thead><tr><th style="width:18%">Host</th><th style="width:20%">Type</th><th style="width:42%">Exposure</th><th style="width:20%">Open Ports</th></tr></thead>
     <tbody>{''.join(exposure_rows)}</tbody>
   </table>"""
 
@@ -390,13 +391,13 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   .dim {{ color: #9CA3AF; font-size: 8px; }}
   .nowrap {{ white-space: nowrap; }}
   .mono {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
-  table {{ width: 100%; border-collapse: collapse; margin: 8px 0; }}
-  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #E5E7EB; font-size: 10px; }}
+  table {{ width: 100%; max-width: 100%; border-collapse: collapse; margin: 8px 0; table-layout: fixed; }}
+  th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #E5E7EB; font-size: 10px; overflow-wrap: break-word; word-break: break-word; }}
   th {{ background: #F3F4F6; font-weight: 600; color: #374151; }}
-  .grid {{ display: flex; gap: 24px; }}
-  .grid > div {{ flex: 1; }}
-  .stat {{ background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 12px; }}
-  .stat .num {{ font-size: 26px; font-weight: 700; color: #101623; }}
+  .grid {{ display: flex; flex-wrap: wrap; gap: 12px; }}
+  .grid > div {{ flex: 1 1 150px; min-width: 0; }}
+  .stat {{ background: #F9FAFB; border: 1px solid #E5E7EB; border-radius: 8px; padding: 12px; min-width: 0; }}
+  .stat .num {{ font-size: 26px; font-weight: 700; color: #101623; overflow-wrap: break-word; word-break: break-word; }}
   .stat .lbl {{ font-size: 10px; color: #6B7280; text-transform: uppercase; letter-spacing: .5px; }}
   .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; color: #fff; font-size: 9px; font-weight: 600; text-transform: uppercase; }}
   .badge.pill {{ min-width: 58px; text-align: center; }}
