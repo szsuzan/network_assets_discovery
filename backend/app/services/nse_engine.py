@@ -33,17 +33,19 @@ FINDING_META = {
     "unencrypted_video":      ("CWE-319", 7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
     "default_credentials":    ("CWE-798", 8.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
     "eol_software":           ("CWE-1104", 6.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L"),
+    "known_vulnerability":    ("", None, None),
 }
 
 
 def _data_for_meta(finding_type: str, severity: str) -> dict:
     """Resolve the CWE/CVSS stamp for a finding type bundled with NSE evidence."""
-    cwe, score, vector = FINDING_META.get(finding_type, ("CWE-", None, None))
-    return {"cwe": cwe, "cvss_score": score, "cvss_vector": vector}
+    cwe, score, vector = FINDING_META.get(finding_type, ("", None, None))
+    return {"cwe": cwe or None, "cvss_score": score, "cvss_vector": vector}
 
 
 def _make(host_ip: str, label: str, ftype: str, severity: str, title: str,
-          description: str, recommendation: str, port, evidence) -> dict:
+          description: str, recommendation: str, port, evidence,
+          cve_refs: list = None) -> dict:
     base = _data_for_meta(ftype, severity)
     return {
         "type": ftype,
@@ -51,7 +53,7 @@ def _make(host_ip: str, label: str, ftype: str, severity: str, title: str,
         "title": title,
         "description": description,
         "recommendation": recommendation,
-        "cve_refs": [],
+        "cve_refs": cve_refs or [],
         "port": port,
         "evidence": evidence,
         **base,
@@ -166,7 +168,11 @@ def _rule_ssl_cert(entry, port) -> list:
         m = re.search(r"Public Key bits:\s*(\d+)", text)
         if m:
             bits = m.group(1)
-    sig = (el.get("sigAlg/name") or text).lower()
+    sig = (el.get("sig_algo") or "").lower()
+    if not sig:
+        m = re.search(r"Signature Algorithm:\s*([^\n]+)", text, re.I)
+        if m:
+            sig = m.group(1).strip().lower()
     if not not_after and not bits and "self-signed" not in text.lower():
         return out
 
@@ -195,14 +201,25 @@ def _rule_ssl_cert(entry, port) -> list:
         except (TypeError, ValueError):
             pass
 
-    if "self-signed" in text.lower() or "issuer: CN=" in text.lower():
+    subject_cn = el.get("subject/commonName") or ""
+    issuer_cn = el.get("issuer/commonName") or ""
+    self_signed = False
+    # Structured XML path: subject CN == issuer CN is the precise signal.
+    # Text fallback: self-signed is only claimed when the output literally says
+    # so -- never from a bare "Issuer:" line, which every cert carries.
+    if subject_cn and issuer_cn:
+        self_signed = subject_cn.lower() == issuer_cn.lower()
+    elif "self-signed" in text.lower():
+        self_signed = True
+
+    if self_signed:
         out.append(_make("", "", "weak_crypto", "notable",
             f"Self-signed TLS certificate on port {port}",
             "The service presents a self-signed certificate, preventing clients from "
             "verifying the identity of the server.",
             "Replace with a certificate from a trusted CA or an internal CA enrolled on managed clients.",
             port, {"script": "ssl-cert", "output": text[:300]}))
-    if "md5" in sig or ("sha1" in sig and "sha256" not in sig):
+    if sig and ("md5" in sig or ("sha1" in sig and "sha256" not in sig)):
         out.append(_make("", "", "weak_crypto", "notable",
             f"Weak TLS certificate signature on port {port}",
             "The certificate is signed with a deprecated hash algorithm (MD5/SHA-1).",
@@ -212,26 +229,49 @@ def _rule_ssl_cert(entry, port) -> list:
 
 
 _WEAK_CIPHERS = ("rc4", "des_cbc3", "3des", "_des_", "_null_", "anon", "export", "psk")
+_DEPRECATED_PROTOCOLS = ("SSLv3", "TLSv1.0", "TLSv1.1")
+
+
+def _ssl_protocols(elems: dict, text: str) -> set:
+    """Protocol versions the SSL/TLS endpoint actually negotiated.
+
+    Prefer the structured XML table keys (``TLSv1.2/ciphers/name`` → protocol
+    at the first path segment); fall back to scanning the text for version
+    header tokens ``SSLv3:`` / ``TLSv1.0:`` / ``TLSv1.1:`` / ``TLSv1.2:`` ...
+
+    Crucially we never test the bare substring ``TLSv1`` against the output --
+    that matches ``TLSv1.2``/``TLSv1.3`` too and turns a clean TLSv1.2-only
+    endpoint into a false-positive "TLSv1" alert.
+    """
+    protocols = set()
+    for key in elems:
+        head = key.split("/", 1)[0]
+        if head.lower().startswith(("ssl", "tls")) and len(head) > 3:
+            protocols.add(head)
+    if not protocols:
+        protocols = set(re.findall(r"(SSLv[23]|TLSv1\.\d+)", text, re.IGNORECASE))
+    return protocols
 
 
 def _rule_ssl_ciphers(entry, port) -> list:
     out = []
     text = entry["output"].lower()
-    names = [v for k, v in entry["elems"].items() if k.endswith("/name")]
-    if not names:
+    elems = entry["elems"]
+    # Structured XML: each cipher suite is `TLSvX.Y/ciphers/name[@N]`.
+    suite_keys = sorted(k for k in elems if "/ciphers/name" in k)
+    if suite_keys:
+        names = [elems[k] for k in suite_keys]
+    else:
         # text fallback: "TLSv1.0:  ... TLS_RSA_WITH_RC4_128_SHA  "
         names = re.findall(r"(TLS|SSL)[A-Z0-9_]+", entry["output"])
     weak = sorted({n for n in names if any(w in n.lower() for w in _WEAK_CIPHERS)})
-    deprecated = None
-    for proto in ("SSLv3", "TLSv1.0", "TLSv1.1", "TLSv1"):
-        if proto.lower() in text:
-            deprecated = proto
+    deprecated = sorted(_ssl_protocols(elems, entry["output"]) & set(_DEPRECATED_PROTOCOLS))
     if weak or deprecated:
         desc = "The TLS service accepts deprecated/weak cipher suites or protocol versions."
         if weak:
             desc += f" Weak suites observed: {', '.join(weak[:12])}."
         if deprecated:
-            desc += f" Deprecated protocol version enabled: {deprecated}."
+            desc += f" Deprecated protocol version enabled: {', '.join(deprecated)}."
         out.append(_make("", "", "weak_crypto", "concerning",
             f"Weak TLS configuration on port {port}",
             desc,
@@ -356,6 +396,113 @@ def _rule_mongo_auth(entry, port) -> list:
     return []
 
 
+def _rule_login_less_services(entry, port) -> list:
+    """redis/vnc/mysql-style services that expose data with no authentication."""
+    sid, text = entry["script"], entry["output"]
+    low = text.lower()
+    if sid == "redis-info":
+        # redis-info prints the auth_required value when configured to do so;
+        # many builds only print it once auth is actually needed.
+        m = re.search(r"auth_required:\s*(\d+)", text, re.I)
+        if m and m.group(1) == "0":
+            return [_make("", "", "missing_auth", "notable",
+                f"Redis requires no authentication on port {port}",
+                "The Redis server accepts unauthenticated connections, exposing all keys to any network client.",
+                "Set requirepass and bind to trusted interfaces only (protected-mode on).",
+                port, {"script": "redis-info", "output": text[:300]})]
+        # Fallback for the classic output shape.
+        if "auth not required" in low or "authentication not required" in low:
+            return [_make("", "", "missing_auth", "notable",
+                f"Redis requires no authentication on port {port}",
+                "The Redis server accepts unauthenticated connections, exposing all keys to any network client.",
+                "Set requirepass and bind to trusted interfaces only (protected-mode on).",
+                port, {"script": "redis-info", "output": text[:300]})]
+    if sid == "vnc-info":
+        if "authentication required: no" in low:
+            return [_make("", "", "missing_auth", "notable",
+                f"VNC exposes the desktop without authentication on port {port}",
+                "The VNC server allows connections without a password, exposing the live desktop to anyone on the network.",
+                "Require a strong VNC password and restrict clients to a management VLAN.",
+                port, {"script": "vnc-info", "output": text[:300]})]
+    if sid == "mysql-info" and "authentication required" not in text and "anonymous" in low:
+        return [_make("", "", "missing_auth", "notable",
+            f"MySQL allows anonymous connections on port {port}",
+            "The MySQL server accepts connections without valid credentials.",
+            "Enforce authentication for all MySQL accounts and remove anonymous users.",
+            port, {"script": "mysql-info", "output": text[:300]})]
+    return []
+
+
+# Explicit well-known exploitability: keep the CVEs a script reports so the
+# finding carries concrete references even before NVD matching runs.
+_VULN_STATE_LINES = ("VULNERABLE", "VULNERABILITY", "exploit available", "CVE-")
+
+
+def _extract_cves(text: str) -> list:
+    seen = []
+    for m in re.finditer(r"(CVE-\d{4}-\d{4,7})", text, re.IGNORECASE):
+        cve = m.group(1).upper()
+        if cve not in seen:
+            seen.append(cve)
+    return seen
+
+
+def _rule_smb_vuln(entry, port) -> list:
+    """smb-vuln-* scripts report patched vs vulnerable state directly."""
+    text = entry["output"]
+    low = text.lower()
+    if "not vulnerable" in low or "not_vulnerable" in low:
+        return []
+    if any(state in low for state in ("vulnerable", "exploit available")) \
+       and any(sig in low for sig in ("ids:", "cve-", "risk factor", "state:", "impact", "summary")):
+        cves = _extract_cves(text)
+        title = f"Known SMB vulnerability on port {port}"
+        if cves:
+            title = f"{', '.join(cves[:3])} on SMB port {port}"
+        return [_make("", "", "known_vulnerability", "critical",
+            title,
+            text.strip()[:400],
+            "Patch the SMB service immediately; mitigations include blocking SMB "
+            "1.0 and restricting 445 to trusted clients.",
+            port, {"script": entry["script"], "output": text[:600]}, cves)]
+    return []
+
+
+def _rule_ssl_dos(entry, port) -> list:
+    """ssl-ccs-injection / ssl-dh-params / ssl-poodle / ssl-heartbleed style
+    scripts that mark the endpoint vulnerable with an explicit state line."""
+    text = entry["output"]
+    low = text.lower()
+    if "not vulnerable" in low or "not_vulnerable" in low:
+        return []
+    if any(state in low for state in ("vulnerable", "exploit available")) \
+       and any(sig in low for sig in ("ids:", "cve-", "risk factor", "state:", "impact", "summary")):
+        cves = _extract_cves(text)
+        return [_make("", "", "known_vulnerability", "critical",
+            f"Exploitable TLS issue on port {port}"
+            + (f" ({', '.join(cves[:3])})" if cves else ""),
+            text.strip()[:400],
+            "Patch the TLS stack and re-test; if not promptly patchable, limit "
+            "exposure of the affected service.",
+            port, {"script": entry["script"], "output": text[:600]}, cves)]
+    return []
+
+
+def _rule_dns_zone_transfer(entry, port) -> list:
+    """A successful DNS zone transfer is full disclosure of the zone records."""
+    text = entry["output"]
+    if "attempting zone transfer" not in text.lower():
+        return []
+    if any(s in text.upper() for s in ("MISC", "SUCCESS", "SUCCEEDED")) and "FAILED" not in text.upper():
+        return [_make("", "", "information_disclosure", "notable",
+            f"DNS zone transfer allowed on port {port}",
+            "The DNS server answered an AXFR request, leaking the full zone "
+            "(hostnames, IPs, MX/SRV records) to any client.",
+            "Restrict zone transfers to designated secondary nameservers and use TSIG.",
+            port, {"script": "dns-zone-transfer", "output": text[:400]})]
+    return []
+
+
 _ADMIN_MARKERS = (
     "login", "admin", "management", "configuration", "config", "router", "gateway",
     "camera", "nvr", "dvr", "hikvision", "dahua", "tp-link", "d-link", "tenda",
@@ -440,6 +587,15 @@ def nse_findings_for_host(scan_id, host, label, xml_text) -> dict:
             out += _rule_mysql_empty(entry, port)
         elif sid == "mongodb-info":
             out += _rule_mongo_auth(entry, port)
+        elif sid in ("redis-info", "vnc-info", "mysql-info"):
+            out += _rule_login_less_services(entry, port)
+        elif sid.startswith("smb-vuln-"):
+            out += _rule_smb_vuln(entry, port)
+        elif sid in ("ssl-ccs-injection", "ssl-poodle", "ssl-heartbleed",
+                     "ssl-dh-params", "ssl-dos", "http-shellshock"):
+            out += _rule_ssl_dos(entry, port)
+        elif sid == "dns-zone-transfer":
+            out += _rule_dns_zone_transfer(entry, port)
 
     web = {}
     for port, ents in by_port.items():

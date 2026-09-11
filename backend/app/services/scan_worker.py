@@ -165,17 +165,18 @@ PROFILE_TIMING = {
 # (plus the "default" =-sC set). Values map port -> comma-separated safe NSE ids.
 # --------------------------------------------------------------------------- #
 
-_HTTP_NSE = "http-title,http-headers,http-methods,http-server-header,http-enum,http-generator"
-_SSL_NSE = ",ssl-cert,ssl-enum-ciphers"
+_HTTP_NSE = "http-title,http-headers,http-methods,http-server-header,http-enum,http-generator,http-git"
+_SSL_NSE = ",ssl-cert,ssl-enum-ciphers,ssl-ccs-injection,ssl-poodle"
 _SMB_NSE = ("smb-protocols,smb-security-mode,smb2-security-mode,"
-            "smb-enum-shares,smb-os-discovery,smb2-capabilities")
+            "smb-enum-shares,smb-os-discovery,smb2-capabilities,"
+            "smb-vuln-ms17-010,smb-vuln-ms10-061")
 
 PORT_NSE_SCRIPTS = {
     20:  "ftp-anon,ftp-syst",
     21:  "ftp-anon,ftp-syst",
     22:  "ssh2-enum-algos,ssh-hostkey,ssh-auth-methods",
     23:  "telnet-encryption,telnet-ntlm-info",
-    53:  "dns-nsid,dns-mx",
+    53:  "dns-nsid,dns-mx,dns-zone-transfer",
     80:  _HTTP_NSE,
     111: "rpc-info",
     123: "ntp-info",
@@ -2009,7 +2010,8 @@ def run_risk_rules(db, scan: Scan):
                 _add(fd["type"], _sev(fd["type"], fd["severity"]), fd["port"], fd["title"],
                      fd["description"], fd["recommendation"],
                      cwe=fd.get("cwe"), cvss_score=fd.get("cvss_score"),
-                     cvss_vector=fd.get("cvss_vector"), evidence=fd.get("evidence"))
+                     cvss_vector=fd.get("cvss_vector"), evidence=fd.get("evidence"),
+                     cve_refs=fd.get("cve_refs"))
 
         # ---- Rule: Default SNMP community found ---------------------------
         if _on("default_credentials"):

@@ -38,6 +38,8 @@ RISK_RULES: list[dict] = [
      "kind": "heuristic", "description": "Raw RTSP camera/media stream on the LAN."},
     {"key": "eol_software", "label": "End-of-life software", "default_severity": "concerning",
      "kind": "heuristic", "description": "Service version is out of support (banner parsing)."},
+    {"key": "known_vulnerability", "label": "Known CVE vulnerability", "default_severity": "critical",
+     "kind": "nse", "description": "Exploit-reporting NSE scripts (smb-vuln-*, ssl-ccs-injection, ssl-poodle, ...) and CPE-CVE matches against the offline NVD catalog."},
 ]
 
 DEFAULT_RULES: dict = {r["key"]: {"enabled": True, "severity": None} for r in RISK_RULES}
