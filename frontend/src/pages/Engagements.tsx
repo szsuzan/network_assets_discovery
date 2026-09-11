@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useEngagements, useCreateEngagement, useDeleteEngagement } from '../hooks/useApi'
+import { useEngagements, useCreateEngagement, useDeleteEngagement, useUpdateEngagement } from '../hooks/useApi'
 import { StatusBadge } from '../components/Badge'
 import type { Engagement } from '../lib/types'
 
@@ -8,6 +8,7 @@ export default function Engagements() {
   const { data: engagements, isLoading } = useEngagements()
   const createEngagement = useCreateEngagement()
   const deleteEngagement = useDeleteEngagement()
+  const updateEngagement = useUpdateEngagement()
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const isAdmin = localStorage.getItem('role') === 'admin'
   const [showForm, setShowForm] = useState(false)
@@ -18,6 +19,48 @@ export default function Engagements() {
     start_date: '',
     end_date: '',
   })
+
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editForm, setEditForm] = useState({
+    client_name: '',
+    engagement_name: '',
+    authorized_scope: '',
+    start_date: '',
+    end_date: '',
+  })
+  const [editError, setEditError] = useState<string | null>(null)
+
+  const startEdit = (e: Engagement) => {
+    setEditForm({
+      client_name: e.client_name,
+      engagement_name: e.engagement_name,
+      authorized_scope: e.authorized_scope.join(', '),
+      start_date: e.start_date || '',
+      end_date: e.end_date || '',
+    })
+    setEditError(null)
+    setEditingId(e.id)
+  }
+
+  const handleUpdate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!editingId) return
+    setEditError(null)
+    const scope = editForm.authorized_scope.split(',').map((s) => s.trim()).filter(Boolean)
+    try {
+      await updateEngagement.mutateAsync({
+        id: editingId,
+        client_name: editForm.client_name,
+        engagement_name: editForm.engagement_name,
+        authorized_scope: scope,
+        start_date: editForm.start_date || null,
+        end_date: editForm.end_date || null,
+      })
+      setEditingId(null)
+    } catch (err: any) {
+      setEditError(err?.response?.data?.detail || 'Failed to update engagement')
+    }
+  }
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -115,6 +158,81 @@ export default function Engagements() {
         </form>
       )}
 
+      {editingId && (
+        <form onSubmit={handleUpdate} className="mb-6 rounded-lg border border-blue-800 bg-gray-900 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="font-medium">Edit Engagement</h2>
+            <button
+              type="button"
+              onClick={() => setEditingId(null)}
+              className="rounded bg-gray-700 px-3 py-1 text-xs font-medium text-white hover:bg-gray-600"
+            >
+              Cancel
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Client Name *</label>
+              <input
+                value={editForm.client_name}
+                onChange={(e) => setEditForm({ ...editForm, client_name: e.target.value })}
+                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                required
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Engagement Name *</label>
+              <input
+                value={editForm.engagement_name}
+                onChange={(e) => setEditForm({ ...editForm, engagement_name: e.target.value })}
+                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                required
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-sm text-gray-300">Authorized Scope (CIDR list, comma-separated)</label>
+              <input
+                value={editForm.authorized_scope}
+                onChange={(e) => setEditForm({ ...editForm, authorized_scope: e.target.value })}
+                placeholder="10.0.0.0/24, 192.168.1.0/24"
+                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white mono"
+                required
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="mb-1 block text-sm text-gray-300">Start Date</label>
+                <input
+                  type="date"
+                  value={editForm.start_date}
+                  onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
+                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm text-gray-300">End Date</label>
+                <input
+                  type="date"
+                  value={editForm.end_date}
+                  onChange={(e) => setEditForm({ ...editForm, end_date: e.target.value })}
+                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                />
+              </div>
+            </div>
+          </div>
+          {editError && (
+            <p className="mt-3 text-sm text-red-400">{editError}</p>
+          )}
+          <button
+            type="submit"
+            disabled={updateEngagement.isPending}
+            className="mt-4 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {updateEngagement.isPending ? 'Saving...' : 'Save Changes'}
+          </button>
+        </form>
+      )}
+
       {isLoading ? (
         <div className="py-12 text-center text-gray-400">Loading engagements...</div>
       ) : (
@@ -128,7 +246,7 @@ export default function Engagements() {
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Date Range</th>
                 <th className="px-4 py-3 font-medium">Created</th>
-                {isAdmin && <th className="px-4 py-3 font-medium text-right">Actions</th>}
+                <th className="px-4 py-3 font-medium text-right">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-800">
@@ -146,40 +264,48 @@ export default function Engagements() {
                     {e.start_date && e.end_date ? `${e.start_date} → ${e.end_date}` : e.start_date || '—'}
                   </td>
                   <td className="px-4 py-3 text-gray-400">{new Date(e.created_at).toLocaleDateString()}</td>
-                  {isAdmin && (
-                    <td className="px-4 py-3 text-right">
-                      {confirmDelete === e.id ? (
-                        <span className="inline-flex gap-2">
+                  <td className="px-4 py-3">
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => (editingId === e.id ? setEditingId(null) : startEdit(e))}
+                        className="rounded border border-blue-800 px-3 py-1 text-xs font-medium text-blue-400 hover:bg-blue-950"
+                      >
+                        {editingId === e.id ? 'Cancel' : 'Edit'}
+                      </button>
+                      {isAdmin && (
+                        confirmDelete === e.id ? (
+                          <span className="inline-flex gap-2">
+                            <button
+                              onClick={() => handleDelete(e.id)}
+                              disabled={deleteEngagement.isPending}
+                              className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                            >
+                              Confirm
+                            </button>
+                            <button
+                              onClick={() => setConfirmDelete(null)}
+                              className="rounded bg-gray-700 px-3 py-1 text-xs font-medium text-white hover:bg-gray-600"
+                            >
+                              Cancel
+                            </button>
+                          </span>
+                        ) : (
                           <button
-                            onClick={() => handleDelete(e.id)}
+                            onClick={() => setConfirmDelete(e.id)}
                             disabled={deleteEngagement.isPending}
-                            className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+                            className="rounded border border-red-800 px-3 py-1 text-xs font-medium text-red-400 hover:bg-red-950 disabled:opacity-50"
                           >
-                            Confirm
+                            Delete
                           </button>
-                          <button
-                            onClick={() => setConfirmDelete(null)}
-                            className="rounded bg-gray-700 px-3 py-1 text-xs font-medium text-white hover:bg-gray-600"
-                          >
-                            Cancel
-                          </button>
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => setConfirmDelete(e.id)}
-                          disabled={deleteEngagement.isPending}
-                          className="rounded border border-red-800 px-3 py-1 text-xs font-medium text-red-400 hover:bg-red-950 disabled:opacity-50"
-                        >
-                          Delete
-                        </button>
+                        )
                       )}
-                    </td>
-                  )}
+                    </div>
+                  </td>
                 </tr>
               ))}
               {!engagements?.length && (
                 <tr>
-                  <td colSpan={6} className="px-4 py-12 text-center text-gray-400">
+                  <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
                     No engagements yet. Create your first one.
                   </td>
                 </tr>

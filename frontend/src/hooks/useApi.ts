@@ -60,6 +60,15 @@ export function useCreateEngagement() {
   })
 }
 
+export function useUpdateEngagement() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: string } & Partial<Engagement>) =>
+      api.patch<Engagement>(`/api/engagements/${id}`, data).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['engagements'] }),
+  })
+}
+
 export function useDeleteEngagement() {
   const qc = useQueryClient()
   return useMutation({
