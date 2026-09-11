@@ -135,6 +135,53 @@ def _host_context(host) -> str:
     return " · ".join(parts)
 
 
+def _open_ports_for(host, ports_lookup):
+    """Return the open Port rows for a host (ports_lookup is keyed by host id)."""
+    return [p for p in (ports_lookup or {}).get(str(host.id), []) if getattr(p, "state", "open") == "open"]
+
+
+def _evidence_text(f) -> str:
+    """Render the NSE evidence dict (output/script) as readable text, capped at a sane size."""
+    ev = getattr(f, "evidence", None)
+    if not ev:
+        return ""
+    if isinstance(ev, dict):
+        script = ev.get("script") or ""
+        output = ev.get("output") or ""
+        if output and len(str(output)) > 900:
+            output = str(output)[:900] + "…"
+        return "\n".join(x for x in (str(script), str(output)) if x)
+    return str(ev)[:1200]
+
+
+def _exposure_brief(host, ports):
+    """Short exposure tags for a host based on its open ports, eg 'SSH · SMB · HTTP'."""
+    tags = []
+    by_port = {}
+    for p in ports:
+        by_port.setdefault(p.port, p)
+    if 22 in by_port:
+        tags.append("SSH")
+    if 21 in by_port:
+        tags.append("FTP")
+    if 23 in by_port:
+        tags.append("Telnet")
+    if {139, 445, 3389, 5900} & set(by_port):
+        tags.append("Remote-access")
+    web = {80, 443, 8000, 8080, 8443, 3000, 5000, 9000} & set(by_port)
+    if web:
+        tags.append("HTTP(S)")
+    if by_port.get(445) or by_port.get(139):
+        tags.append("SMB")
+    if by_port.get(5432) or by_port.get(3306) or by_port.get(1433) or by_port.get(27017):
+        tags.append("Database")
+    if by_port.get(53) or by_port.get(67) or by_port.get(68):
+        tags.append("Network-svc")
+    if 161 in by_port or 162 in by_port:
+        tags.append("SNMP")
+    return " · ".join(tags) or "—"
+
+
 def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     # Only findings explicitly included for the client report are reflected in
@@ -154,6 +201,80 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
     excluded = len(findings) - len(reported)
     named = sum(1 for h in hosts if h.hostname)
     excl_note = f" · {excluded} finding(s) excluded from this report" if excluded else ""
+
+    # ---- Extended scan metrics ------------------------------------------ #
+    started = getattr(scan, "started_at", None)
+    completed = getattr(scan, "completed_at", None)
+    if started and completed:
+        dur = max((completed - started).total_seconds(), 0)
+        if dur >= 3600:
+            dur_txt = f"{int(dur // 3600)}h {int((dur % 3600) // 60)}m {int(dur % 60)}s"
+        elif dur >= 60:
+            dur_txt = f"{int(dur // 60)}m {int(dur % 60)}s"
+        else:
+            dur_txt = f"{int(dur)}s"
+    else:
+        dur_txt = "—"
+    open_ports_total = 0
+    for h in hosts:
+        open_ports_total += len(_open_ports_for(h, ports_lookup))
+    hosts_with_findings = {str(f.host_id) for f in reported if f.host_id}
+    with_findings = sum(1 for h in hosts if str(h.id) in hosts_with_findings)
+    inst_of_scope = (scan.hosts_total_in_scope or 0)
+    host_counts = (
+        f"{len(hosts)} of {inst_of_scope}" if inst_of_scope else str(len(hosts))
+    )
+
+    # ---- Asset inventory table ------------------------------------------ #
+    worst = _hosts_in_report(hosts, reported)
+    inv_rows = "".join(
+        f"""
+        <tr>
+          <td><span class="badge pill" style="background:{SEVERITY_COLOR.get(worst.get(str(h.id), 'info'), '#8B95A1')}">{SEVERITY_LABEL.get(worst.get(str(h.id), 'info'), '—')}</span></td>
+          <td class="mono">{_esc(h.ip)}</td>
+          <td>{_esc(h.hostname) if getattr(h, "hostname", None) else '<span class="muted">—</span>'}</td>
+          <td>{_esc(DEVICE_TYPE_LABEL.get(getattr(h, "device_type", None), "Unidentified"))}</td>
+          <td class="mono">{_esc(h.mac) if getattr(h, "mac", None) else '<span class="muted">—</span>'}</td>
+          <td>{_esc(h.vendor) if getattr(h, "vendor", None) else '<span class="muted">—</span>'}</td>
+          <td>{_esc(h.os_guess or "—")}</td>
+          <td>{cells_for_open_ports(_open_ports_for(h, ports_lookup))}</td>
+          <td>{len([f for f in reported if f.host_id and str(f.host_id) == str(h.id)])}</td>
+          <td class="nowrap">{_esc(h.last_seen.strftime("%Y-%m-%d %H:%M") if getattr(h, "last_seen", None) else "—")}</td>
+        </tr>"""
+        for h in sorted(hosts, key=lambda x: (SEVERITY_ORDER.get(worst.get(str(x.id), "info"), 9), str(x.ip)))
+    )
+    asset_inventory = f"""
+  <h2>Asset Inventory</h2>
+  <p class="meta">{len(hosts)} asset(s) discovered · {with_findings} with findings · {
+      _esc(', '.join(scan.targets))} · snapshots below are per host last-seen</p>
+  <table>
+    <thead><tr>
+      <th>Risk</th><th>IP</th><th>Hostname</th><th>Type</th><th>MAC</th><th>Vendor</th>
+      <th>OS</th><th>Open Ports</th><th>Findings</th><th>Last Seen</th>
+    </tr></thead>
+    <tbody>{inv_rows}</tbody>
+  </table>"""
+
+    # ---- Exposure analysis ---------------------------------------------- #
+    exposure_rows = []
+    for h in sorted(hosts, key=lambda x: str(x.ip)):
+        tags = _exposure_brief(h, _open_ports_for(h, ports_lookup))
+        if tags == "—":
+            continue
+        exposure_rows.append(
+            f'<tr><td class="mono">{_esc(h.ip)}</td><td>{_esc(DEVICE_TYPE_LABEL.get(getattr(h, "device_type", None), "Unidentified"))}</td><td>{_esc(tags)}</td><td class="mono">{cells_for_open_ports(_open_ports_for(h, ports_lookup))}</td></tr>'
+        )
+    exposures_html = ""
+    if exposure_rows:
+        exposures_html = f"""
+  <h2>Exposure Analysis</h2>
+  <p class="meta">Hosts with reachable network services, grouped by access class. Only hosts in
+  the authorized scope were probed; service reachability does not imply a confirmed
+  vulnerability.</p>
+  <table>
+    <thead><tr><th>Host</th><th>Type</th><th>Exposure</th><th>Open Ports</th></tr></thead>
+    <tbody>{''.join(exposure_rows)}</tbody>
+  </table>"""
 
     device_rows = "".join(
         f"<tr><td>{_esc(name)}</td><td>{count}</td></tr>" for name, count in breakdown
@@ -189,6 +310,17 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
             cve_chips = "".join(
                 f'<span class="chip">{_esc(cve)}</span>' for cve in (f.cve_refs or [])
             )
+            ev_text = _evidence_text(f)
+            evidence_html = ""
+            if ev_text:
+                evidence_html = (
+                    f'<p class="ev-label">Evidence</p>'
+                    f'<pre class="evidence">{_esc(ev_text)}</pre>'
+                )
+            if getattr(f, "port", None):
+                port_chip = f'<span class="chip port">port {_esc(f.port)}</span>'
+            else:
+                port_chip = ""
             cvss_row = ""
             if getattr(f, "cvss_score", None) is not None or getattr(f, "cwe", None):
                 bits = []
@@ -205,12 +337,14 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
               <div class="finding-head">
                 <span class="badge" style="background:{color}">{SEVERITY_LABEL.get(f.severity, f.severity)}</span>
                 {status_chip}
+                {port_chip}
                 <strong>{_esc(f.title)}</strong>
               </div>
               {host_ctx}
               {cvss_row}
               {f"<p>{_esc(f.description)}</p>" if f.description else ""}
               {f'<p class="mono chip-note">{cve_chips}</p>' if cve_chips else ""}
+              {evidence_html}
               {f'<p class="rec"><span>Recommendation:</span> {_esc(f.recommendation)}</p>' if f.recommendation else ""}
             </div>""")
     else:
@@ -254,6 +388,7 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   .chips {{ font-size: 10px; color: #374151; margin: 2px 0 4px; }}
   .thingy {{ display: inline-block; padding: 1px 6px; border: 1px solid #E5A50A; border-radius: 4px; color: #9A5B00; font-size: 9px; }}
   .dim {{ color: #9CA3AF; font-size: 8px; }}
+  .nowrap {{ white-space: nowrap; }}
   .mono {{ font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
   table {{ width: 100%; border-collapse: collapse; margin: 8px 0; }}
   th, td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #E5E7EB; font-size: 10px; }}
@@ -264,6 +399,10 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
   .stat .num {{ font-size: 26px; font-weight: 700; color: #101623; }}
   .stat .lbl {{ font-size: 10px; color: #6B7280; text-transform: uppercase; letter-spacing: .5px; }}
   .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; color: #fff; font-size: 9px; font-weight: 600; text-transform: uppercase; }}
+  .badge.pill {{ min-width: 58px; text-align: center; }}
+  .chip.port {{ border-color: #94A3B8; color: #475569; }}
+  .ev-label {{ font-size: 9px; color: #8B95A1; text-transform: uppercase; letter-spacing: .5px; margin: 8px 0 2px; }}
+  .evidence {{ background: #0B1220; color: #C9D3E0; border: 1px solid #252F40; border-radius: 6px; padding: 8px 10px; font-size: 8.5px; line-height: 1.5; white-space: pre-wrap; font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace; }}
   .finding {{ border: 1px solid #E5E7EB; border-left: 4px solid #8B95A1; border-radius: 6px; padding: 10px 12px; margin-bottom: 10px; }}
   .finding-head {{ margin-bottom: 6px; }}
   .finding-host {{ font-size: 10px; color: #6B7280; margin-bottom: 6px; }}
@@ -296,15 +435,24 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
     <div class="stat"><div class="num">{named}</div><div class="lbl">Named Hosts</div></div>
     <div class="stat"><div class="num">{len(reported)}</div><div class="lbl">Findings</div></div>
     <div class="stat"><div class="num">{risk_index}</div><div class="lbl">Risk Index (/100)</div></div>
+    <div class="stat"><div class="num">{open_ports_total}</div><div class="lbl">Open Ports</div></div>
+  </div>
+  <div class="grid" style="margin-bottom:8px;">
+    <div class="stat"><div class="num">{host_counts}</div><div class="lbl">Hosts in Scope</div></div>
+    <div class="stat"><div class="num">{with_findings}</div><div class="lbl">Hosts w/ Findings</div></div>
+    <div class="stat"><div class="num">{dur_txt}</div><div class="lbl">Scan Duration</div></div>
+    <div class="stat"><div class="num">{_esc(', '.join(getattr(scan, 'targets', []) or []))}</div><div class="lbl">Scope</div></div>
   </div>
   <p class="narrative">
     This engagement covered <b>{scan.hosts_total_in_scope or 0}</b> in-scope asset(s) at
     {_esc(', '.join(scan.targets))}, of which <b>{scan.hosts_discovered or 0}</b> responded to discovery
-    ({coverage}% coverage). Risk analysis of the discovered assets produced <b>{len(reported)}</b> finding(s):
+    ({coverage}% coverage) across <b>{host_counts}</b> live host(s). The scan enumerated
+    <b>{open_ports_total}</b> open port(s) in {dur_txt}. Risk analysis of the discovered assets produced <b>{len(reported)}</b> finding(s):
     {by_sev.get("critical", 0)} critical, {by_sev.get("concerning", 0)} concerning,
     {by_sev.get("notable", 0)} notable and {by_sev.get("info", 0)} informational
-    (overall risk index {risk_index}/100). Highest-risk assets should be remediated
-    first; each finding below includes context, evidence and a recommendation.
+    (overall risk index {risk_index}/100). {with_findings} host(s) carry at least one finding;
+    highest-risk assets should be remediated first, and each finding below includes
+    context, evidence and a recommendation.
   </p>
 
   <div class="grid">
@@ -323,6 +471,8 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
       </table>
     </div>
   </div>
+{exposures_html}
+{asset_inventory}
 {topo_html}
   <h2>Risk Findings<span class="muted"> ({len(reported)} shown{excl_note})</span></h2>
   {findings_html}
