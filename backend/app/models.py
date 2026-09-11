@@ -92,8 +92,44 @@ class Port(Base):
     service = Column(Text)
     version = Column(Text)
     banner = Column(Text)
+    cpes = Column(ARRAY(Text), default=list)
 
     host = relationship("Host", back_populates="ports")
+
+class CVECatalog(Base):
+    __tablename__ = "cve_catalog"
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    cve_id = Column(Text, nullable=False, unique=True)
+    title = Column(Text)
+    description = Column(Text)
+    severity = Column(Text)
+    cwe = Column(Text)
+    cvss_score = Column(Float)
+    cvss_vector = Column(Text)
+    reference_urls = Column(JSON, default=list)
+    source = Column(Text)
+    imported_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    cpes = relationship("CVECatalogCPE", back_populates="cve",
+                        cascade="all, delete-orphan")
+
+
+class CVECatalogCPE(Base):
+    __tablename__ = "cve_catalog_cpe"
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    cve_id = Column(Uuid, ForeignKey("cve_catalog.id"), nullable=False)
+    part = Column(Text)
+    vendor = Column(Text)
+    product = Column(Text)
+    version = Column(Text)
+    version_start_including = Column(Text)
+    version_end_including = Column(Text)
+    version_start_excluding = Column(Text)
+    version_end_excluding = Column(Text)
+    match_all = Column(Boolean, default=False)
+    cpe23 = Column(Text)
+
+    cve = relationship("CVECatalog", back_populates="cpes")
 
 class SNMPInfo(Base):
     __tablename__ = "snmp_info"

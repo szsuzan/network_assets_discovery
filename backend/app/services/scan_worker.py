@@ -1067,7 +1067,8 @@ def port_scan_hosts(db, scan: Scan, hosts: list):
                 state=p.get("state", "open"),
                 service=None,
                 version=None,
-                banner=None
+                banner=None,
+                cpes=[]
             ))
     db.flush()
     db.commit()
@@ -1107,6 +1108,7 @@ def fingerprint_open_ports(db, scan: Scan, hosts: list):
                 p.service = info.get("service")
                 p.version = info.get("version")
                 p.banner = info.get("banner")
+                p.cpes = info.get("cpes") or p.cpes or []
     db.commit()
 
 
@@ -1129,7 +1131,8 @@ def parse_rustscan_output(nmap_output: str) -> list:
                     "service": None,
                     "version": None,
                     "banner": None,
-                    "state": "open"
+                    "state": "open",
+                    "cpes": [],
                 }
                 state_elem = port_elem.find("state")
                 if state_elem is not None:
@@ -1142,15 +1145,19 @@ def parse_rustscan_output(nmap_output: str) -> list:
 
                 banner = ""
                 script_outs = []
+                cpes = []
                 for elem in port_elem.iter():
                     if elem.tag == "banner" and elem.text:
                         banner = elem.text.strip()[:500]
                     elif elem.tag == "script" and elem.get("output"):
                         script_outs.append(elem.get("output"))
+                    elif elem.tag == "cpe" and elem.text and elem.text.strip():
+                        cpes.append(elem.text.strip())
                 if script_outs:
                     combined = " || ".join(script_outs)[:500]
                     banner = combined if not banner else f"{banner} | {combined}"
                 port_info["banner"] = banner or None
+                port_info["cpes"] = list(dict.fromkeys(cpes))[:20]
                 ports.append(port_info)
 
     if ports:
@@ -1173,6 +1180,7 @@ def parse_rustscan_output(nmap_output: str) -> list:
             "version": None,
             "banner": None,
             "state": state,
+            "cpes": [],
         })
     return ports
 
@@ -2028,6 +2036,58 @@ def run_risk_rules(db, scan: Scan):
                 )
                 _apply_meta(f, "default_credentials")
                 found.add(("default_credentials", 161))
+
+        # ---- Rule: Known CVEs from the offline catalog --------------------
+        # Ports whose fingerprint CPE(s) match catalog entries produce a
+        # known_vulnerability finding. NSE-reported vuln findings (which fired
+        # on an explicit "VULNERABLE" state) always win: we skip a port already
+        # voted on by the NSE path.
+        if _on("known_vulnerability"):
+            catalog_matched_ports = set()
+            for p in (po for po in ports if po.state == "open" and po.cpes):
+                key = ("known_vulnerability", p.port)
+                if key in found:
+                    continue
+                try:
+                    from .cve_catalog import match_cve_catalog
+                    matches = match_cve_catalog(db, p.cpes)
+                except Exception:
+                    continue
+                if not matches:
+                    continue
+                top = matches[0]
+                cve_ids = [m["cve_id"] for m in matches][:8]
+                sev = top.get("severity")
+                if not sev and top.get("cvss_score") is not None:
+                    s = top["cvss_score"]
+                    sev = "critical" if s >= 9.0 else "concerning" if s >= 7.0 else "notable" if s >= 4.0 else "info"
+                sev = sev if sev in ("critical", "concerning", "notable", "info") else "notable"
+                title_port = f"Known vulnerability on {label} port {p.port}"
+                if cve_ids:
+                    title_port = f"{', '.join(cve_ids[:3])} on {label} port {p.port}"
+                details = top.get("description") or top.get("title")
+                if len(matches) > 1:
+                    details = (details or "") + f" ({len(matches) - 1} further matching CVE(s) on this port.)"
+                _upsert(
+                    "known_vulnerability",
+                    _sev("known_vulnerability", sev),
+                    p.port,
+                    title_port,
+                    (details or "Matching CVE(s) recorded in the offline catalog.").strip()[:600],
+                    "Patch the affected software to a fixed version and re-verify; where a fix "
+                    "is unavailable, isolate the service from untrusted access.",
+                    cwe=top.get("cwe"),
+                    cvss_score=top.get("cvss_score"),
+                    cvss_vector=top.get("cvss_vector"),
+                    cve_refs=cve_ids,
+                    evidence={"script": "cve-catalog", "output": ". CPE: ".join(p.cpes)[:600],
+                              "cves": [{"id": m["cve_id"], "cvss": m.get("cvss_score"),
+                                        "cwe": m.get("cwe"), "urls": (m.get("reference_urls") or [])[:3]}
+                                       for m in matches]},
+                )
+                catalog_matched_ports.add(p.port)
+            for pno in catalog_matched_ports:
+                found.add(("known_vulnerability", pno))
 
         # ---- Rule: Common unencrypted protocols ----------------------------
         # HTTP ports are handled by the web NSE rules below, never here. SIP on
