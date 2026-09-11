@@ -1,0 +1,147 @@
+{
+  "resultsPerPage": 2,
+  "startIndex": 0,
+  "totalResults": 2,
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2023-48795",
+        "sourceIdentifier": "cve@mitre.org",
+        "published": "2023-12-18T19:15:00.000",
+        "lastModified": "2024-01-22T15:45:00.000",
+        "vulnStatus": "Analyzed",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "The SSH transport protocol with certain OpenSSH and Dropbear versions, aka the Terrapin attack, allows a MITM to downgrade connection security by truncating extension negotiation messages (SSH transport protocol 2.0), leading to prefix truncation of encrypted packets."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "nvd@nist.gov",
+              "type": "Primary",
+              "cvssData": {
+                "version": "3.1",
+                "vectorString": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:H/A:N",
+                "attackVector": "NETWORK",
+                "attackComplexity": "HIGH",
+                "privilegesRequired": "NONE",
+                "userInteraction": "REQUIRED",
+                "scope": "UNCHANGED",
+                "confidentialityImpact": "LOW",
+                "integrityImpact": "HIGH",
+                "availabilityImpact": "NONE",
+                "baseScore": 5.9,
+                "baseSeverity": "MEDIUM"
+              },
+              "baseSeverity": "MEDIUM"
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "nvd@nist.gov",
+            "type": "Primary",
+            "description": [
+              { "lang": "en", "value": "CWE-354" }
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:matt_johnston:dropbear_ssh_server:*:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "00000000-0000-0000-0000-000000000101"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "https://matt.ucc.asn.au/dropbear/CHANGES",
+            "source": "cve@mitre.org"
+          },
+          {
+            "url": "https://terrapin-attack.com",
+            "source": "nvd@nist.gov"
+          }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2002-1566",
+        "sourceIdentifier": "cve@mitre.org",
+        "published": "2003-03-31T05:00:00.000",
+        "lastModified": "2016-10-18T02:26:00.000",
+        "vulnStatus": "Analyzed",
+        "descriptions": [
+          {
+            "lang": "en",
+            "value": "Buffer overflow in thttpd before 2.23b1 allows remote attackers to execute arbitrary code via a malformed URL, which is due to an uninitialized variable returned by the strtok function."
+          }
+        ],
+        "metrics": {
+          "cvssMetricV2": [
+            {
+              "source": "nvd@nist.gov",
+              "type": "Primary",
+              "cvssData": {
+                "version": "2.0",
+                "vectorString": "AV:N/AC:L/Au:N/C:P/I:P/A:P",
+                "accessVector": "NETWORK",
+                "accessComplexity": "LOW",
+                "authentication": "NONE",
+                "confidentialityImpact": "PARTIAL",
+                "integrityImpact": "PARTIAL",
+                "availabilityImpact": "PARTIAL",
+                "baseScore": 7.5
+              }
+            }
+          ]
+        },
+        "weaknesses": [
+          {
+            "source": "nvd@nist.gov",
+            "type": "Primary",
+            "description": [
+              { "lang": "en", "value": "CWE-119" }
+            ]
+          }
+        ],
+        "configurations": [
+          {
+            "nodes": [
+              {
+                "operator": "OR",
+                "negate": false,
+                "cpeMatch": [
+                  {
+                    "vulnerable": true,
+                    "criteria": "cpe:2.3:a:acme:thttpd:*:*:*:*:*:*:*:*",
+                    "matchCriteriaId": "00000000-0000-0000-0000-000000000201"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "references": [
+          {
+            "url": "http://acme.com/software/thttpd/",
+            "source": "nvd@nist.gov"
+          }
+        ]
+      }
+    }
+  ]
+}
