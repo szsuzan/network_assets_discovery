@@ -236,7 +236,7 @@ def render_topology_svg(nodes, edges, cols_per_row: int = 6, col_spacing: int = 
         dev = (n.get("device_type") or "unknown").replace("_", " ")
         if dev not in ("unknown", "unidentified"):
             rows_out.append(
-                f'<text x="{x:.1f}" y="{y+19:.1f}" text-anchor="middle" font-size="7.5" '
+                f'<text x="{x:.1f}" y="{y+16:.1f}" text-anchor="middle" font-size="7.5" '
                 f'fill="#94A3B8">{_esc(dev)}</text>'
             )
 
