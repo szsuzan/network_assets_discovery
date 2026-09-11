@@ -341,7 +341,7 @@ Windows). If it's missing, the agent logs once and continues active-only — it 
 always best-effort. Passive evidence is merged **fill-if-blank**: a stronger
 `nmap -O` / SNMP result always wins.
 
-**Verified behaviour** (live run against `192.168.1.0/24`, shown in the screenshots above): an agent on the Windows LAN produced **43 live hosts** that the L3-only container could not characterize — real **MAC + vendor** bindings (Hikvision / Dahua / Uniview cameras, Xiaomi, Apple, Cisco, CyberTAN…), **hostnames** via mDNS/DHCP (e.g. the `DS-2CD1023G0E-20230404AAWRL…` camera names), exact **OS** fingerprints (Windows 11 24H2, macOS/iOS 16–17, Linux 4.15–5.19), **92 open ports** across 32 hosts, and **34 risk findings**. The PDF export of that scan is pictured in the screenshot gallery above.
+**Verified behaviour** (live run against `192.168.1.0/24`, shown in the screenshots above): an agent on the Windows LAN produced **16 live hosts** that the L3-only container could not characterize — device taxonomy (`router`, `wireless_access_point`, `physical_server`, `laptop`, `smartphone`), **12 open ports**, and **4 findings** (1 concerning, 1 notable, 2 info) over a quick `discover` run. Modern phones/tablets here ship with **privacy-randomised MACs** (the pictures blur them), so the agent recovered names from DHCP/mDNS traffic instead. The PDF export of that scan is pictured in the screenshot gallery above.
 
 ---
 
