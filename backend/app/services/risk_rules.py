@@ -40,6 +40,16 @@ RISK_RULES: list[dict] = [
      "kind": "heuristic", "description": "Service version is out of support (banner parsing)."},
     {"key": "known_vulnerability", "label": "Known CVE vulnerability", "default_severity": "critical",
      "kind": "nse", "description": "Exploit-reporting NSE scripts (smb-vuln-*, ssl-ccs-injection, ssl-poodle, ...) and CPE-CVE matches against the offline NVD catalog."},
+    {"key": "open_dns_recursion", "label": "Open DNS recursion", "default_severity": "notable",
+     "kind": "nse", "description": "DNS server answers recursive lookups for any client, enabling reflection/amplification abuse (dns-recursion)."},
+    {"key": "smtp_open_relay", "label": "Open mail relay", "default_severity": "notable",
+     "kind": "nse", "description": "SMTP server relays mail for arbitrary senders, enabling spam/phishing abuse (smtp-open-relay)."},
+    {"key": "x11_exposed", "label": "Exposed X11 server", "default_severity": "concerning",
+     "kind": "nse", "description": "X11 display reachable without access control, allowing screen capture/keylogging (x11-access)."},
+    {"key": "rdp_nla_disabled", "label": "RDP without NLA", "default_severity": "concerning",
+     "kind": "nse", "description": "RDP accepts sessions without Network Level Authentication, enabling MITM/relay attacks (rdp-enum-encryption)."},
+    {"key": "smbv1_enabled", "label": "SMBv1 enabled", "default_severity": "concerning",
+     "kind": "nse", "description": "Server negotiates SMBv1 (dialect 1.0.0), enabling wormable exploits like EternalBlue (smb-protocols)."},
 ]
 
 DEFAULT_RULES: dict = {r["key"]: {"enabled": True, "severity": None} for r in RISK_RULES}
