@@ -34,6 +34,11 @@ FINDING_META = {
     "default_credentials":    ("CWE-798", 8.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
     "eol_software":           ("CWE-1104", 6.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L"),
     "known_vulnerability":    ("", None, None),
+    "open_dns_recursion":     ("CWE-406", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L"),
+    "smtp_open_relay":        ("CWE-284", 5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"),
+    "x11_exposed":            ("CWE-284", 8.8, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
+    "rdp_nla_disabled":       ("CWE-287", 7.0, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N"),
+    "smbv1_enabled":          ("CWE-477", 6.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:L/A:L"),
 }
 
 
@@ -503,6 +508,78 @@ def _rule_dns_zone_transfer(entry, port) -> list:
     return []
 
 
+def _rule_dns_recursion(entry, port) -> list:
+    text = entry["output"].lower()
+    if "recursion is enabled" in text and "not enabled" not in text:
+        return [_make("", "", "open_dns_recursion", "notable",
+            f"Open DNS recursion on port {port}",
+            "The DNS server answers recursive queries from any client, making it "
+            "usable as a reflection/amplification vector for DDoS and cache poisoning.",
+            "Limit recursion to authorised resolvers/clients (allow-recursion) and "
+            "prefer split-horizon DNS.",
+            port, {"script": "dns-recursion", "output": entry["output"][:300]})]
+    return []
+
+
+def _rule_smtp_relay(entry, port) -> list:
+    low = entry["output"].lower()
+    if re.search(r"relay:\s*enabled", low) and "not enabled" not in low:
+        return [_make("", "", "smtp_open_relay", "notable",
+            f"Open SMTP relay on port {port}",
+            "The mail server relays mail from arbitrary senders to arbitrary "
+            "recipients, enabling spam/phishing abuse and mail-queue exhaustion.",
+            "Restrict relaying to authenticated users / authorised networks (e.g. "
+            "Postfix mynetworks, Exim relay_to_hosts).",
+            port, {"script": "smtp-open-relay", "output": entry["output"][:400]})]
+    return []
+
+
+def _rule_x11(entry, port) -> list:
+    low = entry["output"].lower()
+    if "access control is disabled" in low:
+        return [_make("", "", "x11_exposed", "concerning",
+            f"Exposed X11 server on port {port}",
+            "The X11 display has access control disabled, allowing any client to "
+            "capture the screen, log keystrokes and inject input.",
+            "Enable X access control (xhost / .Xauthority) and tunnel X11 over SSH.",
+            port, {"script": "x11-access", "output": entry["output"][:300]})]
+    return []
+
+
+def _rule_rdp(entry, port) -> list:
+    low = entry["output"].lower()
+    if "credssp" not in low and "nla" not in low and "standard rdp" not in low:
+        return []
+    nla_on = re.search(r"credssp[^\n]*:\s*(success|supported)", low) \
+        or re.search(r"\(nla\)\s*:\s*(success|supported)", low) \
+        or re.search(r"(nla|credssp)[^\n]*:\s*(success|supported)", low)
+    if nla_on:
+        return []
+    if "rdp" in low and ("security" in low or "standard" in low):
+        return [_make("", "", "rdp_nla_disabled", "concerning",
+            f"RDP without Network Level Authentication on port {port}",
+            "The RDP server accepts sessions without NLA, so credentials travel "
+            "inside the RDP session and are exposed to man-in-the-middle / relay attacks.",
+            "Enable NLA (Require user authentication for remote connections by "
+            "using Network Level Authentication).",
+            port, {"script": entry["script"], "output": entry["output"][:500]})]
+    return []
+
+
+def _rule_smbv1(entry, port) -> list:
+    low = entry["output"].lower()
+    if "smbv1" in low or "nt lm" in low or "1:0:0" in entry["output"] \
+       or "1:0:0" in list(entry["elems"].values()):
+        return [_make("", "", "smbv1_enabled", "concerning",
+            f"SMBv1 enabled on port {port}",
+            "The server negotiates SMBv1 (dialect 1.0.0), which underpins "
+            "wormable exploits (EternalBlue/WannaCry) and legacy relay attacks.",
+            "Disable SMBv1 on the server (e.g. Set-SmbServerConfiguration "
+            "-EnableSMB1Protocol $false or registry SMB1).",
+            port, {"script": "smb-protocols", "output": entry["output"][:400]})]
+    return []
+
+
 _ADMIN_MARKERS = (
     "login", "admin", "management", "configuration", "config", "router", "gateway",
     "camera", "nvr", "dvr", "hikvision", "dahua", "tp-link", "d-link", "tenda",
@@ -596,6 +673,16 @@ def nse_findings_for_host(scan_id, host, label, xml_text) -> dict:
             out += _rule_ssl_dos(entry, port)
         elif sid == "dns-zone-transfer":
             out += _rule_dns_zone_transfer(entry, port)
+        elif sid == "dns-recursion":
+            out += _rule_dns_recursion(entry, port)
+        elif sid == "smtp-open-relay":
+            out += _rule_smtp_relay(entry, port)
+        elif sid == "x11-access":
+            out += _rule_x11(entry, port)
+        elif sid == "smb-protocols":
+            out += _rule_smbv1(entry, port)
+        elif sid in ("rdp-enum-encryption", "rdp-ntlm-info"):
+            out += _rule_rdp(entry, port)
 
     web = {}
     for port, ents in by_port.items():

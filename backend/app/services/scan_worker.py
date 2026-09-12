@@ -172,11 +172,12 @@ _SMB_NSE = ("smb-protocols,smb-security-mode,smb2-security-mode,"
             "smb-vuln-ms17-010,smb-vuln-ms10-061")
 
 PORT_NSE_SCRIPTS = {
+    25:  "smtp-open-relay",
     20:  "ftp-anon,ftp-syst",
     21:  "ftp-anon,ftp-syst",
     22:  "ssh2-enum-algos,ssh-hostkey,ssh-auth-methods",
     23:  "telnet-encryption,telnet-ntlm-info",
-    53:  "dns-nsid,dns-mx,dns-zone-transfer",
+    53:  "dns-nsid,dns-mx,dns-zone-transfer,dns-recursion",
     80:  _HTTP_NSE,
     111: "rpc-info",
     123: "ntp-info",
@@ -198,7 +199,8 @@ PORT_NSE_SCRIPTS = {
 3389: "rdp-enum-encryption,rdp-ntlm-info",
      # no dedicated postgres NSE ships with nmap; 5432 inherits the default set
      5900: "vnc-info",
-    6379: "redis-info",
+     6000: "x11-access",
+     6379: "redis-info",
     8000: _HTTP_NSE,
     8009: "ajp-header",
     8080: _HTTP_NSE,
