@@ -12,7 +12,7 @@ actually reported the condition, never from a bare port/service guess.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from xml.etree import ElementTree as ET
 
 # type -> (CWE, CVSS base score, CVSS:3.1 vector). Used for both NSE-driven and
@@ -160,7 +160,7 @@ def _rule_ssl_cert(entry, port) -> list:
     out = []
     text = entry["output"]
     el = entry["elems"]
-    not_after = (el.get("notAfter") or None)
+    not_after = (el.get("validity/notAfter") or el.get("notAfter") or None)
     if not not_after:
         m = re.search(r"Not valid after:\s*(.+)$", text, re.M)
         if m:
@@ -183,8 +183,10 @@ def _rule_ssl_cert(entry, port) -> list:
 
     try:
         parsed = datetime.fromisoformat(not_after.replace("Z", "+00:00").replace(" ", "T"))
-        now = datetime.now().astimezone()
-        if not_after and not_after and parsed < now:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        if parsed < now:
             out.append(_make("", "", "expired_certificate", "concerning",
                 f"Expired TLS certificate on port {port}",
                 f"The server presents a certificate that expired {parsed.isoformat()}: {text[:200]}",
@@ -369,13 +371,15 @@ def _rule_http_methods(entry, port) -> list:
 
 
 def _rule_telnet(entry, port) -> list:
-    if "no encryption" in entry["output"].lower():
+    low = entry["output"].lower()
+    if "no encryption" in low or "does not support encryption" in low \
+       or "encryption not supported" in low or "encryption is not supported" in low:
         return [_make("", "", "unencrypted_protocol", "concerning",
             f"Telnet negotiates no encryption on port {port}",
             "Telnet-encryption reports NO ENCRYPTION: credentials and session data "
             "transit the network in clear text.",
             "Replace Telnet with SSH; if unavoidable, tunnel it or restrict to a management VLAN.",
-            port, {"script": "telnet-encryption", "output": entry["output"][:300]})]
+            port, {"script": entry["script"], "output": entry["output"][:300]})]
     return []
 
 

@@ -2011,9 +2011,14 @@ def run_risk_rules(db, scan: Scan):
         # only fill gaps NSE did not cover.
         nse_xml = _nse_xml_for_host(scan, host)
         nse_web = {}
+        port_nse: dict = {}
         if nse_xml:
             nse_res = nse_engine.nse_findings_for_host(scan.id, host, label, nse_xml)
             nse_web = nse_res["web"]
+            for nse_entry in nse_engine.iter_nse_entries(nse_xml):
+                if nse_entry["port"]:
+                    port_nse.setdefault(nse_entry["port"], {})[nse_entry["script"]] = \
+                        (nse_entry["output"] or "")[:400]
             for fd in nse_res["findings"]:
                 if not _on(fd["type"]):
                     continue
@@ -2093,12 +2098,13 @@ def run_risk_rules(db, scan: Scan):
 
         # ---- Rule: Common unencrypted protocols ----------------------------
         # HTTP ports are handled by the web NSE rules below, never here. SIP on
-        # a VoIP handset is expected for the class but still unencrypted.
+        # a VoIP handset is expected for the class but still unencrypted. Note:
+        # SMB is NOT listed -- SMBv2/v3 traffic is encrypted and SMB-specific
+        # risks (signing disabled, SMBv1) have their own evidence-driven rules.
         if _on("unencrypted_protocol"):
             insecure_ports = {
                 23: ("Telnet", "concerning"),
                 21: ("FTP", "notable"),
-                445: ("SMB", "info"),
             }
             if host.device_type == "voip_phone":
                 insecure_ports[5060] = ("SIP (unencrypted)", "notable")
@@ -2106,7 +2112,16 @@ def run_risk_rules(db, scan: Scan):
             for p in ports:
                 if p.state != "open" or p.port not in insecure_ports:
                     continue
+                if ("unencrypted_protocol", p.port) in found:
+                    continue
                 name, sev = insecure_ports[p.port]
+                ev = []
+                if p.service:
+                    ev.append(f"service={p.service}")
+                if p.version:
+                    ev.append(f"version={p.version}")
+                if p.banner:
+                    ev.append(f"banner={p.banner[:160]}")
                 f = _upsert(
                     "unencrypted_protocol",
                     _sev("unencrypted_protocol", sev),
@@ -2114,6 +2129,7 @@ def run_risk_rules(db, scan: Scan):
                     f"{name} enabled on {label} port {p.port}",
                     f"Host is running {name} which transmits data in clear text.",
                     f"Replace {name} with an encrypted alternative (SSH/HTTPS/SRTP).",
+                    evidence={"script": "service", "output": "\n".join(ev)[:400]} if ev else None,
                 )
                 _apply_meta(f, "unencrypted_protocol")
                 found.add(("unencrypted_protocol", p.port))
@@ -2123,13 +2139,26 @@ def run_risk_rules(db, scan: Scan):
             rtsp_ports = [p for p in ports if p.state == "open" and
                           (p.port in (554, 8554) or (p.service or "").lower() == "rtsp")]
             for p in rtsp_ports:
+                if ("unencrypted_video", p.port) in found:
+                    continue
+                ev = []
+                if p.service:
+                    ev.append(f"service={p.service}")
+                if p.version:
+                    ev.append(f"version={p.version}")
+                pn = port_nse.get(p.port, {})
+                for sid in ("rtsp-methods", "fingerprint-strings"):
+                    out = pn.get(sid)
+                    if out:
+                        ev.append(f"[{sid}] {out[:300]}")
                 f = _upsert(
                     "unencrypted_video",
                     _sev("unencrypted_video", "concerning"),
                     p.port,
                     f"Unencrypted RTSP video stream on {label} port {p.port}",
-                    f"The host serves raw RTSP on port {p.port}; captured traffic exposes the live feed unencrypted and typically unauthenticated to LAN clients.",
+                    f"The host serves raw RTSP on port {p.port}; RTSP carries the live feed in clear text and often allows anonymous stream access.",
                     "Move video delivery to RTSPS/SRTP or a restricted management VLAN, and require authentication for stream access.",
+                    evidence={"script": "service/probe", "output": "\n".join(ev)[:600]} if ev else None,
                 )
                 _apply_meta(f, "unencrypted_video")
                 found.add(("unencrypted_video", p.port))
