@@ -1850,6 +1850,30 @@ def _host_label(host: Host) -> str:
     return " · ".join(parts)
 
 
+def _service_evidence(p, port_nse=None, sids=()):
+    """Guaranteed non-empty evidence for heuristic (non-NSE) findings.
+
+    Drawn first from port/service detection, then from any saved NSE script
+    output for that port, and finally from the scan-observed open-port fact
+    itself -- so every finding is always backed by concrete evidence.
+    """
+    ev = []
+    if p.service:
+        ev.append(f"service={p.service}")
+    if p.version:
+        ev.append(f"version={p.version}")
+    if p.banner:
+        ev.append(f"banner={p.banner[:160]}")
+    pn = (port_nse or {}).get(p.port, {}) if port_nse else {}
+    for sid in sids:
+        out = pn.get(sid)
+        if out:
+            ev.append(f"[{sid}] {out[:300]}")
+    if not ev:
+        ev.append(f"port {p.port}/tcp observed open by the scan")
+    return {"script": "service", "output": "\n".join(ev)[:600]}
+
+
 def _nse_xml_for_host(scan, host) -> str:
     """Re-assemble the raw NSE-bearing XML nmap produced for this host across
     phases. Finding rules consume it as evidence; absent files (e.g. hosts only
@@ -2040,6 +2064,7 @@ def run_risk_rules(db, scan: Scan):
                     f"Default SNMP community string in use on {label}",
                     "The device responds to the default SNMP community string 'public', allowing unauthenticated read access to system information.",
                     "Change the SNMP community string to a non-default value and restrict SNMP access to trusted management hosts.",
+                    evidence={"script": "snmp-info", "output": f"default_community_found=true community=public"},
                 )
                 _apply_meta(f, "default_credentials")
                 found.add(("default_credentials", 161))
@@ -2115,13 +2140,6 @@ def run_risk_rules(db, scan: Scan):
                 if ("unencrypted_protocol", p.port) in found:
                     continue
                 name, sev = insecure_ports[p.port]
-                ev = []
-                if p.service:
-                    ev.append(f"service={p.service}")
-                if p.version:
-                    ev.append(f"version={p.version}")
-                if p.banner:
-                    ev.append(f"banner={p.banner[:160]}")
                 f = _upsert(
                     "unencrypted_protocol",
                     _sev("unencrypted_protocol", sev),
@@ -2129,7 +2147,7 @@ def run_risk_rules(db, scan: Scan):
                     f"{name} enabled on {label} port {p.port}",
                     f"Host is running {name} which transmits data in clear text.",
                     f"Replace {name} with an encrypted alternative (SSH/HTTPS/SRTP).",
-                    evidence={"script": "service", "output": "\n".join(ev)[:400]} if ev else None,
+                    evidence=_service_evidence(p, port_nse),
                 )
                 _apply_meta(f, "unencrypted_protocol")
                 found.add(("unencrypted_protocol", p.port))
@@ -2158,7 +2176,7 @@ def run_risk_rules(db, scan: Scan):
                     f"Unencrypted RTSP video stream on {label} port {p.port}",
                     f"The host serves raw RTSP on port {p.port}; RTSP carries the live feed in clear text and often allows anonymous stream access.",
                     "Move video delivery to RTSPS/SRTP or a restricted management VLAN, and require authentication for stream access.",
-                    evidence={"script": "service/probe", "output": "\n".join(ev)[:600]} if ev else None,
+                    evidence=_service_evidence(p, port_nse, ("rtsp-methods", "fingerprint-strings")),
                 )
                 _apply_meta(f, "unencrypted_video")
                 found.add(("unencrypted_video", p.port))
@@ -2174,6 +2192,7 @@ def run_risk_rules(db, scan: Scan):
                         f"Potentially outdated {p.service} on {label} port {p.port}",
                         f"{p.service} version {p.version} may contain known vulnerabilities.",
                         f"Upgrade {p.service} to a currently supported version.",
+                        evidence={"script": "service/version", "output": f"service={p.service} version={p.version}"},
                     )
                     _apply_meta(f, "eol_software")
                     found.add(("eol_software", p.port))
@@ -2189,6 +2208,7 @@ def run_risk_rules(db, scan: Scan):
             for wport in web_ports:
                 if wport in nse_web:
                     continue  # NSE already voted on this port
+                portrow = next((p for p in ports if p.port == wport), None)
                 f = _upsert(
                     "web_service_exposed",
                     _sev("web_service_exposed", "info"),
@@ -2197,6 +2217,7 @@ def run_risk_rules(db, scan: Scan):
                     "A web service is listening on this port; confirm TLS and access controls.",
                     "Ensure the web service is patched, uses TLS, and is access-controlled.",
                     cve_refs=[],
+                    evidence=_service_evidence(portrow, port_nse) if portrow else None,
                 )
                 _apply_meta(f, "web_service_exposed")
                 found.add(("web_service_exposed", wport))

@@ -136,7 +136,9 @@ def _rule_ssh(entry, port) -> list:
     elems = entry["elems"]
     if entry["script"] == "ssh2-enum-algos":
         weak_kex = [k for k in _SSH_WEAK_KEX if k.lower() in text.lower() or k.lower() in " ".join(elems.values()).lower()]
-        weak_hostkey = [k for k in _SSH_WEAK_HOSTKEY if k.lower() in " ".join(elems.values()).lower()]
+        weak_hostkey = [k for k in _SSH_WEAK_HOSTKEY
+                        if k.lower() in text.lower()
+                        or k.lower() in " ".join(elems.values()).lower()]
         if weak_kex or weak_hostkey:
             out.append(_make("", "", "weak_crypto", "notable",
                 f"Weak SSH algorithm negotiation on port {port}",
@@ -181,6 +183,21 @@ def _rule_ssl_cert(entry, port) -> list:
     if not not_after and not bits and "self-signed" not in text.lower():
         return out
 
+    # Evidence invariant: a finding's evidence output must never be empty,
+    # even when the rule fired purely off structured XML elements.
+    ev_out = text.strip()
+    if not ev_out:
+        subj = el.get("subject/commonName") or ""
+        parts = [f"CN={subj}"] if subj else []
+        if bits:
+            parts.append(f"bits={bits}")
+        if not_after:
+            parts.append(f"notAfter={not_after}")
+        if not parts:
+            parts.append("no subject/bits/notAfter in structured data")
+        ev_out = "ssl-cert report: " + ", ".join(parts)
+    ev_out = ev_out[:500]
+
     try:
         parsed = datetime.fromisoformat(not_after.replace("Z", "+00:00").replace(" ", "T"))
         if parsed.tzinfo is None:
@@ -192,7 +209,7 @@ def _rule_ssl_cert(entry, port) -> list:
                 f"The server presents a certificate that expired {parsed.isoformat()}: {text[:200]}",
                 "Renew the certificate; expired certs are trusted by browsers but fail validation "
                 "and often indicate abandoned or misconfigured services.",
-                port, {"script": "ssl-cert", "output": text[:500]}))
+                port, {"script": "ssl-cert", "output": ev_out}))
     except Exception:
         pass
 
@@ -204,7 +221,7 @@ def _rule_ssl_cert(entry, port) -> list:
                     f"Weak TLS key strength on port {port}",
                     f"The TLS certificate uses only a {n}-bit RSA key.",
                     "Use a certificate with a 2048-bit (or stronger) RSA key, or ECDSA P-256+.",
-                    port, {"script": "ssl-cert", "output": text[:300]}))
+                    port, {"script": "ssl-cert", "output": ev_out}))
         except (TypeError, ValueError):
             pass
 
@@ -225,13 +242,13 @@ def _rule_ssl_cert(entry, port) -> list:
             "The service presents a self-signed certificate, preventing clients from "
             "verifying the identity of the server.",
             "Replace with a certificate from a trusted CA or an internal CA enrolled on managed clients.",
-            port, {"script": "ssl-cert", "output": text[:300]}))
+            port, {"script": "ssl-cert", "output": ev_out}))
     if sig and ("md5" in sig or ("sha1" in sig and "sha256" not in sig)):
         out.append(_make("", "", "weak_crypto", "notable",
             f"Weak TLS certificate signature on port {port}",
             "The certificate is signed with a deprecated hash algorithm (MD5/SHA-1).",
             "Re-issue with SHA-256 or better.",
-            port, {"script": "ssl-cert", "output": text[:300]}))
+            port, {"script": "ssl-cert", "output": ev_out}))
     return out
 
 
@@ -270,7 +287,7 @@ def _rule_ssl_ciphers(entry, port) -> list:
         names = [elems[k] for k in suite_keys]
     else:
         # text fallback: "TLSv1.0:  ... TLS_RSA_WITH_RC4_128_SHA  "
-        names = re.findall(r"(TLS|SSL)[A-Z0-9_]+", entry["output"])
+        names = re.findall(r"(?:TLS|SSL)[A-Z0-9_]+", entry["output"])
     weak = sorted({n for n in names if any(w in n.lower() for w in _WEAK_CIPHERS)})
     deprecated = sorted(_ssl_protocols(elems, entry["output"]) & set(_DEPRECATED_PROTOCOLS))
     if weak or deprecated:
@@ -320,12 +337,13 @@ def _rule_smb_shares(entry, port) -> list:
             name = share.lower()
             if name in ("c$", "admin$", "ipc$", "print$"):
                 continue
+            ev_out = text.strip() or f"{share}: anonymous access = {acc} (from structured ssl-cert-style output)"
             out.append(_make("", "", "unrestricted_share", "concerning",
                 f"World-readable SMB share '{share}' on port {port}",
                 f"SMB share '{share}' allows anonymous access with write permission "
                 f"('{acc}'), exposing data to any network client.",
                 "Remove the share or restrict to authenticated users with least privilege.",
-                port, {"script": "smb-enum-shares", "output": text[:400]}))
+                port, {"script": "smb-enum-shares", "output": ev_out[:400]}))
     # text fallback: share list w/ anonymous read/write column
     for line in text.splitlines():
         m = re.match(r"\s*([\w\-\.$]+)\s+(\w+)\s+(.+)", line)
@@ -384,18 +402,19 @@ def _rule_telnet(entry, port) -> list:
 
 
 def _rule_mysql_empty(entry, port) -> list:
-    if "mysql empty password" in entry["output"].lower():
+    low = entry["output"].lower()
+    if "allows empty password" in low or "empty password" in low and "not allowed" not in low:
         return [_make("", "", "empty_password", "concerning",
             f"MySQL allows empty-password login on port {port}",
             "The MySQL server accepts connections with an empty password.",
             "Assign credentials to all MySQL accounts.",
-            port, {"script": "mysql-empty-password", "output": entry["output"][:300]})]
+            port, {"script": entry["script"], "output": entry["output"][:300]})]
     return []
 
 
 def _rule_mongo_auth(entry, port) -> list:
     text = entry["output"].lower()
-    if "authentication is not enabled" in text or "authentication not enabled" in text \
+    if re.search(r"authentication[^a-z]{0,6}not enabled", text) \
        or "no auth" in text and "authorized" not in text:
         return [_make("", "", "missing_auth", "notable",
             f"MongoDB requires no authentication on port {port}",
