@@ -21,30 +21,30 @@ SEVERITY_COLOR = {
 }
 
 DEVICE_TYPE_LABEL = {
-    "router": "Router / Gateway",
+    "router": "Router / Gateway / Access Point",
     "switch": "Switch",
-    "firewall": "Firewall",
-    "wireless_access_point": "Wireless Access Point",
-    "workstation": "Workstation",
-    "laptop": "Laptop",
-    "smartphone": "Smartphone",
-    "tablet": "Tablet",
-    "physical_server": "Physical Server",
-    "virtual_machine": "Virtual Machine",
+    "workstation": "Workstation / Laptop",
+    "mobile": "Mobile Device",
+    "server": "Server",
     "nas": "NAS",
     "printer": "Network Printer / Copier",
     "voip_phone": "VoIP Phone",
-    "conference": "Conference / Media System",
-    "smart_tv": "Smart TV / Streaming Device",
     "camera": "IP Camera / NVR",
     "iot": "Smart Appliance / IoT",
-    "smart_speaker": "Virtual Assistant / Smart Speaker",
-    "unknown": "Unidentified Host",
     "access_control": "Access Control",
-    # legacy keys from scans before the granular taxonomy
-    "network_gear": "Router / Gateway",
-    "mobile": "Smartphone",
-    "server": "Physical Server",
+    "unknown": "Unidentified Host",
+    # legacy keys from scans before the simplified taxonomy
+    "network_gear": "Router / Gateway / Access Point",
+    "laptop": "Workstation / Laptop",
+    "smartphone": "Mobile Device",
+    "tablet": "Mobile Device",
+    "physical_server": "Server",
+    "virtual_machine": "Server",
+    "smart_tv": "Smart Appliance / IoT",
+    "smart_speaker": "Smart Appliance / IoT",
+    "conference": "Smart Appliance / IoT",
+    "firewall": "Router / Gateway / Access Point",
+    "wireless_access_point": "Router / Gateway / Access Point",
     "camera_ip": "IP Camera / NVR",
 }
 
@@ -499,7 +499,7 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
       <li><b>Discovery:</b> ARP sweep (local subnets) and TCP SYN probes to common ports (routed subnets), cross-referenced against live Layer-2 scanner agents on the target LAN.</li>
       <li><b>Naming:</b> passive mDNS service enumeration, DHCP/DHCPv6 client traffic and SNMP sysName used to recover hostnames even when MACs are privacy-randomised.</li>
       <li><b>Port scan:</b> Nmap connect/syn scans of the configured port range, with service/version/OS detection (<span class="mono">-sV -sC -O</span>) applied only to open ports.</li>
-      <li><b>Fingerprinting:</b> MAC vendor lookup (OUI), SNMP walks on UDP 161, and device-type classification into a granular taxonomy (router/switch/AP, laptop vs. smartphone/tablet, server vs. VM, camera/NVR, smart TV/IoT, VoIP, NAS, printer, access control).</li>
+      <li><b>Fingerprinting:</b> MAC vendor lookup (OUI), SNMP walks on UDP 161, and device-type classification into a concise taxonomy (router/switch/AP, workstation/laptop, mobile phone/tablet, server, camera/NVR, smart IoT, VoIP, NAS, printer, access control).</li>
       <li><b>Risk analysis:</b> Nmap NSE evidence (SSL/SSH crypto strength, certificates, SMB signing and shares, anonymous FTP, HTTP method and admin-panel detection, authentication checks) combined with heuristic rules (default SNMP community, unencrypted protocols RTSP/SIP/Telnet/FTP/HTTP/SMB, outdated-software banner matching). Identified service products (CPEs) are matched offline against a locally-imported NVD catalog so known CVEs are reported with their CWE/CVSS metadata. Every rule is tunable per scan — operators can disable a rule or override its severity before re-analysis.</li>
     </ul>
     <p>Tools: Nmap, Scapy, pysnmp, Wireshark OUI database.</p>

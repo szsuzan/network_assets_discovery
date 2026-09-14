@@ -67,8 +67,11 @@ class ConnectionManager:
         # dedupes replayed history against live events using this key).
         if not event.get("ts"):
             event["ts"] = datetime.now(timezone.utc).isoformat()
-        self.publish_event(scan_id, event)
+        # Persist at the source (this process is the origin of the event), then
+        # mark it so the Redis relay / local re-delivery never writes it twice.
         append_activity(scan_id, event)
+        event["_persisted"] = True
+        self.publish_event(scan_id, event)
         import asyncio
         loop = self._get_loop()
         try:
@@ -106,6 +109,13 @@ class ConnectionManager:
                 event["ts"] = datetime.now(timezone.utc).isoformat()
         except Exception:
             pass
+        # Locally produced events (e.g. agent-delegated scan results) persist
+        # here; events already persisted by the originating worker (they carry
+        # the _persisted marker) skip it so the feed is never written twice.
+        should_persist = not event.get("_persisted")
+        event.pop("_persisted", None)
+        if should_persist:
+            append_activity(scan_id, event)
         buf = self._recent.setdefault(scan_id, deque(maxlen=BUFFER_SIZE))
         buf.append(event)
         if len(self._recent) > MAX_TRACKED_SCANS:
