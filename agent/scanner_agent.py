@@ -29,6 +29,7 @@ import ipaddress
 import json
 import re
 import shlex
+import shutil
 import socket
 import struct
 import subprocess
@@ -266,13 +267,13 @@ _MDNS_TYPE_HINTS = [
     ("_scanner", "printer"),
     ("_adisk", "nas"),                                   # Apple time-machine / NAS
     ("_smb", "nas"),
-    ("_meshcop", "network_gear"),                        # Thread border router
+    ("_meshcop", "router"),                              # Thread border router
     ("_device-info", "mobile"),                          # phone/tablet display name + model
     ("_apple-mobdev2", "mobile"),                        # iPhone proximity
-    ("_googlecast", "media"),                            # cast-capable display/TV
-    ("_amzn-wplay", "media"),
-    ("_spotify-connect", "media"),
-    ("_sonos", "media"),
+    ("_googlecast", "iot"),                              # cast-capable display/TV
+    ("_amzn-wplay", "iot"),
+    ("_spotify-connect", "iot"),
+    ("_sonos", "iot"),
     ("_sftp-ssh", "server"),
     ("_ssh", "server"),
     ("_workstation", "workstation"),
@@ -349,7 +350,9 @@ def _mdns_packet_info(data: bytes):
 
     Answer/Additional records carry the device's facts: A/AAAA owners are the
     device's own hostname, PTR owners are the service types it offers, and TXT
-    records its attributes. Pure query echoes (no answer records) are skipped."""
+    records its attributes. Pure query packets are skipped - a `_googlecast`
+    QUERY means the sender is a casting *client* (phone/laptop app hunting for
+    a receiver), which is not a type signal we can safely act on."""
     if len(data) < 12:
         return None
     try:
@@ -357,7 +360,7 @@ def _mdns_packet_info(data: bytes):
     except Exception:
         return None
     if an + ar == 0:
-        return None  # pure query echo from the local host OS, not a device
+        return None  # pure query, no device facts
     info = {"services": set(), "hostnames": set(), "txt": set(), "instances": set(),
             "inst2svc": {}, "model": None}
     try:
@@ -500,6 +503,8 @@ def mdns_device_hint(info: dict) -> (Optional[str], Optional[str]):
         if any(key in s for s in services):
             dev = kind
             break
+    if not dev:
+        dev = _type_from_hostname(hostname)
     return (hostname or None), dev
 
 
@@ -985,7 +990,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
         return
 
     client.log(task_id, f"=== Agent scan started (scan={scan_id}, targets={', '.join(targets)}) ===")
-    client.log(task_id, f"Phase 1/3: L2/ARP discovery -> live hosts + MAC/vendor", level="cmd")
+    client.log(task_id, f"Phase 1/3: L2/ARP discovery -> live hosts + MAC/vendor", level="out")
     client.log(task_id, f"$ nmap -sn {' '.join(targets)} (ARP)", level="cmd")
 
     posted = set()
@@ -1008,12 +1013,13 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     # Rate-limited internally to ~once/90s; replies fold during the scan and
     # are picked up by the refreshed snapshot at Finalise.
     if _dhcp6_nudge(_pick_passive_iface(targets)):
-        client.log(task_id, "DHCPv6 RA nudge sent (M flag) - asking clients to reveal names", level="cmd")
+        client.log(task_id, "DHCPv6 RA nudge sent (M flag) - asking clients to reveal names", level="out")
 
-    # Passive evidence harvested between scans (DHCP / ARP / CDP / LLDP). MAC-keyed
-    # fingerprints (network gear announcing itself via CDP/LLDP, DHCP on privacy
-    # MACs) are cross-referenced onto the IPs ARP discovery just resolved (the fold
-    # below runs once live hosts are known, after Phase 1).
+    # Passive evidence harvested between scans (DHCP / ARP / CDP / LLDP / SSDP /
+    # NetBIOS). MAC-keyed fingerprints (network gear announcing itself via
+    # CDP/LLDP, DHCP on privacy MACs) are cross-referenced onto the IPs ARP
+    # discovery just resolved (the fold below runs once live hosts are known,
+    # after Phase 1).
     passive = passive_snapshot()
     passive_by_ip = dict(passive["by_ip"])
 
@@ -1039,6 +1045,10 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
                 h["vendor"] = phint["vendor"]
             if phint.get("mac") and not h.get("mac"):
                 h["mac"] = phint["mac"]
+        if not h.get("device_type") and h.get("hostname"):
+            _t = _type_from_hostname(h.get("hostname"))
+            if _t:
+                h["device_type"] = _t
         return h
 
     # ---- Phase 1/3: ARP (L2) discovery -> live hosts + MAC/vendor -------------
@@ -1063,7 +1073,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
             _entry.update(passive_by_ip.get(_ip, {}))
             passive_by_ip[_ip] = _entry
     if passive_by_ip:
-        client.log(task_id, f"Phase 1/3: {len(passive_by_ip)} passive fingerprint(s) folded from DHCP/ARP/CDP/LLDP", level="out")
+        client.log(task_id, f"Phase 1/3: {len(passive_by_ip)} passive fingerprint(s) folded from DHCP/ARP/CDP/LLDP/SSDP/NetBIOS", level="out")
 
     if not live:
         client.log(task_id, "Discovery found no live hosts - reporting 0 hosts", level="warn")
@@ -1083,6 +1093,22 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
             pass  # plain host target -> no fold beyond it, conservatively
     in_scope = (lambda ip: True) if not scope_nets else (
         lambda ip: any(ipaddress.ip_address(ip) in n for n in scope_nets))
+
+    # Backfill: the continuous ARP sweeper's cache is cross-checked to the
+    # scope's candidate IPs only - it cannot leak an out-of-scope host in.
+    arp_cache = _arp_snapshot()
+    if arp_cache:
+        cached = {ip for ip in arp_cache if in_scope(ip) and ip not in live}
+        cached -= set(mdns_hints.keys()) | set(passive_by_ip.keys())
+    else:
+        cached = set()
+    if cached:
+        client.log(task_id, f"Phase 1/3: {len(cached)} host(s) resurrected from ARP liveness cache: {', '.join(sorted(cached))}", level="out")
+        for ip in cached:
+            live[ip] = {"ip": ip, "mac": arp_cache[ip].get("mac"),
+                        "vendor": arp_cache[ip].get("vendor"),
+                        "hostname": None, "state": "up"}
+
     extra = {ip for ip in (set(mdns_hints.keys()) | set(passive_by_ip.keys())) - set(live.keys())
              if in_scope(ip)}
     if extra:
@@ -1104,7 +1130,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
         client.log(task_id, f"Partial discovery post failed: {e}", level="err")
 
     # ---- Phase 2/3: simple port scan (no -sV/-O) -> open ports only ----------
-    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {_p2_workers()} parallel worker(s)", level="cmd")
+    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {_p2_workers()} parallel worker(s)", level="out")
 
     def _p2_worker(ip_meta):
         ip, _meta = ip_meta
@@ -1150,7 +1176,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
             open_ports[ip] = []
 
     # ---- Phase 3/3: service/OS fingerprint -----------------------------------
-    client.log(task_id, f"Phase 3/3: -sV -O fingerprint (ports) / -O (OS-only for no-port hosts), {PHASE3_WORKERS} parallel worker(s)", level="cmd")
+    client.log(task_id, f"Phase 3/3: -sV -O fingerprint (ports) / -O (OS-only for no-port hosts), {PHASE3_WORKERS} parallel worker(s)", level="out")
 
     def _p3_worker(ip_meta):
         ip, _meta = ip_meta
@@ -1238,6 +1264,10 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     # Re-read passive evidence: the RA nudge + background sweeps may have
     # surfaced DHCPv6/DHCP hostnames during the scan window.
     passive_by_ip = dict(passive_snapshot()["by_ip"])
+    # Refresh mDNS evidence too: the never-ending sweeper keeps folding
+    # query-side service hints (e.g. `_googlecast` from cast devices) all scan
+    # long, so Phase-0's snapshot is stale by the time we report.
+    mdns_hints = mdns_snapshot()
     remaining = [_decorate(h) for ip, h in [
         (ip, {"ip": ip, "mac": meta.get("mac"), "vendor": meta.get("vendor"),
               "status": "up",
@@ -1438,7 +1468,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
 
 
 # --------------------------------------------------------------------------- #
-# Passive fingerprinting (optional Scapy: DHCP / ARP / CDP / LLDP)
+# Passive fingerprinting (optional Scapy: DHCP / ARP / CDP / LLDP / SSDP / NetBIOS)
 #
 # Active fingerprinting needs the target to answer. Passive capture sees what
 # the LAN already says:
@@ -1451,6 +1481,12 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
 #     Link Layer Discovery Protocol): switch/AP/router identity, platform,
 #     software version, and *authoritative* system capabilities. A switch that
 #     never answers an L3 probe is still named here.
+#   * SSDP / UPnP (UDP 1900) - smart TVs/media/IoT announce themselves with a
+#     SERVER header and a LOCATION URL; the friendly name behind it is fetched
+#     best-effort. Devices in AP-isolation that block every active probe still
+#     answer multicast here.
+#   * NetBIOS (UDP 137) - Windows hosts register <00>/<03>/<20> names from
+#     their own IP, naming them with zero ports open.
 # Scapy is optional: if it is not installed (or lacks Npcap/privileges), the
 # agent just logs once and keeps running with active scanning only. Like the
 # mDNS sweeper this runs on a daemon thread for the agent's whole lifetime, so
@@ -1484,8 +1520,8 @@ _DHCP_VCI_RULES = [
     ("synology",            "Synology NAS (DHCP VCI)",      "Synology", "nas"),
     ("qnap",                "QNAP NAS (DHCP VCI)",          "QNAP",     "nas"),
     ("msft",                "Windows (DHCP VCI: MSFT)",     None,       None),
-    ("android",             "Android (DHCP VCI)",           None,       "smartphone"),
-    ("ios",                 "Apple iOS (DHCP VCI)",         "Apple",    "smartphone"),
+    ("android",             "Android (DHCP VCI)",         None,       "mobile"),
+    ("ios",                 "Apple iOS (DHCP VCI)",         "Apple",    "mobile"),
     ("macos",               "Apple macOS (DHCP VCI)",       "Apple",    None),
     ("darwin",              "Apple macOS (DHCP VCI)",       "Apple",    None),
     ("udhcpc",              "Linux (udhcpc DHCP)",          None,       None),
@@ -1493,6 +1529,80 @@ _DHCP_VCI_RULES = [
     ("dhcpcd",              "Linux/BSD (dhcpcd DHCP)",      None,       None),
     ("linux",               "Linux (DHCP VCI)",             None,       None),
 ]
+
+
+# Hostname prefixes -> coarse device_type. With randomised MACs erasing the OUI
+# and filtered TCP killing port classification, the device's own name is often
+# the ONLY surviving type signal (Windows `DESKTOP-XX`, Android `Android_XXX`,
+# Samsung `SM-XXX`, Apple `iPhone-XX`...). Applied as a fill-if-blank fallback
+# everywhere a hostname is folded in (mDNS/DHCP/NBNS), so it never overrides a
+# service/VCI-derived type. Checked in order, most specific first.
+_HOSTNAME_TYPE_RULES = [
+    (("DESKTOP-", "LAPTOP-", "PC-", "WIN-", "WIN10", "WIN11", "WINDOWS"), "workstation"),
+    (("IPHONE-", "IPAD-", "IPOD-", "IOS-"),                              "mobile"),
+    (("ANDROID", "SM-", "GALAXY", "PIXEL", "REDMI", "MI-", "MI_",
+      "HUAWEI-", "ONEPLUS", "OPPO-", "VIVO-", "XIAOMI-", "NOKIA-"),   "mobile"),
+    (("MACBOOK", "IMAC-", "MAC-"),                                      "workstation"),
+    (("UBUNTU-", "FEDORA-", "DEBIAN-", "KALI-", "LINUX-"),              "workstation"),
+    (("ESP32", "ESP-", "ESP_", "TASMOTA", "SHELLY", "SONOFF", "HOMEBRIDGE"), "iot"),
+    (("PRINTER", "EPSON", "CANON-", "BROTHER", "PIXMA", "MP-", "TS-",
+      "HL-", "MFC-", "SCX-"),                                           "printer"),
+    (("SYNOLOGY", "QNAP-", "NAS-", "ZYXEL"),                            "nas"),
+    (("ROUTER", "ROUTEUR", "GATEWAY", "OPENWRT", "MIKROTIK"),
+                                                                         "network_gear"),
+    (("CHROMECAST", "APPLE-TV", "ANDROIDTV", "ANDROID-TV", "SMART-TV",
+      "SAMSUNGTV"),                                                     "iot"),
+    (("SERVER", "SRV-", "NS1", "DC-"),                                  "server"),
+]
+
+# DHCP option 55 (Parameter Request List) fingerprints -> (os_guess, device_type).
+# The set+order of options a client demands reliably reveals its OS/family even
+# with a randomised MAC (the same table Fing/Fingerbank use). Stored as the
+# option codes; matched as an ordered subsequence of the observed PRL so extra
+# options the OS adds don't defeat the match. Longest matching signature wins.
+_DHCP_PRL_RULES = [
+    ((1, 15, 3, 6, 44, 46, 47, 31, 33, 43),                "Windows 7", "workstation"),
+    ((1, 3, 6, 15, 44, 46, 47, 31, 33, 121, 249, 43),      "Windows 8/10", "workstation"),
+    ((1, 15, 3, 6, 44, 46, 47, 31, 33, 121, 249, 43),      "Windows 8/10", "workstation"),
+    ((1, 3, 6, 15, 119, 252, 26, 28, 43),                  "iOS/macOS", "mobile"),
+    ((1, 3, 6, 15, 119, 26, 28, 43),                       "macOS", "workstation"),
+    ((1, 3, 28, 2, 6, 15, 119, 26, 121, 42, 51, 54, 43),   "Android", "mobile"),
+    ((1, 3, 6, 15, 26, 28, 51, 58, 59, 12),                "Linux (dhclient)", "workstation"),
+    ((1, 3, 6, 12, 15, 119, 51, 0, 45, 43),                "Linux", "workstation"),
+]
+
+
+def _type_from_hostname(name: Optional[str]) -> Optional[str]:
+    """Coarse device_type from a hostname prefix family (fallback only)."""
+    if not name:
+        return None
+    up = name.strip().upper()
+    if not up or len(up) < 2:
+        return None
+    for prefixes, kind in _HOSTNAME_TYPE_RULES:
+        for p in prefixes:
+            if up.startswith(p):
+                return kind
+    return None
+
+
+def _prl_hint(prl: list) -> (Optional[str], Optional[str]):
+    """Longest ordered-subsequence PRL fingerprint -> (os_guess, device_type)."""
+    if not prl:
+        return None, None
+    observed = tuple(int(x) for x in prl if isinstance(x, int) or str(x).isdigit())
+    if not observed:
+        return None, None
+
+    def _is_subsequence(sig, seq):
+        it = iter(seq)
+        return all(e in it for e in sig)
+
+    best_os, best_dev, best_len = None, None, 0
+    for sig, os_g, dev in _DHCP_PRL_RULES:
+        if len(sig) > best_len and _is_subsequence(sig, observed):
+            best_os, best_dev, best_len = os_g, dev, len(sig)
+    return best_os, best_dev
 
 
 # Brand -> canonical vendor string, sniffed from LLDP/CDP platform/descriptions.
@@ -1586,8 +1696,9 @@ def _clean_str(v: bytes, limit: int = 120) -> Optional[str]:
 
 
 def _parse_dhcp_options(options):
-    """Extract (hostname, vendor_class_id) from Scapy BOOTP.options."""
+    """Extract (hostname, vendor_class_id, param_req_list) from Scapy BOOTP.options."""
     hostname = vci = None
+    prl = []
     for opt in options or ():
         if not (isinstance(opt, tuple) and len(opt) >= 2):
             continue
@@ -1597,12 +1708,20 @@ def _parse_dhcp_options(options):
             hostname = _clean_str(val if isinstance(val, bytes) else str(val).encode())
         elif key == "vendor_class_id" and not vci:
             vci = _clean_str(val if isinstance(val, bytes) else str(val).encode(), limit=64)
+        elif key in (55, "param_req_list", "parameter_request_list") and not prl:
+            # DHCP option 55: the option codes this client is asking for, in
+            # order - the classic OS/device fingerprinting channel that works
+            # even when the MAC is randomised and TCP is filtered.
+            if isinstance(val, (bytes, bytearray)):
+                prl = list(val)
+            elif isinstance(val, (list, tuple)):
+                prl = list(val)
         elif key in (81, "client_fqdn", "fqdn", "option_81") and not hostname:
             # RFC 4702 client FQDN: flags(1) + keytag(1) + name (DNS wire).
             h = _parse_fqdn_option(val if isinstance(val, bytes) else b"")
             if h:
                 hostname = h
-    return hostname, vci
+    return hostname, vci, prl
 
 
 def _dns_wire_name(buf: bytes):
@@ -1726,12 +1845,209 @@ def _lldp_caps_device(caps: int) -> Optional[str]:
     if caps & (1 << 4):
         return "router"
     if caps & (1 << 3):
-        return "wireless_access_point"
+        return "router"
     if caps & (1 << 2):
         return "switch"
     if caps & (1 << 7):
         return "workstation"
     return None
+
+
+# --------------------------------------------------------------------------- #
+# SSDP / UPnP (UDP 1900) + NetBIOS (UDP 137) passive discovery
+#
+# Two more "wake-up-only" channels Fing-style discovery feeds on:
+#   * SSDP - smart TVs, media renderers, routers and IoT send NOTIFY/multicast
+#     M-SEARCH announcements with a unique service name, a SERVER header (OS
+#     fingerprint) and a LOCATION URL -> the friendly name in the device
+#     description XML. Devices that block ICMP/ARP-ping still announce here.
+#   * NetBIOS - Windows hosts send name REGISTRATION/QUERY frames (workstation
+#     <00>, file-server <20>, messenger <03>) whose source reveals the machine
+#     name and its own IP without any port needing to be open.
+# --------------------------------------------------------------------------- #
+_SSDP_TYPE_HINTS = [
+    ("mediarenderer", "iot"),
+    ("mediaserver", "iot"),
+    ("mediaplayer", "iot"),
+    ("tvdevice", "iot"),
+    ("scheduledrecording", "media"),
+    ("internetgatewaydevice", "router"),
+    ("windevice", "router"),
+    ("printerdevice", "printer"),
+    ("scannerdevice", "printer"),
+    ("scanner", "printer"),
+]
+
+# NetBIOS name-suffix byte -> coarse device_type.
+_NB_SUFFIX_TYPE = {0x00: "workstation", 0x03: "workstation",
+                   0x20: "server", 0x1b: "server", 0x1c: "server"}
+
+_SSDP_LOCK = threading.Lock()
+_ssdp_pending = {}   # src_ip -> {"location": str, "last_fetch": float}
+_ssdp_known = {}     # location url -> friendly name (persist across windows)
+
+
+def _parse_ssdp(data: bytes) -> dict:
+    """Parse an SSDP notify/response body -> {os_guess, device_type, location}."""
+    txt = data.decode("utf-8", "replace")
+    out = {"os_guess": None, "device_type": None, "location": None}
+    for line in txt.splitlines():
+        head, _, rest = line.partition(":")
+        k = head.strip().lower()
+        v = rest.strip()
+        if not v:
+            continue
+        if k == "location":
+            out["location"] = v
+        elif k == "server" and not out["os_guess"]:
+            out["os_guess"] = " ".join(v.split())[:120]
+        elif k in ("st", "nt"):
+            vl = v.lower()
+            for key, dev in _SSDP_TYPE_HINTS:
+                if key in vl:
+                    out["device_type"] = dev
+                    break
+    return out
+
+
+def _decode_nb_name(raw: bytes):
+    """16-byte NetBIOS node-name field -> (name, suffix_byte) or (None, None)."""
+    if len(raw) < 16:
+        return None, None
+    ln = raw[0]
+    if not (0 < ln <= 15):
+        return None, None
+    name = raw[1:1 + ln].decode("utf-8", "replace")
+    return name, raw[15]
+
+
+def _nbns_packet_info(data: bytes) -> dict:
+    """Parse an NBNS (UDP/137) payload.
+
+    Returns {"self_names": [(name, suffix)], "ip_names": {owner_ip: [(name, suffix)]}}.
+    Registration/query packets (QR=0) name the SENDER; response answers carry a
+    4-6 byte owner IP in RDATA that names that owner."""
+    res = {"self_names": [], "ip_names": {}}
+    try:
+        if len(data) < 12:
+            return res
+        _tid, flags, qd, an, ns_cnt, ar_cnt = struct.unpack(">HHHHHH", data[:12])
+        qr = (flags >> 15) & 1
+        opcode = (flags >> 11) & 0xF
+        off = 12
+
+        def _read_name():
+            nonlocal off
+            if off + 16 > len(data):
+                return None
+            r = _decode_nb_name(data[off:off + 16])
+            off += 16
+            return r
+
+        def _read_question():
+            nonlocal off
+            if off + 20 > len(data):
+                return None
+            r = _read_name()
+            if r is None:
+                return None
+            ntype, _nclass = struct.unpack(">HH", data[off:off + 4])
+            off += 4
+            return r[0], r[1], ntype
+
+        def _read_answer():
+            nonlocal off
+            if off + 26 > len(data):
+                return None
+            r = _read_name()
+            if r is None:
+                return None
+            ntype, _nclass, _ttl, rdlen = struct.unpack(">HHIH", data[off:off + 10])
+            off += 10
+            rd = data[off:off + rdlen]
+            off += rdlen
+            return r[0], r[1], ntype, rd
+
+        qrecs = []
+        for _ in range(qd):
+            q = _read_question()
+            if q:
+                qrecs.append(q)
+        arecs = []
+        for _ in range(an + ns_cnt + ar_cnt):
+            a = _read_answer()
+            if a:
+                arecs.append(a)
+
+        for name, suffix, ntype in qrecs:
+            if ntype == 0x0020 and name:
+                res["self_names"].append((name, suffix))
+        if qr:
+            for name, suffix, ntype, rd in arecs:
+                if ntype != 0x0020:
+                    continue
+                ip = None
+                if len(rd) == 4:
+                    ip = socket.inet_ntoa(rd)
+                elif len(rd) == 6:
+                    ip = socket.inet_ntoa(rd[2:6])
+                name = name.strip()
+                if ip and name and not ip.startswith("255."):
+                    res["ip_names"].setdefault(ip, []).append((name, suffix))
+    except Exception:
+        pass
+    return res
+
+
+def _parse_friendly_name(body: bytes) -> Optional[str]:
+    """Pull <friendlyName> out of a UPnP device-description XML body."""
+    try:
+        m = re.search(rb"<friendlyName[^>]*>([^<]{1,200})</friendlyName>", body, re.I)
+        if m:
+            val = " ".join(m.group(1).decode("utf-8", "replace").split()).strip()
+            return val or None
+    except Exception:
+        pass
+    return None
+
+
+def _ssdp_fetch_pending(subnets: List[str], max_fetch: int = 8):
+    """Best-effort, rate-limited FETCH of pending SSDP LOCATION URLs to recover
+    the friendly device name (or the model in its absence). Runs on the daemon
+    sweeper thread after each sniff window, never inside the scanner hot path."""
+    with _SSDP_LOCK:
+        pending = [(ip, e.get("location")) for ip, e in list(_ssdp_pending.items())
+                   if e.get("location") and (time.time() - e.get("last_fetch", 0)) > 300]
+    if not pending:
+        return
+    fetched = []
+    for ip, loc in pending[:max_fetch]:
+        if loc in _ssdp_known:
+            name = _ssdp_known[loc]
+        else:
+            name = None
+            try:
+                req = urllib.request.Request(loc, headers={"User-Agent": "SubNex-agent/0.1"})
+                with urllib.request.urlopen(req, timeout=1.5) as r:
+                    name = _parse_friendly_name(r.read(65536))
+            except Exception:
+                pass
+            with _SSDP_LOCK:
+                _ssdp_pending.setdefault(ip, {})["last_fetch"] = time.time()
+                if name:
+                    _ssdp_known[loc] = name
+        if name:
+            fetched.append((ip, name))
+    if fetched:
+        with _PASSIVE_LOCK:
+            for ip, name in fetched:
+                if not any(_ip_in_subnet(ip, s) for s in subnets):
+                    continue
+                rec = _passive_shared["by_ip"].setdefault(
+                    ip, {"hostname": None, "os_guess": None,
+                         "device_type": None, "vendor": None,
+                         "mac": None, "last_seen": 0.0})
+                _passive_record(rec, {"hostname": name})
 
 
 def _passive_record(entry: dict, hints: dict):
@@ -1746,7 +2062,7 @@ def _passive_record(entry: dict, hints: dict):
 
 def _passive_packet(pkt, subnets: List[str]):
     try:
-        from scapy.all import ARP, BOOTP, Ether, SNAP
+        from scapy.all import ARP, BOOTP, Ether, IP, IPv6, SNAP, UDP
 
         _guard = False
         if pkt.haslayer(ARP):
@@ -1769,8 +2085,16 @@ def _passive_packet(pkt, subnets: List[str]):
         if pkt.haslayer(BOOTP):
             b = pkt[BOOTP]
             chaddr = _mac_from_bytes(bytes(b.chaddr) if isinstance(b.chaddr, bytes) else b.chaddr)
-            hostname, vci = _parse_dhcp_options(b.options)
+            hostname, vci, prl = _parse_dhcp_options(b.options)
             os_hint, vendor, dev = _vci_hint(vci or "")
+            prl_os, prl_dev = _prl_hint(prl)
+            if not os_hint and prl_os:
+                os_hint = prl_os
+            if not dev and prl_dev:
+                dev = prl_dev
+            hname_type = None if dev else _type_from_hostname(hostname)
+            if hname_type:
+                dev = hname_type
             yiaddr = None
             try:
                 raw = bytes(b.yiaddr)
@@ -1827,6 +2151,81 @@ def _passive_packet(pkt, subnets: List[str]):
                                        "port_id": None, "last_seen": 0.0})
                             _passive_record(rec, {"hostname": fqdn})
                             _guard = True
+
+        # SSDP/UPnP (UDP 1900): smart TVs, media gear, printers and IoT announce
+        # themselves with SERVER (OS) and LOCATION (-> friendly name) even when
+        # they block ICMP/ARP-ping and TCP probing. NetBIOS (UDP 137): Windows
+        # hosts register <00>/<03>/<20> names from their own IP.
+        if pkt.haslayer(UDP):
+            udp = pkt["UDP"]
+            sport, dport = udp.sport, udp.dport
+            if sport == 1900 or dport == 1900:
+                info = _parse_ssdp(bytes(udp.payload))
+                src = None
+                l3 = pkt.getlayer(IP)
+                if l3 is not None:
+                    src = getattr(l3, "src", None)
+                else:
+                    l6 = pkt.getlayer(IPv6)
+                    src = getattr(l6, "src", None) if l6 is not None else None
+                if src and (info["os_guess"] or info["device_type"] or info["location"]):
+                    eth = pkt.getlayer(Ether)
+                    mac = (eth.src or "").lower() if eth else ""
+                    if mac and mac != "ff" * 6:
+                        _mac_to_ip(mac, src)
+                    with _PASSIVE_LOCK:
+                        rec = _passive_shared["by_ip"].setdefault(
+                            src, {"hostname": None, "os_guess": None,
+                                  "device_type": None, "vendor": None,
+                                  "mac": None, "last_seen": 0.0})
+                        _passive_record(rec, {
+                            "os_guess": info["os_guess"],
+                            "device_type": info["device_type"],
+                            "mac": mac or None,
+                        })
+                    if info["location"]:
+                        with _SSDP_LOCK:
+                            _ssdp_pending.setdefault(src, {})["location"] = info["location"]
+                    _guard = True
+            if sport == 137 or dport == 137:
+                nb = _nbns_packet_info(bytes(udp.payload))
+                eth = pkt.getlayer(Ether)
+                mac = (eth.src or "").lower() if eth else ""
+                if nb["self_names"] or nb["ip_names"]:
+                    l3 = pkt.getlayer(IP)
+                    src = getattr(l3, "src", None) if l3 is not None else None
+                    if not src:
+                        l6 = pkt.getlayer(IPv6)
+                        src = getattr(l6, "src", None) if l6 is not None else None
+                    if src and mac and mac != "ff" * 6:
+                        _mac_to_ip(mac, src)
+                    with _PASSIVE_LOCK:
+                        for name, suffix in nb["self_names"][:3]:
+                            name = name.strip()
+                            if not name:
+                                continue
+                            rec = _passive_shared["by_ip"].setdefault(
+                                src, {"hostname": None, "os_guess": None,
+                                      "device_type": None, "vendor": None,
+                                      "mac": None, "last_seen": 0.0})
+                            _passive_record(rec, {
+                                "hostname": name or None,
+                                "device_type": _NB_SUFFIX_TYPE.get(suffix),
+                                "mac": mac or None,
+                            })
+                        for ip, names in nb["ip_names"].items():
+                            if not any(_ip_in_subnet(ip, s) for s in subnets):
+                                continue
+                            name, suffix = names[0]
+                            rec = _passive_shared["by_ip"].setdefault(
+                                ip, {"hostname": None, "os_guess": None,
+                                     "device_type": None, "vendor": None,
+                                     "mac": None, "last_seen": 0.0})
+                            _passive_record(rec, {
+                                "hostname": name.strip() or None,
+                                "device_type": _NB_SUFFIX_TYPE.get(suffix),
+                            })
+                    _guard = True
 
         if pkt.haslayer(Ether):
             eth = pkt[Ether]
@@ -1893,6 +2292,432 @@ def _mac_to_ip(mac: str, ip: str):
         _passive_shared.setdefault("_mac2ip", {})[m] = ip
 
 
+# --------------------------------------------------------------------------- #
+# Active NBNS / LLMNR name-query probing (no router access needed)
+#
+# A sniffer only hears broadcast DISCOVER / multicast traffic on its own VLAN
+# and only when targets happen to send it. Active broadcast queries close that
+# gap: a NetBIOS name query (NBNS, UDP 137) broadcast reaches every host on the
+# L2 segment - Windows machines answer with their computer name and MAC, and
+# privacy-MAC hosts still reveal their real name this way. LLMNR (UDP 5355) is
+# likewise multicast-resolved by Windows when normal DNS fails. Both are pure
+# L2 broadcasts: they need no router access, no credentials, and no admin.
+#
+# Rather than hand-assemble DB-encoded NBNS packets (fragile, easy to send a
+# malformed query), the probe reuses nmap's battle-tested `nbstat` NSE script
+# over UDP 137/139 - the same mechanism nbtstat/nmblookup use online. LLMNR
+# replies are captured passively: 5355 is added to the sniff filter below so
+# windows which resolve by multicast announce themselves to any listener.
+# Results fold through _passive_record (fill-if-blank), exactly like all other
+# evidence, so scans finalize with the recovered names and MACs automatically.
+# --------------------------------------------------------------------------- #
+_NBNS_LOCK = threading.Lock()
+_NBNS_LAST = 0.0
+_NBNS_MIN_GAP = 120.0
+
+
+def _nbns_probe(subnets: List[str]) -> dict:
+    """One active NBNS sweep: nmap `-sU -p137 --script nbstat -Pn` asks every
+    host over UDP 137 for its NetBIOS status and returns (ip, mac, name) for
+    each that answers. Windows/SMB hosts reply to the status query even when
+    the port looks filtered. Returns
+    {ip: {"hostname": str, "mac": str}}. Best-effort: nmap missing/failing gives
+    {} so this can never break a scan."""
+    out = {}
+    if not subnets or not shutil.which("nmap"):
+        return out
+    try:
+        import xml.etree.ElementTree as _ET
+        root = _ET.fromstring(subprocess.run(
+            ["nmap", "-Pn", "-sU", "-p137", "--script", "nbstat",
+             "--host-timeout", "6s", "--min-hostgroup", "256", "-oX", "-"] + subnets,
+            capture_output=True, text=True, timeout=150).stdout or "")
+    except Exception:
+        return out
+    for host_el in root.iter("host"):
+        st = host_el.find("status")
+        if st is None or st.get("state") != "up":
+            continue
+        ip = None
+        mac = None
+        hostname = None
+        for addr in host_el.findall("address"):
+            if addr.get("addrtype") == "ipv4":
+                ip = addr.get("addr")
+            elif addr.get("addrtype") == "mac":
+                mac = addr.get("addr")
+        for hostscript in host_el.iter("hostscript"):
+            for scr in hostscript.findall("script"):
+                if scr.get("id") != "nbstat":
+                    continue
+                out_txt = scr.get("output") or ""
+                m = re.search(r"NetBIOS name:\s*([^\s]+)", out_txt)
+                if m:
+                    hostname = m.group(1)
+        if ip and (hostname or mac):
+            entry = out.setdefault(ip, {"hostname": None, "mac": None})
+            entry["hostname"] = (hostname or "").strip() or None
+            entry["mac"] = (mac or "").lower() or None
+    return out
+
+
+def _nbns_observe(subnets: List[str]):
+    """Run one NBNS sweep and fold the results into the passive shared map,
+    fill-if-blank so it augments (never overwrites) probe/SNMP evidence."""
+    global _NBNS_LAST
+    with _NBNS_LOCK:
+        now = time.time()
+        if now - _NBNS_LAST < _NBNS_MIN_GAP:
+            return
+        _NBNS_LAST = now
+    results = _nbns_probe(subnets)
+    if not results:
+        return
+    with _PASSIVE_LOCK:
+        for ip, info in results.items():
+            if not any(_ip_in_subnet(ip, s) for s in subnets):
+                continue
+            mac = info.get("mac")
+            hostname = info.get("hostname")
+            if mac:
+                _mac_to_ip(mac, ip)
+            _passive_record(
+                _passive_shared["by_ip"].setdefault(
+                    ip, {"hostname": None, "os_guess": None,
+                         "device_type": None, "vendor": None,
+                         "mac": None, "last_seen": 0.0}),
+                {"hostname": hostname, "mac": mac})
+            if mac:
+                _passive_record(
+                    _passive_shared["by_mac"].setdefault(
+                        mac, {"hostname": None, "os_guess": None,
+                              "device_type": None, "vendor": None,
+                              "port_id": None, "last_seen": 0.0}),
+                    {"hostname": hostname})
+
+
+def _run_nbns_sweeper(subnets: List[str], gap: float = 30.0, stop_evt=None):
+    """Background thread: periodically run an active NBNS (NetBIOS) sweep so that
+    Windows / SMB hosts reveal their computer names + MACs even when they never
+    send unsolicited multicast. Runs until stop_evt is set (or forever)."""
+    while True:
+        if stop_evt and stop_evt.is_set():
+            return
+        try:
+            _nbns_observe(subnets)
+        except Exception:
+            pass
+        if gap > 0:
+            try:
+                time.sleep(gap)
+            except Exception:
+                return
+
+
+# --------------------------------------------------------------------------- #
+# Active SSDP (UPnP) query + SNMP sweep
+#
+# Passive SSDP only hears announcements targets happen to send. Most UPnP gear
+# (TVs, printers, media, cameras, smart-hub routers) will answer a query even
+# when it blocks every TCP port: an HTTP M-SEARCH to the 239.255.255.250:1900
+# group returns SERVER (OS) + LOCATION (→ friendly name) per sale. Same trick
+# for SNMP: nmap snmp-info on UDP 161 reveals sysName/sysDescr/sysObjectID for
+# cameras/NAS/routers whose TCP is filtered but whose SNMP agent answers.
+# Both are plain UDP (no router/admin) and fold through _passive_record, and
+# SSDP LOCATIONs are queued for the existing friendly-name fetcher.
+# --------------------------------------------------------------------------- #
+SSDP_GROUP = "239.255.255.250"
+SSDP_PORT = 1900
+
+SSDP_SEARCH_TARGETS = [
+    "ssdp:all",
+    "upnp:rootdevice",
+    "urn:schemas-upnp-org:device:MediaRenderer:1",
+    "urn:schemas-upnp-org:device:MediaServer:1",
+    "urn:schemas-upnp-org:device:InternetGatewayDevice:1",
+    "urn:schemas-upnp-org:device:Printer:1",
+]
+
+# Likely nmap snmp-info variants -> parsed recursively below; a few key OID
+# prefixes map to product vendors when sysObjectID says nothing else useful.
+_SNMP_SYSOBJECT_HINTS = {
+    "1.3.6.1.4.1.9": "Cisco",
+    "1.3.6.1.4.1.2636": "Juniper",
+    "1.3.6.1.4.1.14988": "MikroTik",
+    "1.3.6.1.4.1.8072": "Linux (net-snmp)",
+    "1.3.6.1.4.1.2021": "Linux (net-snmp)",
+    "1.3.6.1.4.1.671": "Ubiquiti",
+    "1.3.6.1.4.1.4242": "Proxmox/QEMU",
+    "1.3.6.1.4.1.318": "APC",
+    "1.3.6.1.4.1.11": "HP/HPE",
+}
+
+
+def _ssdp_build_msearch(st: str, mx: int = 1) -> bytes:
+    return ("M-SEARCH * HTTP/1.1\r\n"
+            "HOST: 239.255.255.250:1900\r\n"
+            "MAN: \"ssdp:discover\"\r\n"
+            "MX: %d\r\n"
+            "ST: %s\r\n\r\n" % (mx, st)).encode("ascii", "replace")
+
+
+def _ssdp_probe(subnets: List[str], duration: float = 6.0, interval: float = 0.4) -> dict:
+    """Actively query SSDP on the local subnet, reusing _parse_ssdp.
+
+    Sends one M-SEARCH per SSDP_SEARCH_TARGETS on each interval and folds every
+    response into the passive shared map (os_guess/device_type/mac) and queues
+    LOCATIONs for the existing friendly-name fetcher. Returns the number of
+    distinct responder IPs seen. Pure multicast UDP - works on AP-isolated or
+    TCP-filtered segments. Best-effort: any error returns 0."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", SSDP_PORT))
+        mreq = struct.pack("4s4s", socket.inet_aton(SSDP_GROUP), socket.inet_aton("0.0.0.0"))
+        s.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        s.settimeout(0.2)
+    except Exception:
+        return {}
+
+    queries = [_ssdp_build_msearch(st) for st in SSDP_SEARCH_TARGETS]
+    seen = {}
+    end = time.time() + duration
+    next_send = 0.0
+    q_i = 0
+    try:
+        while time.time() < end:
+            if time.time() >= next_send:
+                q = queries[q_i % len(queries)]
+                q_i += 1
+                try:
+                    s.sendto(q, (SSDP_GROUP, SSDP_PORT))
+                except Exception:
+                    pass
+                next_send = time.time() + interval
+            try:
+                data, addr = s.recvfrom(8192)
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            info = _parse_ssdp(data)
+            src = addr[0]
+            if not any(_ip_in_subnet(src, s2) for s2 in subnets):
+                continue
+            existing = seen.get(src)
+            if existing is None:
+                existing = seen[src] = {"os_guess": None, "device_type": None,
+                                        "location": None}
+            existing["os_guess"] = existing["os_guess"] or info["os_guess"]
+            existing["device_type"] = existing["device_type"] or info["device_type"]
+            existing["location"] = existing["location"] or info["location"]
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+    with _PASSIVE_LOCK:
+        for src, info in seen.items():
+            _passive_record(
+                _passive_shared["by_ip"].setdefault(
+                    src, {"hostname": None, "os_guess": None,
+                          "device_type": None, "vendor": None,
+                          "mac": None, "last_seen": 0.0}),
+                {"os_guess": info["os_guess"], "device_type": info["device_type"]})
+            if info["location"]:
+                with _SSDP_LOCK:
+                    _ssdp_pending.setdefault(src, {})["location"] = info["location"]
+    return seen
+
+
+def _run_ssdp_sweeper(subnets: List[str], duration: float = 6.0, gap: float = 120.0,
+                      stop_evt=None):
+    """Background thread: periodically M-SEARCH the SSDP group so UPnP devices
+    that only respond to queries get named. Runs until stop_evt is set."""
+    while True:
+        if stop_evt and stop_evt.is_set():
+            return
+        try:
+            _ssdp_probe(subnets, duration=duration)
+            _ssdp_fetch_pending(subnets)
+        except Exception:
+            pass
+        if gap > 0:
+            try:
+                time.sleep(gap)
+            except Exception:
+                return
+
+
+def _snmp_sweep(subnets: List[str]) -> dict:
+    """Ask every host in scope over UDP 161 for its SNMP identity via nmap's
+    snmp-info script; returns {ip: {"hostname","os_guess","vendor"}}. Many
+    cameras/NAS/routers answer SNMP with default 'public' even when their TCP
+    ports are filtered. Best-effort: nmap missing/failing gives {}."""
+    out = {}
+    if not subnets or not shutil.which("nmap"):
+        return out
+    try:
+        import xml.etree.ElementTree as _ET
+        root = _ET.fromstring(subprocess.run(
+            ["nmap", "-Pn", "-sU", "-p161", "--script", "snmp-info",
+             "--host-timeout", "6s", "--min-hostgroup", "256", "-oX", "-"] + subnets,
+            capture_output=True, text=True, timeout=180).stdout or "")
+    except Exception:
+        return out
+    for host_el in root.iter("host"):
+        st = host_el.find("status")
+        if st is None or st.get("state") != "up":
+            continue
+        ip = None
+        for addr in host_el.findall("address"):
+            if addr.get("addrtype") == "ipv4":
+                ip = addr.get("addr")
+                break
+        if not ip:
+            continue
+        fields = {}
+        for hostscript in host_el.iter("hostscript"):
+            for scr in hostscript.findall("script"):
+                if scr.get("id") != "snmp-info":
+                    continue
+                text = scr.get("output") or ""
+                for m in re.finditer(r"(?m)^\s*\|?\s*(sysName|sysDescr|sysObjectID|sysLocation|sysContact):\s*(.*)$", text):
+                    fields[m.group(1)] = m.group(2).strip()
+        if not fields:
+            continue
+        entry = {"hostname": None, "os_guess": None, "vendor": None}
+        sys_name = fields.get("sysName") or fields.get("sysName.")
+        if sys_name:
+            entry["hostname"] = " ".join(sys_name.split())[:255]
+        descr = fields.get("sysDescr") or ""
+        if descr:
+            entry["os_guess"] = " ".join(descr.split())[:200]
+        sys_obj = fields.get("sysObjectID") or ""
+        vendor = None
+        for oid_prefix, name in _SNMP_SYSOBJECT_HINTS.items():
+            if sys_obj.replace(".0", "", 1).startswith(oid_prefix):
+                vendor = name
+                break
+        if not vendor:
+            vendor = _sniff_vendor(descr)
+        entry["vendor"] = vendor
+        out[ip] = {k: v for k, v in entry.items() if v}
+    return out
+
+
+def _run_snmp_sweeper(subnets: List[str], gap: float = 300.0, stop_evt=None):
+    """Background thread: periodically sweep UDP 161 so SNMP-capable devices
+    reveal their identity even when their TCP stack is fully filtered."""
+    while True:
+        if stop_evt and stop_evt.is_set():
+            return
+        try:
+            results = _snmp_sweep(subnets)
+            with _PASSIVE_LOCK:
+                for ip, info in results.items():
+                    _passive_record(
+                        _passive_shared["by_ip"].setdefault(
+                            ip, {"hostname": None, "os_guess": None,
+                                  "device_type": None, "vendor": None,
+                                  "mac": None, "last_seen": 0.0}),
+                        {"hostname": info.get("hostname"),
+                         "os_guess": info.get("os_guess"),
+                         "vendor": info.get("vendor")})
+        except Exception:
+            pass
+        if gap > 0:
+            try:
+                time.sleep(gap)
+            except Exception:
+                return
+
+
+# --------------------------------------------------------------------------- #
+# Continuous ARP liveness sweeper ("the switch's ARP table", kept fresh)
+#
+# Enterprise discovery reads the switch/router ARP + FDB tables because a host
+# that answered ARP *is* attached to the LAN - more authoritative than a scan
+# that happens to run while the radio is asleep. We can't walk the real switch
+# tables (no SNMP access), but active ARP pings over L2 carry the same signal
+# and need no router/creds. This background thread re-runs `nmap -sn -PR` over
+# the subnets every few minutes and caches "IP answered ARP at time T" with its
+# MAC/vendor. Scan discovery then treats any cache entry < ARP_CACHE_TTL old as
+# definitively up - rescuing power-save radios that the scan-time -sn missed.
+# --------------------------------------------------------------------------- #
+_ARP_LOCK = threading.Lock()
+_arp_alive = {}  # ip -> {"mac": str|None, "vendor": str|None, "last_seen": float}
+ARP_CACHE_TTL = 900.0        # a host that answered ARP this recently is up
+_ARP_SWEEP_GAP = 120.0
+
+
+def _arp_sweep(subnets: List[str]) -> dict:
+    """Run one ARP self-scan of the subnets; returns
+    {ip: {"mac": str|None, "vendor": str|None}} for every host that answered."""
+    out = {}
+    if not subnets or not shutil.which("nmap"):
+        return out
+    for t in subnets:
+        try:
+            xml = run_nmap(["nmap", "-sn", "-PR", "-oX", "-",
+                            "--host-timeout", "10s", "--min-hostgroup", "256", t])
+        except Exception:
+            continue
+        for h in parse_discovery(xml):
+            if h.get("state") == "up" and h.get("ip"):
+                out[h["ip"]] = {"mac": h.get("mac"), "vendor": h.get("vendor")}
+    return out
+
+
+def _arp_observe(subnets: List[str]):
+    """Run one ARP sweep and fold it into the shared cache, pruning entries that
+    have gone silent far beyond the TTL so the cache can't pin a dead address
+    forever. Runs under the sweeper thread - never blocks the scan hot path."""
+    results = _arp_sweep(subnets)
+    now = time.time()
+    with _ARP_LOCK:
+        for ip, meta in results.items():
+            old = _arp_alive.get(ip)
+            _arp_alive[ip] = {
+                "mac": meta.get("mac") or (old or {}).get("mac"),
+                "vendor": meta.get("vendor") or (old or {}).get("vendor"),
+                "last_seen": now,
+            }
+        for ip in [ip for ip, e in _arp_alive.items()
+                   if now - e["last_seen"] > ARP_CACHE_TTL * 3]:
+            _arp_alive.pop(ip, None)
+
+
+def _arp_snapshot(ttl: float = ARP_CACHE_TTL) -> dict:
+    """Copy the fresh ARP cache: {ip: {"mac","vendor"}} for entries seen within
+    `ttl` seconds - the caller's authoritative 'up right now' signal."""
+    now = time.time()
+    with _ARP_LOCK:
+        return {ip: {"mac": e.get("mac"), "vendor": e.get("vendor")}
+                for ip, e in _arp_alive.items()
+                if now - e["last_seen"] <= ttl}
+
+
+def _run_arp_sweeper(subnets: List[str], gap: float = _ARP_SWEEP_GAP,
+                     stop_evt=None):
+    """Background thread: keep the ARP liveness cache fresh continuously, so a
+    host that answered ARP at any point stays discoverable even if a scan runs
+    while it sleeps. Cheap (`nmap -sn -PR` on a /24 is seconds)."""
+    while True:
+        if stop_evt and stop_evt.is_set():
+            return
+        try:
+            _arp_observe(subnets)
+        except Exception:
+            pass
+        if gap > 0:
+            try:
+                time.sleep(gap)
+            except Exception:
+                return
+
+
 def _passive_observe(duration: float, subnets: List[str], iface: Optional[str]):
     """Sniff one window of DHCP/ARP/CDP/LLDP traffic and fold results into the
     shared map. Best-effort: any platform/permission error just disables it."""
@@ -1907,7 +2732,7 @@ def _passive_observe(duration: float, subnets: List[str], iface: Optional[str]):
         return
 
     filters = [
-        "arp or (udp and (port 67 or port 68 or port 547)) or (ether proto 0x88cc) or (ether dst 01:00:0c:cc:cc:cc)",
+        "arp or (udp and (port 67 or port 68 or port 547 or port 137 or port 138 or port 1900 or port 5353 or port 5355)) or (ether proto 0x88cc) or (ether dst 01:00:0c:cc:cc:cc)",
         "arp or udp or ether proto 0x88cc",
         None,
     ]
@@ -1917,6 +2742,9 @@ def _passive_observe(duration: float, subnets: List[str], iface: Optional[str]):
             sniff(iface=iface, filter=filt, prn=lambda p: _passive_packet(p, subnets),
                   store=0, timeout=max(1, int(duration)))
             _passive_sniffer_ok = True
+            # Best-effort SSDP LOCATION -> friendly-name fetches queued during
+            # the window. Runs after sniff() returns so it never stalls it.
+            _ssdp_fetch_pending(subnets)
             return
         except Exception as e:
             last_err = e
@@ -2037,6 +2865,54 @@ def main():
         sweeper.start()
     except Exception as e:
         print(f"[agent] mDNS sweeper failed to start (continuing): {e}")
+
+    # Active NBNS/NetBIOS name sweeper (optional): periodically broadcasts a
+    # NetBIOS name query so Windows hosts reveal their computer name + MAC even
+    # when they never send unsolicited multicast. No router/creds required -
+    # pure L2 broadcast like the mDNS sweeper; degrades silently if nmap is
+    # missing or NBNS is filtered.
+    try:
+        nsweeper = _th.Thread(target=_run_nbns_sweeper, kwargs={
+            "subnets": subnets, "gap": 30.0,
+        }, daemon=True)
+        nsweeper.start()
+    except Exception as e:
+        print(f"[agent] NBNS name sweeper failed to start (continuing): {e}")
+
+    # Active SSDP M-SEARCH sweeper (optional): periodically queries the UPnP
+    # multicast group so TVs/printers/cameras/IoT reveal SERVER + LOCATION even
+    # when they block TCP and never send announcements. Pure multicast UDP, no
+    # router/creds; degrades silently if the socket can't be opened.
+    try:
+        ssner = _th.Thread(target=_run_ssdp_sweeper, kwargs={
+            "subnets": subnets, "duration": 6.0, "gap": 120.0,
+        }, daemon=True)
+        ssner.start()
+    except Exception as e:
+        print(f"[agent] SSDP M-SEARCH sweeper failed to start (continuing): {e}")
+
+    # Active SNMP sweeper (optional): sweeps UDP 161 every few minutes so
+    # cameras/NAS/routers with filtered TCP still volunteer sysName/sysDescr.
+    try:
+        snsweeper = _th.Thread(target=_run_snmp_sweeper, kwargs={
+            "subnets": subnets, "gap": 300.0,
+        }, daemon=True)
+        snsweeper.start()
+    except Exception as e:
+        print(f"[agent] SNMP sweeper failed to start (continuing): {e}")
+
+    # Continuous ARP liveness sweeper: re-queries the subnet via ARP every
+    # two minutes and caches which IPs answered. The cache feeds scan-time
+    # discovery so power-save devices that missed the scan's one-shot -sn
+    # still count as live — the closest analogue to reading a managed switch
+    # ARP table without SNMP access.
+    try:
+        arper = _th.Thread(target=_run_arp_sweeper, kwargs={
+            "subnets": subnets, "gap": _ARP_SWEEP_GAP,
+        }, daemon=True)
+        arper.start()
+    except Exception as e:
+        print(f"[agent] ARP liveness sweeper failed to start (continuing): {e}")
 
     # Passive Scapy fingerprinter (optional): DHCP/ARP/CDP/LLDP evidence on a
     # daemon thread, exactly like the mDNS sweeper. Requires `pip install scapy`

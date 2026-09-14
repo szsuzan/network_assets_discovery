@@ -254,6 +254,10 @@ async def agent_log(
         raise HTTPException(status_code=404, detail="Task not found")
     line = data.line
     if data.level == "cmd":
+        # Agent lines already include a leading "$ " for command lines; strip it
+        # before adding the agent prefix to avoid the doubled "$ $ nmap" pattern.
+        if line.startswith("$ "):
+            line = line[2:]
         line = f"[{agent.name}] $ {line}"
     from ..services.scan_worker import append_console_log
     append_console_log(task.scan_id, line, data.level)
@@ -295,7 +299,7 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
                         Port.port == 161,
                         Port.protocol == "udp",
                     )).scalar_one_or_none()
-                    if probed or host.device_type in ("unknown", "network_gear", "router"):
+                    if probed or host.device_type in ("unknown", "network_gear", "router", "firewall", "wireless_access_point", "switch"):
                         probes.append((str(host.id), ip))
                 host_by_id = {str(h.id): h for h in scan.hosts}
                 snmp_community = settings_svc.get("nmap.snmp_community", "public")
@@ -354,7 +358,11 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
                     up_hosts = [h for h in scan.hosts if h.status == "up"]
                     if up_hosts:
                         from ..services.scan_worker import fingerprint_open_ports
-                        fingerprint_open_ports(sdb, scan, up_hosts)
+                        # probe=False: the agent already ran full -sV/-O service
+                        # fingerprinting, so this is a packed NSE-evidence pass
+                        # over known-open ports -- avoid duplicating the probe
+                        # work and stalling finalisation for minutes.
+                        fingerprint_open_ports(sdb, scan, up_hosts, probe=False)
                 sdb.commit()
                 run_risk_rules(sdb, scan)
                 capture_topology(sdb, scan)
@@ -379,6 +387,7 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
             "type": "scan_completed" if completed else "scan_failed",
             "scan_id": scan_id, "error": error or None,
             "progress_pct": 100 if completed else scan.progress_pct,
+            "hosts_discovered": scan.hosts_discovered if completed else None,
         })
         manager.broadcast_sync(scan_id, {
             "type": "cmd_log", "scan_id": scan_id, "level": "info",
@@ -467,7 +476,7 @@ async def agent_result(
             host.hostname = hd.hostname
         if hd.device_type:
             # Prefer an existing specific type over a generic hint arriving later
-            # (keeps e.g. "laptop" after an alias posts with device_type "unknown").
+            # (keeps e.g. "mobile" after an alias posts with device_type "unknown").
             if not host.device_type or host.device_type == "unknown":
                 host.device_type = hd.device_type
         if hd.os_guess:

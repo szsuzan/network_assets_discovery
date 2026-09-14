@@ -179,7 +179,7 @@ _CACHE_TTL = 8.0
 
 def _load_cache():
     try:
-        from ..database import SessionLocal
+        from .db import SessionLocal
         s = SessionLocal()
         try:
             rows = s.execute(select(SystemSetting)).scalars().all()

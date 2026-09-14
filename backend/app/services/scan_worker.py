@@ -2,6 +2,7 @@ import ipaddress
 import json
 import re
 import shlex
+import shutil
 import socket
 import subprocess
 import threading
@@ -27,6 +28,14 @@ SCAN_OUTPUT_DIR = Path(__file__).resolve().parents[2] / "scan_output"
 
 
 _console_log_lock = threading.Lock()
+
+
+# Throttle live scan_progress broadcasts per scan: only emit when the value
+# actually changes. Without this, every completed host during the fingerprint
+# phase re-broadcasts the same pct (e.g. 90% x N), flooding the LiveScan feed
+# with identical "Progress 90%" rows even though persistence is already deduped.
+_last_progress_broadcast: dict[str, int] = {}
+_last_progress_lock = threading.Lock()
 
 
 def _console_log_file(scan_id) -> Path:
@@ -718,6 +727,54 @@ def _probe_alive(candidates: list, timeout: float = None, max_workers: int = 64)
     return alive
 
 
+def _probe_udp_alive(candidates: list) -> set:
+    """Supplement the TCP connect probe with a UDP-only nmap -sn sweep.
+
+    The connect probe only catches hosts that complete a TCP handshake on a
+    PROBE_PORT. Devices that block all of those ports - firewalled phones in
+    AP-isolation, sleeping IoT, printers that only answer SNMP - are invisible
+    to it. nmap -sn -PU (UDP 137/161/1900/5353) marks a host up when it answers
+    a UDP packet, mirroring Fing-style multi-signal liveness.
+
+    UDP is the ONLY safe probe here: ICMP echo / TCP SYN / TCP ACK get
+    proxied by LAN routers (they RST or echo for every address, so the whole
+    scope reports up), whereas a UDP response can only come from a real device.
+    Verified on a redirected/proxying gateway: -PE/-PA/-PS inflated 254/254
+    "up", -PU alone returned just the real devices. Best-effort: nmap failing
+    or missing just returns nothing extra."""
+    if not candidates:
+        return set()
+    try:
+        import xml.etree.ElementTree as _ET
+    except Exception:
+        return set()
+    if not shutil.which("nmap"):
+        return set()
+    alive = set()
+    base = ["nmap", "-sn", "-PU137,161,1900,5353",
+            "--host-timeout", "5s", "--min-hostgroup", "256", "-oX", "-"]
+    # Chunk so a huge scope never blows up the argv / nmap group limits.
+    for i in range(0, len(candidates), 1024):
+        group = candidates[i:i + 1024]
+        try:
+            proc = subprocess.run(base + group, capture_output=True, text=True, timeout=120)
+        except Exception:
+            continue
+        try:
+            root = _ET.fromstring(proc.stdout or "")
+            for host_el in root.iter("host"):
+                st = host_el.find("status")
+                if st is None or st.get("state") != "up":
+                    continue
+                for addr in host_el.findall("address"):
+                    if addr.get("addrtype") == "ipv4":
+                        alive.add(addr.get("addr"))
+                        break
+        except Exception:
+            continue
+    return alive
+
+
 def discover_hosts(db, scan: Scan) -> list:
     hosts = []
 
@@ -736,6 +793,12 @@ def discover_hosts(db, scan: Scan) -> list:
     #    still registered as a scope host so the inventory reflects the target.
     _emit_log(scan, f"  probing {len(candidate_ips)} candidate(s) with TCP for liveness", level="info")
     alive_ips = _probe_alive(candidate_ips) if candidate_ips else set()
+    extra_alive = _probe_udp_alive(candidate_ips) if candidate_ips else set()
+    new_from_udp = extra_alive - alive_ips
+    if new_from_udp:
+        _emit_log(scan, f"  {len(new_from_udp)} host(s) answered UDP probes only (SNMP/mDNS/NBNS/SSDP, TCP probe ports filtered) "
+                        f"- treating as live: {', '.join(sorted(new_from_udp))}", level="info")
+    alive_ips |= extra_alive
 
     seen_ips = set()
     def _register(ip: str, mac: str = None, vendor: str = None,
@@ -919,16 +982,18 @@ def _delegate_to_agent(db, scan: Scan) -> bool:
 
 
 def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
-                            max_concurrency: int = None):
+                            max_concurrency: int = None, probe: bool = True):
     """Run Phase 2/3 nmap per host, concurrently, streaming live results.
 
     Returns (results, os_map) where results maps host_id -> [open_ports] and
     os_map maps host_id -> (os_guess, accuracy) from the fingerprint phase.
     `phase` is "ports" or "fingerprint" to control the flags.
 
-    Threads never touch the shared DB session: for fingerprinting, the open-port
-    target list is resolved on the main thread and passed in; the resulting
-    enrichment is applied by the caller after all threads complete.
+    `probe=False` runs a packed NSE-only pass (`-sT --script`, no -sV/-O):
+    used after a scanner agent already performed full service/version/OS
+    fingerprinting, so the container does not duplicate that work and stall
+    finalisation. Threads never touch the shared DB session; enrichment is
+    applied by the caller after all threads complete.
     """
     if max_concurrency is None:
         max_concurrency = settings_svc.get_int("execution.phase2_concurrency", 10)
@@ -973,11 +1038,21 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
                 # (broadcast-dhcp-discover etc.) that eat the whole host budget
                 # before ports/service/-O results are flushed, so scripts are
                 # chosen per-port from the safe set (-sC plus service-aware ids).
-                scan_mode = "-sT -sV -O"
-                extra = (f"--version-intensity 7 --script {script_set} "
-                         f"--host-timeout {fp_host_timeout}s")
+                if probe:
+                    scan_mode = "-sT -sV -O"
+                    extra = (f"--version-intensity 7 --script {script_set} "
+                             f"--host-timeout {fp_host_timeout}s")
+                else:
+                    # Agent already deep fingerprinted service/version/OS on
+                    # these ports. Rerunning -sV -O here would duplicate all of
+                    # that work and stall finalisation for minutes, so this pass
+                    # is a packed NSE-evidence run only, bounded to a tighter
+                    # cap so one slow host cannot delay the report.
+                    scan_mode = "-sT"
+                    nse_tmo = min(int(fp_host_timeout or 300), 240)
+                    extra = (f"--script {script_set} --host-timeout {nse_tmo}s")
             args = f"{scan_mode} {profile_timing} {extra} -p {port_list} {ip}"
-            timeout = fp_host_timeout + 60
+            timeout = fp_host_timeout + 60 if probe else min(int(fp_host_timeout or 300), 240) + 30
         # --stats-every gives live progress ticks from the host
         stats = "" if profile_timing == "" else "--stats-every 5s"
         work[h.id] = (h, f"{args} {stats}".strip(), timeout)
@@ -1035,12 +1110,17 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
                 "os_guess": os_guess,
                 "phase": phase
             })
-            manager.broadcast_sync(str(scan.id), {
-                "type": "scan_progress",
-                "scan_id": str(scan.id),
-                "progress_pct": scan.progress_pct,
-                "hosts_discovered": scan.hosts_discovered
-            })
+            with _last_progress_lock:
+                last_pct = _last_progress_broadcast.get(str(scan.id))
+            if last_pct != scan.progress_pct:
+                manager.broadcast_sync(str(scan.id), {
+                    "type": "scan_progress",
+                    "scan_id": str(scan.id),
+                    "progress_pct": scan.progress_pct,
+                    "hosts_discovered": scan.hosts_discovered
+                })
+                with _last_progress_lock:
+                    _last_progress_broadcast[str(scan.id)] = scan.progress_pct
     return results, os_map, script_os_map
 
 
@@ -1056,6 +1136,8 @@ def port_scan_hosts(db, scan: Scan, hosts: list):
     if not confirmed:
         _emit_log(scan, "  no up hosts to port-scan -- skipping", level="info")
         return
+
+    _emit_log(scan, f"--- Phase 2/3: Port scan (connect, no fingerprint) over {len(confirmed)} host(s) ---")
 
     result_by_id, _os, _sos = _scan_port_foreach_host(db, scan, hosts, "ports")
 
@@ -1076,14 +1158,20 @@ def port_scan_hosts(db, scan: Scan, hosts: list):
     db.commit()
 
 
-def fingerprint_open_ports(db, scan: Scan, hosts: list):
+def fingerprint_open_ports(db, scan: Scan, hosts: list, probe: bool = True):
     """Deep -sV -sC -O fingerprinting ONLY on ports already found open.
 
     Constrains the heavy service scan to (<ip>,<port>) pairs that are actually
     open, so it finishes fast instead of sweeping every host's full range with
     version detection. Runs concurrently per host with live result streaming.
+
+    `probe=False` (used when a scanner agent already fingerprinted service/
+    version/OS): runs a packed NSE-evidence pass over known-open ports and never
+    overwrites richer existing port data with empty probe results.
     """
-    result_by_id, os_map, script_os_map = _scan_port_foreach_host(db, scan, hosts, "fingerprint")
+    mode = "packed NSE pass" if not probe else "service fingerprinting + NSE"
+    _emit_log(scan, f"--- Phase 3/3: {mode} over {len(hosts)} host(s) ---")
+    result_by_id, os_map, script_os_map = _scan_port_foreach_host(db, scan, hosts, "fingerprint", probe=probe)
 
     for host in hosts:
         if host.status != "up":
@@ -1107,10 +1195,16 @@ def fingerprint_open_ports(db, scan: Scan, hosts: list):
         for p in open_ports:
             if p.port in enriched_map:
                 info = enriched_map[p.port]
-                p.service = info.get("service")
-                p.version = info.get("version")
-                p.banner = info.get("banner")
-                p.cpes = info.get("cpes") or p.cpes or []
+                # Never clobber richer existing data with empty probe results
+                # (e.g. a bare -sT NSE pass has no service/version).
+                if info.get("service"):
+                    p.service = info["service"]
+                if info.get("version"):
+                    p.version = info["version"]
+                if info.get("banner"):
+                    p.banner = info["banner"]
+                if info.get("cpes"):
+                    p.cpes = info["cpes"]
     db.commit()
 
 
@@ -1342,7 +1436,7 @@ def fingerprint_hosts(db, scan: Scan, hosts: list):
             Port.host_id == host.id, Port.port == 161, Port.protocol == "udp"
         )).scalar_one_or_none()
 
-        if probed or host.device_type in ("unknown", "network_gear", "router"):
+        if probed or host.device_type in ("unknown", "network_gear", "router", "firewall", "wireless_access_point", "switch"):
             snmp_info = scanners.snmp_walk(
                 ip,
                 settings_svc.get("nmap.snmp_community", "public"),
@@ -1497,9 +1591,9 @@ def classify_device_type(host: Host):
                       "nas", "ipcam")
     if _any(phone_names, name_text) and not _any(nonphone_names, name_text):
         if _any(tablet_names, name_text):
-            host.device_type = "tablet"
+            host.device_type = "mobile"
         else:
-            host.device_type = "smartphone"
+            host.device_type = "mobile"
         return
 
     # --- Apple computers by their own published name -------------------------
@@ -1511,9 +1605,16 @@ def classify_device_type(host: Host):
     mac_desktop_names = ("imac", "mac mini", "mac pro", "mac studio",
                          "mac-mini", "mac-pro", "mac-studio")
     if _any(mac_laptop_names, name_text):
-        host.device_type = "laptop"
+        host.device_type = "workstation"
         return
     if _any(mac_desktop_names, name_text):
+        host.device_type = "workstation"
+        return
+    # Windows PCs randomise their MAC but still advertise their machine name
+    # (DESKTOP-XXXX from mDNS/NBNS, LAPTOP-XXX, WIN-XX). Servers use SRV-/DC-
+    # instead and are not caught here.
+    win_desktop_names = ("desktop-", "laptop-", "win-", "windows-")
+    if _any(win_desktop_names, name_text) and not _any(nonphone_names, name_text):
         host.device_type = "workstation"
         return
 
@@ -1537,10 +1638,19 @@ def classify_device_type(host: Host):
                                            "android tv", "openwrt", "dd-wrt", "tomato",
                                            "routeros", "fritz!", "vxworks", "chromeos",
                                            "macos", "mac os", "darwin", "osx")):
-        host.device_type = "smartphone"
+        host.device_type = "mobile"
         return
     if _hint == "server" and not ({445, 139} & ports):
-        host.device_type = "physical_server"
+        host.device_type = "server"
+        return
+    if _hint == "workstation" and not ({9100, 631, 515, 554, 8554, 37777,
+                                         34567, 3702, 8899, 5060} & ports):
+        host.device_type = "workstation"
+        return
+    if _hint == "iot" \
+       and not ({445, 139, 3389} & ports) \
+       and not any(x in os_guess for x in ("windows", "mac os", "macos", "darwin")):
+        host.device_type = "iot"
         return
 
     # Nominal gateway addresses (first/last of the subnet). Most routers/ONTs
@@ -1565,16 +1675,20 @@ def classify_device_type(host: Host):
                                  "sonicwall", "sophos", "checkpoint", "pfsense",
                                  "opnsense", "watchguard", "barracuda", "cyberoam")) \
        or any(kw in name_text for kw in ("firewall", "fw-", "sandgate")):
-        host.device_type = "firewall"
+        host.device_type = "router"
         return
 
     # --- wireless access points / range extenders ----------------------------
+    # "ap-" alone is NOT a signal -- "lap-01", "chap-", "clap-" all contain it
+    # as a non-word substring inside a laptop/other name. Match a real "ap-"
+    # only at a word boundary (start/spaces/dashes/dots/underscores → "ap-...").
+    ap_name = bool(re.search(r"(?:^|[\s\-._])ap-", name_text))
     if any(v in vendor for v in ("ruckus", "aerohive", "cambium", "radwin", "mimosa",
                                  "engenius", "airties", "hnc")) \
-       or any(kw in name_text for kw in ("access point", "ap-", "uap-", "wireless",
-                                         "wifi", "hotspot", "repeater", "extender",
-                                         "mesh-")):
-        host.device_type = "wireless_access_point"
+       or any(kw in name_text for kw in ("access point", "wireless", "wifi",
+                                         "hotspot", "repeater", "extender", "mesh-")) \
+       or ap_name or "uap-" in name_text:
+        host.device_type = "router"
         return
 
     # --- switches ------------------------------------------------------------
@@ -1645,7 +1759,7 @@ def classify_device_type(host: Host):
                                     "citrix", "realmode", "virtualbox")) \
        or any(x in os_guess for x in ("vmware", "hyper-v", "xen", "proxmox", " kvm",
                                       "qemu", "virtual machine", "virtualbox")):
-        host.device_type = "virtual_machine"
+        host.device_type = "server"
         return
 
     # --- VoIP phones / handsets ----------------------------------------------
@@ -1663,7 +1777,7 @@ def classify_device_type(host: Host):
                                       "google mini", "nest audio", "jbl", "harman kardon",
                                       "i home")) \
        or any(v in vendor for v in ("sonos", "alexa", "harman kardon")):
-        host.device_type = "smart_speaker"
+        host.device_type = "iot"
         return
 
 # --- smart TVs / streaming sticks ----------------------------------------
@@ -1680,7 +1794,7 @@ def classify_device_type(host: Host):
                                                             "hisense", "tcl", "vizio",
                                                             "panasonic", "sharp")))) \
        and not any(x in os_guess for x in ("windows", "mac os", "macos", "darwin")):
-        host.device_type = "smart_tv"
+        host.device_type = "iot"
         return
 
     # --- conference / media systems ------------------------------------------
@@ -1689,7 +1803,7 @@ def classify_device_type(host: Host):
                                       "neat", "teams room", "zoom room")) \
        or any(v in vendor for v in ("logitech", "neat", "birddog", "yasnoy",
                                     "cisco telepresence")):
-        host.device_type = "conference"
+        host.device_type = "iot"
         return
 
     # --- Apple devices -------------------------------------------------------
@@ -1697,68 +1811,72 @@ def classify_device_type(host: Host):
     # name/OS makes a phone or tablet obvious.
     if "apple" in vendor:
         if "ipad" in hostname or "ipod" in hostname:
-            host.device_type = "tablet"
+            host.device_type = "mobile"
         elif "iphone" in hostname:
-            host.device_type = "smartphone"
+            host.device_type = "mobile"
         elif "apple tv" in hostname or "tvos" in os_guess:
-            host.device_type = "smart_tv"
+            host.device_type = "iot"
         elif "macbook" in hostname:
-            host.device_type = "laptop"
+            host.device_type = "workstation"
         elif any(kw in hostname for kw in ("imac", "mac mini", "mac pro", "mac studio",
                                            "mac-mini", "mac-pro", "mac-studio")):
             host.device_type = "workstation"
         elif any(x in os_guess for x in ("mac os", "darwin", "osx", "macos")):
-            host.device_type = "laptop"  # Apple desktops/laptops both show Darwin
+            host.device_type = "workstation"  # Apple desktops/laptops both show Darwin
         else:
-            host.device_type = "smartphone"  # no clue: phones dominate Apple unknowns
+            host.device_type = "mobile"  # no clue: phones dominate Apple unknowns
         return
 
     # --- router-ish devices from the OS fingerprint -------------------------
     # -O nicknames whole products ("3Com OfficeConnect 3CRWER100-75 wireless
     # broadband router"); nothing later would catch those, so type them here.
-    if any(x in os_guess for x in ("wireless bro", "router", "officeconnect",
-                                   "access point", "gateway")) \
-       or any(x in os_guess for x in ("cable modem", "wifi", "wi-fi")):
-        host.device_type = "wireless_access_point"
+    # EXCEPT: a locally-administered (privacy/randomised) MAC with no open
+    # ports and no other corroboration is far more likely a privacy-MAC'd
+    # phone/laptop whose TCP stack nmap -O joyfully mislabels as an old router.
+    if (any(x in os_guess for x in ("wireless bro", "router", "officeconnect",
+                                    "access point", "gateway")) \
+         or any(x in os_guess for x in ("cable modem", "wifi", "wi-fi"))) \
+       and not (ports == set() and not vendor and mac and (int(mac[:2], 16) & 0x02)):
+        host.device_type = "router"
         return
 
     # --- phones / tablets / TV sticks purely from the OS fingerprint ---------
     # Privacy-randomised MACs erase the vendor and the hostname may never
     # surface, but the -O stack fingerprint still says iOS/Android/tvOS. Type
-    # those instead of falling through to "physical_server". Android TV and
+    # those instead of falling through to "server". Android TV and
     # Apple TV are typed smart_tv; ambiguous "iOS or tvOS" guesses go phone.
     if hostname and ("macbook" in hostname or "mac book" in hostname
                      or " mac air" in hostname or " mac mini" in hostname
                      or " mac pro" in hostname):
-        host.device_type = "laptop"  # mDNS name beats the "iOS" OS mislabel
+        host.device_type = "workstation"  # mDNS name beats the "iOS" OS mislabel
         return
     if hostname and ("iphone" in hostname or "ipod" in hostname):
-        host.device_type = "smartphone"
+        host.device_type = "mobile"
         return
     if hostname and "ipad" in hostname:
-        host.device_type = "tablet"
+        host.device_type = "mobile"
         return
     if "ipad" in os_guess or "ipados" in os_guess:
-        host.device_type = "tablet"
+        host.device_type = "mobile"
         return
     if "iphone" in os_guess or ("ios" in os_guess and "mac" not in os_guess) \
        or os_guess.startswith("ios"):
-        host.device_type = "smartphone"
+        host.device_type = "mobile"
         return
     if "tvos" in os_guess or "apple tv" in os_guess:
-        host.device_type = "smart_tv"
+        host.device_type = "iot"
         return
     if "android" in os_guess:
         if "android tv" in os_guess or "androidtv" in os_guess:
-            host.device_type = "smart_tv"
+            host.device_type = "iot"
         else:
-            host.device_type = "smartphone"
+            host.device_type = "mobile"
         return
 
     # --- Chromebooks are laptops, not phones ----------------------------------
     if any(x in os_guess for x in ("chromeos", "chromium os", "chrome os")) \
        or "chromebook" in hostname:
-        host.device_type = "laptop"
+        host.device_type = "workstation"
         return
 
     # --- macOS/darwin behind privacy-randomised MACs -------------------------
@@ -1767,13 +1885,13 @@ def classify_device_type(host: Host):
     # (49152/62078) are laptops, never "servers".
     if any(x in os_guess for x in ("mac os", "macos", "darwin", "osx")):
         if "ipad" in os_guess:
-            host.device_type = "tablet"
+            host.device_type = "mobile"
         elif "iphone" in os_guess or ("ios" in os_guess and "mac" not in os_guess):
-            host.device_type = "smartphone"
+            host.device_type = "mobile"
         elif len(ports & admin_ports) >= 2:
-            host.device_type = "physical_server"  # genuine Mac server behind admin ports
+            host.device_type = "server"  # genuine Mac server behind admin ports
         else:
-            host.device_type = "laptop"
+            host.device_type = "workstation"
         return
 
     # --- other phones / tablets by MAC-vendor OUI ---------------------------
@@ -1790,9 +1908,9 @@ def classify_device_type(host: Host):
        and not any(x in os_guess for x in _os_phone_contradict):
         if "tab" in hostname or hostname.startswith("sm-t") or "galaxy tab" in hostname \
            or "kindle" in hostname or "ipad" in hostname:
-            host.device_type = "tablet"
+            host.device_type = "mobile"
         else:
-            host.device_type = "smartphone"
+            host.device_type = "mobile"
         return
 
     # --- laptops / desktops by obvious hostname -------------------------------
@@ -1800,8 +1918,8 @@ def classify_device_type(host: Host):
                                      "thinkbook", "latitude", "xps", "elitebook",
                                      "probook", "vivobook", "aspire", "inspiron",
                                      "satellite", "macbook", "ideapad", "nb-",
-                                     "surface pro", "surface laptop")):
-        host.device_type = "laptop"
+                                     "lap-", "surface pro", "surface laptop")):
+        host.device_type = "workstation"
         return
     if any(kw in hostname for kw in ("desktop", "tower", "optiplex", "precision", "sff",
                                      "mini pc", "all-in-one", "gaming pc")):
@@ -1817,23 +1935,40 @@ def classify_device_type(host: Host):
         host.device_type = "iot"
         return
 
-    # --- server-ish hosts: OS plus a couple of admin ports -------------------
-    if len(ports & admin_ports) >= 2 or bool({445, 139} & ports) or bool(ports & {3306, 5432, 6379}):
-        host.device_type = "physical_server"
+    # --- server-ish hosts ----------------------------------------------------
+    # Client Windows (11/10/8/7) and macOS publish SMB (445/139), RDP (3389) and
+    # file-sharing ports by default, so those ports alone NEVER mean "server".
+    # A host is only a server when a server-class OS string (Windows Server,
+    # Linux distro, *BSD, hypervisor/NAS) is present alongside an admin surface.
+    win_server_os = "windows server" in os_guess
+    win_client_os = any(x in os_guess for x in (
+        "windows 11", "windows 10", "windows 8", "windows 7", "windows vista",
+        "windows xp", "windows nt", "windows me", "windows 2000", "windows ce",
+        "win11", "win10", "chromeos", "mac os", "macos", "darwin"))
+    nix_server_os = any(x in os_guess for x in (
+        "linux", "debian", "ubuntu", "centos", "red hat", "fedora", "suse",
+        "unix", "freebsd", "openbsd", "netbsd", "esxi", "proxmox", "hyper-v",
+        "synology", "qnap", "synology dsm"))
+    server_surface = len(ports & admin_ports) >= 1 or bool(ports & {3306, 5432, 6379})
+    if win_server_os:
+        host.device_type = "server"
         return
-    # An OS string alone is NOT enough to call a host a server. On hosts with no
-    # open ports the -O fingerprint is a bare TCP-stack guess, and phone stacks
-    # frequently mis-guess as ancient Linux kernels. Require an open port.
-    if ports and any(x in os_guess for x in ("windows", "linux", "debian", "ubuntu",
-                                             "centos", "red hat", "unix", "bsd", "darwin",
-                                             "freebsd")):
-        host.device_type = "physical_server"
+    if nix_server_os and not win_client_os and server_surface:
+        host.device_type = "server"
         return
 
     # --- personal-computer brands are workstations by default ------------------
     if any(v in vendor for v in ("dell", "lenovo", "hewlett", "hp", "acer", "toshiba",
                                  "fujitsu", "razer", "gigabyte", "msi", "micro-star")) \
        or ("microsoft" in vendor and "surface" in hostname):
+        host.device_type = "workstation"
+        return
+
+    # --- client OSes with no vendor/hostname hint are workstations -------------
+    if any(x in os_guess for x in ("windows 11", "windows 10", "windows 8",
+                                   "windows 7", "windows vista", "windows xp",
+                                   "microsoft windows", "mac os", "macos",
+                                   "chromeos")):
         host.device_type = "workstation"
         return
 
@@ -2153,7 +2288,7 @@ def run_risk_rules(db, scan: Scan):
                 found.add(("unencrypted_protocol", p.port))
 
         # ---- Rule: Unencrypted RTSP video / media streams -------------------
-        if _on("unencrypted_video") and host.device_type in ("camera", "smart_tv", "conference", "iot"):
+        if _on("unencrypted_video") and host.device_type in ("camera", "iot"):
             rtsp_ports = [p for p in ports if p.state == "open" and
                           (p.port in (554, 8554) or (p.service or "").lower() == "rtsp")]
             for p in rtsp_ports:

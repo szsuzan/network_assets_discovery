@@ -394,16 +394,13 @@ async def delete_scan(
 # may still hold, so filters like device_type=ip_camera match rows stored as
 # 'camera' (pre-granular-taxonomy scans).
 DEVICE_TYPE_ALIASES = {
-    "router": {"router", "gateway", "network_gear"},
-    "smartphone": {"smartphone", "mobile"},
-    "physical_server": {"physical_server", "server"},
+    "router": {"router", "gateway", "network_gear", "firewall", "wireless_access_point", "access_point", "ap"},
+    "mobile": {"mobile", "smartphone", "tablet", "phone"},
+    "server": {"server", "physical_server", "virtual_machine", "vm"},
+    "workstation": {"workstation", "laptop", "desktop", "computer"},
     "ip_camera": {"ip_camera", "camera", "ipcam", "ip-cam", "cctv", "nvr", "dvr"},
     "unidentified": {"unidentified", "unknown"},
-    "smart_speaker": {"smart_speaker", "virtual_assistant"},
-    "iot": {"iot", "smart_appliance"},
-    "conference": {"conference", "media_system"},
-    "smart_tv": {"smart_tv", "streaming_device"},
-    "voip_phone": {"voip_phone", "voip"},
+    "iot": {"iot", "smart_appliance", "smart_tv", "smart_speaker", "virtual_assistant", "streaming_device", "conference", "media_system"},
     "printer": {"printer", "network_printer", "copier"},
     "nas": {"nas", "network_attached_storage"},
     "rogue": {"rogue", "rogue_device"},

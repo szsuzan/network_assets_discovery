@@ -11,6 +11,7 @@
   <a href="#features"><b>Features</b></a> ·
   <a href="#screenshots"><b>Screenshots</b></a> ·
   <a href="#architecture"><b>Architecture</b></a> ·
+  <a href="#installation"><b>Installation</b></a> ·
   <a href="#quick-start"><b>Quick start</b></a> ·
   <a href="#scanner-agents"><b>Scanner agents</b></a> ·
   <a href="#rest-api"><b>REST API</b></a>
@@ -35,27 +36,29 @@ SubNex is a network asset discovery platform for penetration testing engagements
 1. [Features](#features)
 2. [Screenshots](#screenshots)
 3. [Architecture](#architecture)
-4. [Setup from a fresh clone](#setup-from-a-fresh-clone)
-5. [Quick start (start-all / stop-all)](#quick-start)
-6. [Manual start (docker compose)](#manual-start-docker-compose)
-7. [Scanner agents (full Layer-2 discovery)](#scanner-agents)
-8. [Using the platform](#using-the-platform)
-9. [Scan pipeline](#scan-pipeline)
-10. [REST API reference](#rest-api)
-11. [WebSocket live feed](#websocket-live-feed)
-12. [Safety / throttling](#safety--throttling)
-13. [Security of the tool itself](#security-of-the-tool-itself)
-14. [Data model](#data-model)
-15. [Troubleshooting](#troubleshooting)
-16. [Project layout](#project-layout)
+4. [Installation (SETUP.md)](#installation)
+5. [Setup from a fresh clone](#setup-from-a-fresh-clone)
+6. [Quick start (start-all / stop-all)](#quick-start)
+7. [Manual start (docker compose)](#manual-start-docker-compose)
+8. [Scanner agents (full Layer-2 discovery)](#scanner-agents)
+9. [Using the platform](#using-the-platform)
+10. [Scan pipeline](#scan-pipeline)
+11. [REST API reference](#rest-api)
+12. [WebSocket live feed](#websocket-live-feed)
+13. [Safety / throttling](#safety--throttling)
+14. [Security of the tool itself](#security-of-the-tool-itself)
+15. [Data model](#data-model)
+16. [Troubleshooting](#troubleshooting)
+17. [Project layout](#project-layout)
 
 ---
 
 ## Features
 
-- **One command to start** — `start-all.ps1` builds the UI, starts the Postgres/Redis/backend stack, and launches the LAN agent.
+- **One command to start** — `start-all.ps1` (Windows) or `start-all.sh` (macOS/Linux) builds the UI, starts the Postgres/Redis/backend stack, and launches the LAN agent.
 - **Agent-aided Layer-2 discovery** — a small CLI agent on the target LAN turns ARP into real MAC/vendor bindings and raw-SYN `-O` into exact OS fingerprints; scans are delegated to it automatically.
-- **Passive fingerprinting** — optional Scapy sniffing harvests DHCP vendor-class, ARP, and CDP/LLDP identity evidence without touching a single host.
+- **Passive fingerprinting** — optional Scapy sniffing harvests DHCP (hostname/vendor-class-id/option-55), ARP, mDNS, NBNS, SSDP, and CDP/LLDP identity evidence without touching a single host.
+- **Background identity sweepers** — periodic, non-intrusive sweeps ask the LAN for SNMP `sysName/sysDescr` and broadcast SSDP/NBNS announcements, so firewalled devices still reveal themselves.
 - **Nmap-driven port/service/OS fingerprinting** — TCP + UDP, with tiered `quick` / `full` / `stealth` / `passive_only` profiles.
 - **Network topology graph** — a force-directed map of the subnet with risk-severity coloring, subnet-zone rings, gateway/internet edges, and device-type icons (fullscreen view).
 - **Risk findings** — default SNMP communities, unencrypted protocols, outdated software, exposed admin panels — severity-ranked and report-includable.
@@ -100,7 +103,7 @@ SubNex is a network asset discovery platform for penetration testing engagements
 
 - **Frontend:** React + TypeScript + Tailwind CSS, TanStack Query, `react-force-graph` (topology), `recharts` (report charts), native WebSocket client.
 - **Backend:** Python 3.11+, FastAPI, PostgreSQL (async SQLAlchemy), Redis + Celery (background scan jobs), WebSockets for live updates, JWT auth.
-- **Scanning tools:** Nmap (TCP/UDP port scans + service/OS fingerprinting) runs either in-container (L3-only) or, preferably, on a **scanner agent** placed on the target LAN for full Layer-2 (ARP → MAC/vendor + raw-SYN/`-O` → exact OS). **Scapy** (optional, agent-side) passively fingerprints the LAN without touching a single host: DHCP vendor-class-ID → brand/OS, ARP → IP↔MAC, and CDP/LLDP → network-gear identity (switch/AP/router platform + capabilities). Scapy is best-effort: `pip install scapy` (+ Npcap on Windows) enables it, otherwise the agent scans actively only. pysnmp/SNMP (walks).
+- **Scanning tools:** Nmap (TCP/UDP port scans + service/OS fingerprinting) runs either in-container (L3-only) or, preferably, on a **scanner agent** placed on the target LAN for full Layer-2 (ARP → MAC/vendor + raw-SYN/`-O` → exact OS). **Scapy** (optional, agent-side) passively fingerprints the LAN without touching a single host: DHCP vendor-class-ID + option-55 PRL → brand/OS, ARP → IP↔MAC, mDNS/NBNS/SSDP → device announcements, and CDP/LLDP → network-gear identity (switch/AP/router platform + capabilities). Scapy is best-effort: `pip install scapy` (+ Npcap on Windows) enables it, otherwise the agent scans actively only. Independent of Scapy, the agent runs periodic SNMP (`UDP/161`), SSDP, and ARP sweepers so firewalled/offline-until-polled devices still surface.
 
 The stack runs three services:
 
@@ -116,9 +119,29 @@ The backend container runs all three roles via `app/run_server.py` (a small supe
 
 ---
 
+## Installation
+
+The full, step-by-step install guide for **any host** (Windows, macOS, Linux) —
+per-OS prerequisite installs (Git, Docker, Node.js, Python, Nmap), secrets,
+first-run, agent setup, and troubleshooting — lives in **[SETUP.md](SETUP.md)**.
+
+TL;DR:
+
+```bash
+git clone https://github.com/szsuzan/network_assets_discovery.git && cd network_assets_discovery
+cp .env.example .env      # Windows:  Copy-Item .env.example .env
+# fill in POSTGRES_PASSWORD + JWT_SECRET (see SETUP.md for generators)
+# Windows:  powershell -ExecutionPolicy Bypass -File start-all.ps1
+# macOS/Linux:  ./start-all.sh
+```
+
+Then log in at <http://localhost:8000> as `demo@pentest.local` / `password123`.
+
+---
+
 ## Setup from a fresh clone
 
-The platform is two runtimes: the **Docker stack** (Postgres, Redis, FastAPI backend that also runs the Celery scan worker and serves the built web UI) and an optional **scanner agent** (a plain Python script you can run on a machine that sits on the target LAN). Nothing else needs installing.
+The platform is two runtimes: the **Docker stack** (Postgres, Redis, FastAPI backend that also runs the Celery scan worker and serves the built web UI) and an optional **scanner agent** (a plain Python script you can run on a machine that sits on the target LAN). Nothing else needs installing — per-OS install commands are in **[SETUP.md](SETUP.md)**.
 
 ### 1. Prerequisites
 
@@ -138,7 +161,8 @@ Everything else (`nmap`, `weasyprint`, etc.) runs inside the Docker images.
 git clone https://github.com/szsuzan/network_assets_discovery.git
 cd network_assets_discovery
 ```
-> Note: the repo/clone directory will still be named `network_assets_discovery` until you rename it on GitHub; the product itself is **SubNex**.
+
+> The repo keeps its GitHub name `network_assets_discovery`; the product inside it is **SubNex**.
 
 ### 3. Configure secrets (required)
 
@@ -157,13 +181,17 @@ The file is gitignored and **never** committed.
 | `JWT_SECRET` | *(required, ≥ 16 chars)* | Auth token signing key |
 | `JWT_ALGORITHM` / `JWT_EXPIRY_MINUTES` | `HS256` / `60` | Token settings |
 
-### 4. Start everything (Windows, one command)
+### 4. Start everything (one command)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File start-all.ps1
+powershell -ExecutionPolicy Bypass -File start-all.ps1   # Windows
 ```
 
-This builds the UI the first time (`npm install` + `npm run build`), **starts Docker Desktop automatically if the engine isn't running yet** (then waits up to ~120 s for it), brings up the Compose stack, waits for the backend health check, then starts the LAN scanner agent in the background.
+```bash
+./start-all.sh                                          # macOS / Linux / WSL
+```
+
+This builds the UI the first time (`npm install` + `npm run build`), **starts Docker Desktop automatically on Windows if the engine isn't running yet** (then waits up to ~120 s for it), brings up the Compose stack, waits for the backend health check, then starts the LAN scanner agent in the background (skipped gracefully if no agent key is configured).
 
 ### 5. Manual start (any OS)
 
@@ -173,7 +201,7 @@ docker compose up -d --build                           # start the stack
 docker compose ps                                      # postgres+redis (healthy), backend (Up)
 ```
 
-Schema creation, migrations (001 → 012) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
+Schema creation, migrations (001 → 013) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
 
 ### 6. First login and first scan
 
@@ -190,6 +218,10 @@ Agent-delegated scans get real ARP → MAC/vendor and `-O` OS detection, which t
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File stop-all.ps1   # Windows: agent + stack
+```
+
+```bash
+./stop-all.sh                                           # macOS / Linux: agent + stack
 docker compose down                                     # any OS: stack only (no -v, data kept)
 ```
 
@@ -202,10 +234,14 @@ docker compose down                                     # any OS: stack only (no
 From the project root, run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File start-all.ps1
+powershell -ExecutionPolicy Bypass -File start-all.ps1   # Windows
 ```
 
-This does, in order:
+```bash
+./start-all.sh                                          # macOS / Linux / WSL
+```
+
+Both scripts do the same, in order:
 
 1. Ensures the **Docker engine is running** — if it isn't, Docker Desktop is launched automatically and the script waits (up to ~120 s) for the engine to answer.
 2. Builds the web UI: `cd frontend && npm install && npm run build` (only the first time, or after UI changes)
@@ -226,7 +262,11 @@ Schema is set up **automatically** on first boot: the backend applies every `dat
 ### Stop everything
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File stop-all.ps1
+powershell -ExecutionPolicy Bypass -File stop-all.ps1   # Windows
+```
+
+```bash
+./stop-all.sh                                           # macOS / Linux / WSL
 ```
 
 This stops the LAN scanner agent first, then brings the Compose stack down **without** `-v`, so the Postgres data volume and all stored scans/hosts/findings are **preserved**. Idempotent — safe to run even if things are already stopped.
@@ -331,11 +371,20 @@ harvests identity evidence the active scans would miss, then folds it into the
 host records it posts (so the server's classifier uses it like any other
 hostname/vendor/OS evidence):
 
-- **DHCP** — the hostname and vendor-class-id devices advertise while leasing an
-  address. This names privacy-MAC phones/tablets (their OUI is randomised away)
-  and reveals brand/OS for printers, routers, cameras and NAS.
+- **DHCP** — the hostname, vendor-class-id, and option-55 Parameter Request List
+  clients advertise while leasing an address. This names privacy-MAC
+  phones/tablets (their OUI is randomised away), reveals brand/OS for printers,
+  routers, cameras and NAS, and fingerprints the OS family from option 55 even
+  when the MAC is randomised and TCP is filtered.
 - **ARP** — real IP ↔ MAC bindings for devices whose radios ignore the broadcast
   ARP ping nmap sends.
+- **mDNS** — service announcements (plus any DNS-SD answers picked up on the
+  wire). Android phones announce `_androidtvremote`, Smart TVs/IoT announce
+  their receiver services; recovery of a *device type* is only made from real
+  answer evidence, never from one-way queries that any casting client can emit.
+- **NBNS** (NetBIOS) — name queries/announcements for legacy Windows-era naming.
+- **SSDP** — UPnP device announcements and `M-SEARCH` responses that name cameras,
+  TVs, media boxes and NAS devices.
 - **CDP / LLDP** — network gear announces itself: switch/AP/router identity,
   platform, software version, and authoritative system capabilities. A switch
   that never answers L3 probes is still named and classified.
@@ -345,7 +394,31 @@ Windows). If it's missing, the agent logs once and continues active-only — it 
 always best-effort. Passive evidence is merged **fill-if-blank**: a stronger
 `nmap -O` / SNMP result always wins.
 
-**Verified behaviour** (live run against `192.168.1.0/24`, shown in the screenshots above): an agent on the Windows LAN produced **16 live hosts** that the L3-only container could not characterize — device taxonomy (`router`, `wireless_access_point`, `physical_server`, `laptop`, `smartphone`), **12 open ports**, and **4 findings** (1 concerning, 1 notable, 2 info) over a quick `discover` run. Modern phones/tablets here ship with **privacy-randomised MACs** (the pictures blur them), so the agent recovered names from DHCP/mDNS traffic instead. The PDF export of that scan is pictured in the screenshot gallery above.
+### Background identity sweepers (no Scapy needed)
+
+Independent of Scapy, the agent runs periodic low-intrusion sweeps that surface
+otherwise-invisible devices:
+
+- **SNMP sweep** — asks `UDP/161` for `sysName`/`sysDescr`/`sysObjectID` from
+  every host (via nmap's `snmp-info` script). Many cameras/NAS/routers answer
+  with a default `public` community even when their TCP ports are fully filtered.
+- **SSDP probe** — sends a UPnP `M-SEARCH` so UPnP devices announce themselves.
+- **ARP sweep** — re-arms the ARP cache so devices that only wake on demand
+  register an IP↔MAC binding.
+
+These run on a fixed gap (SNMP ~5 min, SSDP/ARP more often) so hosts that power
+up later in an engagement are still discovered without a re-scan.
+
+**Verified behaviour** (live run against `192.168.1.0/24`): an agent on the LAN
+recovered **20 live hosts** that the L3-only container could not characterize —
+an evidence-only taxonomy that keeps a host **`unknown` unless a captured
+fingerprint proves otherwise** (mDNS-announced Android phones → `mobile`,
+Windows/PC hostnames → `workstation`, responded gateway → `router`, and
+firewalled/background hosts stay `unknown`). Modern phones/tablets ship with
+**privacy-randomised MACs**, so the agent recovers their identity from
+DHCP/mDNS/SSDP announcements rather than the OUI. Because no host is labelled
+without evidence, the same device can show `mobile` in one scan window and
+`unknown` in the next if its announcements are sporadic.
 
 ---
 
@@ -480,7 +553,13 @@ Commands and output stream **live** (nmap runs via `Popen`; stderr is forwarded 
 
 ### Device-type classification
 
-Each host is classified into one of 20 canonical types (smartphone, laptop, printer, ip_camera, router, switch, physical_server, vm_server, nas, iot_*, etc.) from its MAC OUI/vendor plus the set of **open** ports. Manual override is available in the Host Detail drawer (PATCH).
+Each host is classified into the simplified taxonomy (`router`, `switch`, `camera`,
+`printer`, `nas`, `server`, `workstation`, `mobile`, `iot`, `voip_phone`,
+`access_control`, `unidentified`, `rogue`) **exclusively from captured evidence** —
+MAC vendor/OUI, open ports, DHCP option-55/hostname/vendor-class, mDNS/SSDP/NBNS
+announcements, CDP/LLDP identity, and SNMP `sysObjectID`/`sysDescr`. A host with
+no identifying evidence stays **`unknown`** — no type is guessed. Manual override
+is available in the Host Detail drawer (PATCH).
 
 ---
 
@@ -672,7 +751,7 @@ Agents are only used when one is **online** and its **subnets cover the targets*
 
 ### "The scan found the host but it's type `unknown`"
 
-Device type is inferred from MAC vendor and open ports. A host that didn't answer ARP/SNMP with identifiable traits may stay `unknown` — that's normal. You can set the type manually in the Host Detail drawer.
+Device type is inferred **only from captured evidence** (MAC vendor, open ports, hostname, DHCP/mDNS/SSDP/NBNS/SNMP announcements). A host that volunteered no identifying evidence — e.g. a randomised-MAC phone that answered nothing during the scan window — stays `unknown` by design; SubNex will not guess a type with no proof. You can set the type manually in the Host Detail drawer.
 
 ### "I see the harmless bcrypt warning in logs"
 
@@ -690,16 +769,21 @@ Device type is inferred from MAC vendor and open ports. A host that didn't answe
 .
 ├── docker-compose.yml              # 3-service stack
 ├── .env.example                    # template for secrets (POSTGRES_*, JWT_SECRET, ...)
+├── SETUP.md                        # full cross-platform install guide (Windows/macOS/Linux)
 ├── assets/                         # README assets: logos, architecture diagram, screenshots
-├── start-all.ps1                   # build UI + start stack + agent (quick start)
-├── stop-all.ps1                    # stop agent + stack, data preserved
-├── start-scanner-agent.ps1         # start the LAN agent as a background process
-├── stop-scanner-agent.ps1          # stop the LAN agent
+├── start-all.ps1                   # build UI + start stack + agent (Windows quick start)
+├── stop-all.ps1                    # stop agent + stack, data preserved (Windows)
+├── start-scanner-agent.ps1         # start the LAN agent as a background process (Windows)
+├── stop-scanner-agent.ps1          # stop the LAN agent (Windows)
+├── start-all.sh                    # same quick start for macOS / Linux / WSL (bash)
+├── stop-all.sh                     # stop agent + stack, data preserved (bash)
+├── start-scanner-agent.sh          # start the LAN agent (bash)
+├── stop-scanner-agent.sh           # stop the LAN agent (bash)
 ├── agent/
 │   ├── scanner_agent.py            # distributable LAN L2 scanner (CLI)
 │   └── Dockerfile                  # containerized agent (Linux, host-net)
 ├── database/migrations/            # ordered .sql migrations (applied automatically)
-│   └── 001_init.sql                #   from 001 to 012 on backend startup
+│   └── 001_init.sql … 013_cve_catalog.sql   # from 001 to 013 on backend startup
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt

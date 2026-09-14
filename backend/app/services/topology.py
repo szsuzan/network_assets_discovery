@@ -61,7 +61,7 @@ def compute_topology(scan, hosts, findings) -> tuple[list, list]:
     for zkey, hs in sorted(group.items(), key=lambda kv: kv[0]):
         net = ipaddress.ip_network(zkey)
         any_ip = _gw_ip_for(net)
-        gw_candidates = [h for h in hs if h.device_type in ("network_gear", "router")]
+        gw_candidates = [h for h in hs if h.device_type in ("router", "network_gear", "firewall", "wireless_access_point")]
         if any_ip:
             gw_candidates = ([h for h in hs if str(h.ip) == any_ip] or
                              [h for h in hs if str(h.ip).rsplit(".", 1)[0] + ".254" == str(h.ip)] or

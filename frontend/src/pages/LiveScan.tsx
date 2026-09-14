@@ -45,6 +45,7 @@ const FEED_META: Record<string, { label: string; cls: string; dot: string }> = {
   host_updated: { label: 'UPDATED', cls: 'border-blue-500/40 bg-blue-500/10 text-blue-400', dot: 'bg-blue-400' },
   finding_added: { label: 'FINDINGS', cls: 'border-orange-500/40 bg-orange-500/10 text-orange-400', dot: 'bg-orange-400' },
   scan_progress: { label: 'PROGRESS', cls: 'border-cyan-500/40 bg-cyan-500/10 text-cyan-400', dot: 'bg-cyan-400' },
+  scan_phase: { label: 'PHASE', cls: 'border-violet-500/40 bg-violet-500/10 text-violet-400', dot: 'bg-violet-400' },
 }
 
 function feedKey(type: string, ts: number, anchor?: string): string {
@@ -96,6 +97,13 @@ function feedDetail(m: WSMessage): string {
       return 'Scan resumed'
     case 'scan_progress':
       return typeof m.progress_pct === 'number' ? `Progress ${m.progress_pct}%` : 'Progress update'
+    case 'scan_phase': {
+      const label = m.label || ''
+      const parts: string[] = []
+      if (typeof m.index === 'string' || typeof m.index === 'number') parts.push(`Phase ${m.index}${m.total ? `/${m.total}` : ''}`)
+      if (label) parts.push(String(label))
+      return parts.join(' · ')
+    }
     default:
       return ''
   }
@@ -267,7 +275,55 @@ export default function LiveScan() {
     }
   }, [feed])
 
-  const visibleFeed = useMemo(() => feed.filter((e) => matchesFilter(feedFilter, e.msg.type)), [feed, feedFilter])
+  const visibleFeed = useMemo(() => {
+    const filtered = feed.filter((e) => matchesFilter(feedFilter, e.msg.type))
+    // Collapse multiple host_updated entries per IP into a single row
+    // showing only the latest state (ports/fingerprint/OS enrichment).
+    // This avoids the same IP appearing 2-3 times with near-identical data.
+    const seen = new Map<string, number>() // ip -> index in result
+    const out: FeedEntry[] = []
+    for (const e of filtered) {
+      if (e.msg.type === 'host_updated' && e.msg.ip) {
+        const prev = seen.get(e.msg.ip)
+        if (prev !== undefined) {
+          out[prev] = e
+        } else {
+          seen.set(e.msg.ip, out.length)
+          out.push(e)
+        }
+      } else if (e.msg.type === 'scan_progress' && typeof e.msg.progress_pct === 'number') {
+        // Keep a single progress row reflecting the latest pct (dedupe the
+        // flat "Progress 90%" spam).
+        const prev = seen.get('__progress__')
+        if (prev !== undefined) {
+          out[prev] = e
+        } else {
+          seen.set('__progress__', out.length)
+          out.push(e)
+        }
+      } else {
+        out.push(e)
+      }
+    }
+    return out
+  }, [feed, feedFilter])
+
+  // When the scan is terminal, always use the authoritative REST progress_pct
+  // (which the worker commits as 100 on completion) instead of a stale liveProgress
+  // value that may never have been updated if the WS dropped before scan_completed.
+  const shownProgress = useMemo(() => {
+    if (scan && TERMINAL_STATUSES.includes(scan.status)) return scan.progress_pct ?? 0
+    return (liveProgress ?? scan?.progress_pct ?? 0)
+  }, [scan?.status, scan?.progress_pct, liveProgress])
+
+  // Latest phase anchor from the timeline, used for the inline "current phase".
+  const currentPhase = useMemo(() => {
+    let latest: FeedEntry | null = null
+    for (const e of feed) {
+      if (e.msg.type === 'scan_phase' && e.ts >= (latest?.ts ?? 0)) latest = e
+    }
+    return latest?.msg ?? null
+  }, [feed])
 
   useEffect(() => {
     if (!scan) return
@@ -481,12 +537,17 @@ export default function LiveScan() {
       <div className="mb-4 rounded-lg border border-gray-800 bg-gray-900 p-4">
         <div className="mb-2 flex items-center justify-between text-sm">
           <span className="text-gray-400">{scan?.status || 'queued'}</span>
-          <span className="font-medium text-white">{(liveProgress ?? scan?.progress_pct) || 0}%</span>
+          {currentPhase && (
+            <span className="truncate rounded border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-xs font-medium text-violet-300">
+              {currentPhase.label ? `${currentPhase.label}${typeof currentPhase.index === 'string' || typeof currentPhase.index === 'number' ? ` · Phase ${currentPhase.index}/${currentPhase.total || '?'}` : ''}` : 'Scan in progress'}
+            </span>
+          )}
+          <span className="font-medium text-white">{shownProgress}%</span>
         </div>
         <div className="h-2 w-full overflow-hidden rounded bg-gray-800">
           <div
             className="h-full bg-blue-600 transition-all duration-500"
-            style={{ width: `${(liveProgress ?? scan?.progress_pct) || 0}%` }}
+            style={{ width: `${shownProgress}%` }}
           />
         </div>
       </div>
