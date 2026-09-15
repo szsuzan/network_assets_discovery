@@ -979,6 +979,7 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     targets = [t for t in (task["targets"] or []) if _valid_target(t)]
     profile = task.get("profile") or "quick"
     port_range = _sane_port_range(task.get("port_range") or "1-10000")
+    mode = task.get("mode") or "standard"
     _set_runtime_workers(task)
 
     if not targets:
@@ -1058,7 +1059,8 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
             client.log(task_id, "Scan stopped by user", level="warn")
             return
         args = [
-            "nmap", "-sn", "-oX", "-", "--host-timeout", "60s",
+            "nmap", "-sn", "-n", "-oX", "-",
+            "--max-retries", "1", "--host-timeout", "40s",
             "--min-hostgroup", "256", t,
         ]
         xml = run_nmap(args)
@@ -1130,135 +1132,140 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
         client.log(task_id, f"Partial discovery post failed: {e}", level="err")
 
     # ---- Phase 2/3: simple port scan (no -sV/-O) -> open ports only ----------
-    client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {_p2_workers()} parallel worker(s)", level="out")
+    open_ports = {}  # ip -> [portid]; empty in discovery mode
+    if mode == "discovery":
+        client.log(task_id, "Discovery-only mode: skipping port scan + fingerprinting", level="out")
+    else:
+        client.log(task_id, f"Phase 2/3: fast port scan ({scan_type}) on {len(live)} host(s), {_p2_workers()} parallel worker(s)", level="out")
 
-    def _p2_worker(ip_meta):
-        ip, _meta = ip_meta
-        if not _await_go(client, task_id):
-            return None
-        args = [
-            "nmap", scan_type, "-p", port_range, "--open",
-            timing, "--host-timeout", "30s", "-oX", "-", str(ip),
-        ]
-        xml = run_nmap(args)
-        return _parse_open_ports(xml), " ".join(args)
-
-    open_ports = {}  # ip -> [portid]
-    p2_done = 0
-    p2_total = max(len(live), 1)
-    for (ip, _meta), res in _map_hosts(_p2_worker, list(live.items()),
-                                       _p2_workers(), client, task_id, "port-scan"):
-        if res is None:
-            client.log(task_id, "Scan stopped by user", level="warn")
-            break
-        found, args_str = res
-        open_ports[ip] = found
-        p2_done += 1
-        client.log(task_id, f"$ {args_str}", level="cmd")
-        client.log(task_id, f"  {ip}: {len(found)} open port(s)")
-        # Stream each host's open ports as it completes (server MERGES ports,
-        # never deletes, so these stay even if the later -sV re-probe races the
-        # device to sleep and re-opens nothing).
-        p2_prog = min(69, int(20 + 48 * p2_done / p2_total))
-        try:
-            client.result(task_id, [
-                _decorate({"ip": ip, "mac": _meta.get("mac"), "vendor": _meta.get("vendor"),
-                           "status": "up",
-                           "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
-                                      "service": None, "version": None, "banner": None}
-                                     for p in found]})
-            ], status="partial", notes="ports", progress=p2_prog)
-        except Exception as e:
-            client.log(task_id, f"Partial Phase-2 port post failed: {e}", level="err")
-    # any host still missing an entry (e.g. stopped early) is a no-port host
-    for ip in live:
-        if ip not in open_ports:
-            open_ports[ip] = []
-
-    # ---- Phase 3/3: service/OS fingerprint -----------------------------------
-    client.log(task_id, f"Phase 3/3: -sV -O fingerprint (ports) / -O (OS-only for no-port hosts), {PHASE3_WORKERS} parallel worker(s)", level="out")
-
-    def _p3_worker(ip_meta):
-        ip, _meta = ip_meta
-        if not _await_go(client, task_id):
-            return None
-        fp_timing = FINGERPRINT_TIMING.get(profile, "-T4")
-        ports = open_ports.get(ip, [])
-        if not ports:
-            # No open ports, so -sV has nothing to probe, but -O can still
-            # fingerprint the OS from the host's TCP/IP stack behaviour (works
-            # on closed/filtered hosts). Attach any OS guess for richer typing.
-            args = ["nmap", "-O", "--osscan-guess",
-                    fp_timing, "--host-timeout", "60s", str(ip), "-oX", "-"]
+        def _p2_worker(ip_meta):
+            ip, _meta = ip_meta
+            if not _await_go(client, task_id):
+                return None
+            args = [
+                "nmap", scan_type, "-n", "-p", port_range, "--open",
+                timing, "--max-retries", "1", "--host-timeout", "30s", "-oX", "-", str(ip),
+            ]
+            client.log(task_id, f"$ {' '.join(args)}", level="cmd")
             xml = run_nmap(args)
-            host = parse_host_xml(xml)
-            if host and (host.get("os_confidence") or 0) < OS_ONLY_CONF_FLOOR:
-                host.pop("os_guess", None)
-                host.pop("os_confidence", None)
-            return host, " ".join(args)
-        args = (
-            ["nmap", scan_type, "-sV", "-O", "-p", ",".join(ports), "--open",
-             fp_timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
-             "--host-timeout", "90s", str(ip), "-oX", "-"]
-        )
-        xml = run_nmap(args)
-        return parse_host_xml(xml), " ".join(args)
+            return _parse_open_ports(xml)
 
-    p3_done = 0
-    p3_total = max(len(live), 1)
-    for (ip, meta), res in _map_hosts(_p3_worker, list(live.items()),
-                                      PHASE3_WORKERS, client, task_id, "fingerprint"):
-        if res is None:
-            client.log(task_id, "Scan stopped by user", level="warn")
-            break
-        host, args_str = res
-        client.log(task_id, f"$ {args_str}", level="cmd")
-        ports = open_ports.get(ip, [])
-        p3_done += 1
-        p3_prog = min(89, int(70 + 19 * p3_done / p3_total))
-        if not ports:
-            if host:
+        open_ports = {}  # ip -> [portid]
+        p2_done = 0
+        p2_total = max(len(live), 1)
+        for (ip, _meta), res in _map_hosts(_p2_worker, list(live.items()),
+                                           _p2_workers(), client, task_id, "port-scan"):
+            if res is None:
+                client.log(task_id, "Scan stopped by user", level="warn")
+                break
+            found = res
+            open_ports[ip] = found
+            p2_done += 1
+            client.log(task_id, f"  {ip}: {len(found)} open port(s)")
+            # Stream each host's open ports as it completes (server MERGES ports,
+            # never deletes, so these stay even if the later -sV re-probe races the
+            # device to sleep and re-opens nothing).
+            p2_prog = min(69, int(20 + 48 * p2_done / p2_total))
+            try:
+                client.result(task_id, [
+                    _decorate({"ip": ip, "mac": _meta.get("mac"), "vendor": _meta.get("vendor"),
+                               "status": "up",
+                               "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
+                                          "service": None, "version": None, "banner": None}
+                                         for p in found]})
+                ], status="partial", notes="ports", progress=p2_prog)
+            except Exception as e:
+                client.log(task_id, f"Partial Phase-2 port post failed: {e}", level="err")
+        # any host still missing an entry (e.g. stopped early) is a no-port host
+        for ip in live:
+            if ip not in open_ports:
+                open_ports[ip] = []
+
+        # ---- Phase 3/3: service/OS fingerprint -----------------------------------
+        client.log(task_id, f"Phase 3/3: -sV -O fingerprint (ports) / -O (OS-only for no-port hosts), {PHASE3_WORKERS} parallel worker(s)", level="out")
+
+        def _p3_worker(ip_meta):
+            ip, _meta = ip_meta
+            if not _await_go(client, task_id):
+                return None
+            fp_timing = FINGERPRINT_TIMING.get(profile, "-T4")
+            ports = open_ports.get(ip, [])
+            if not ports:
+                # No open ports, so -sV has nothing to probe, but -O can still
+                # fingerprint the OS from the host's TCP/IP stack behaviour (works
+                # on closed/filtered hosts). Attach any OS guess for richer typing.
+                args = ["nmap", "-O", "--osscan-guess", "-n",
+                        fp_timing, "--max-retries", "1", "--host-timeout", "60s", str(ip), "-oX", "-"]
+                client.log(task_id, f"$ {' '.join(args)}", level="cmd")
+                xml = run_nmap(args)
+                host = parse_host_xml(xml)
+                if host and (host.get("os_confidence") or 0) < OS_ONLY_CONF_FLOOR:
+                    host.pop("os_guess", None)
+                    host.pop("os_confidence", None)
+                return host
+            args = (
+                ["nmap", scan_type, "-n", "-sV", "-O", "-p", ",".join(ports), "--open",
+                 fp_timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
+                 "--max-retries", "1", "--host-timeout", "90s", str(ip), "-oX", "-"]
+            )
+            client.log(task_id, f"$ {' '.join(args)}", level="cmd")
+            xml = run_nmap(args)
+            return parse_host_xml(xml)
+
+        p3_done = 0
+        p3_total = max(len(live), 1)
+        for (ip, meta), res in _map_hosts(_p3_worker, list(live.items()),
+                                          PHASE3_WORKERS, client, task_id, "fingerprint"):
+            if res is None:
+                client.log(task_id, "Scan stopped by user", level="warn")
+                break
+            host = res
+            ports = open_ports.get(ip, [])
+            p3_done += 1
+            p3_prog = min(89, int(70 + 19 * p3_done / p3_total))
+            if not ports:
+                if host:
+                    host.setdefault("mac", meta.get("mac"))
+                    host.setdefault("vendor", meta.get("vendor"))
+                    if not host.get("ports"):
+                        host["ports"] = []
+                    try:
+                        client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
+                        posted.add(host["ip"])
+                    except Exception as e:
+                        client.log(task_id, f"Partial host post failed: {e}", level="err")
+                    client.log(task_id, f"  {ip}: OS-only fingerprint -> {host.get('os_guess') or 'n/a'}")
+                else:
+                    client.log(task_id, f"  {ip}: OS-only fingerprint returned no data")
+                    try:
+                        client.result(task_id, [], status="partial", notes="progress", progress=p3_prog)
+                    except Exception:
+                        pass
+            elif host:
                 host.setdefault("mac", meta.get("mac"))
                 host.setdefault("vendor", meta.get("vendor"))
-                if not host.get("ports"):
-                    host["ports"] = []
+                _merge_phase2_ports(host, ports)
                 try:
                     client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
                     posted.add(host["ip"])
                 except Exception as e:
                     client.log(task_id, f"Partial host post failed: {e}", level="err")
-                client.log(task_id, f"  {ip}: OS-only fingerprint -> {host.get('os_guess') or 'n/a'}")
-            else:
-                client.log(task_id, f"  {ip}: OS-only fingerprint returned no data")
+                client.log(task_id, f"  {ip}: {len(host['ports'])} open port(s) fingerprinted")
+            elif ports:
+                # Verification probe returned nothing parseable (the device went to
+                # sleep / RST raced us). Never lose the discovery: post the ports we
+                # already confirmed open, unenriched, so the report keeps them.
+                host = {"ip": ip,
+                        "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
+                                   "service": None, "version": None, "banner": None}
+                                  for p in ports]}
+                host.setdefault("mac", meta.get("mac"))
+                host.setdefault("vendor", meta.get("vendor"))
                 try:
-                    client.result(task_id, [], status="partial", notes="progress", progress=p3_prog)
-                except Exception:
-                    pass
-        elif host:
-            host.setdefault("mac", meta.get("mac"))
-            host.setdefault("vendor", meta.get("vendor"))
-            _merge_phase2_ports(host, ports)
-            try:
-                client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
-                posted.add(host["ip"])
-            except Exception as e:
-                client.log(task_id, f"Partial host post failed: {e}", level="err")
-            client.log(task_id, f"  {ip}: {len(host['ports'])} open port(s) fingerprinted")
-        elif ports:
-            # Verification probe returned nothing parseable (the device went to
-            # sleep / RST raced us). Never lose the discovery: post the ports we
-            # already confirmed open, unenriched, so the report keeps them.
-            host = {"ip": ip,
-                    "ports": [{"port": int(p), "protocol": "tcp", "state": "open",
-                               "service": None, "version": None, "banner": None}
-                              for p in ports]}
-            host.setdefault("mac", meta.get("mac"))
-            host.setdefault("vendor", meta.get("vendor"))
-            try:
-                client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
-                posted.add(host["ip"])
-            except Exception as e:
-                client.log(task_id, f"Partial host post failed: {e}", level="err")
+                    client.result(task_id, [_decorate(host)], status="partial", notes="host", progress=p3_prog)
+                    posted.add(host["ip"])
+                except Exception as e:
+                    client.log(task_id, f"Partial host post failed: {e}", level="err")
 
     # ---- Finalise -------------------------------------------------------------
     # Re-read passive evidence: the RA nudge + background sweeps may have
@@ -1333,9 +1340,9 @@ def _deep_scan_host(client: ApiClient, task_id: str, ip: str, meta: dict,
     timing = PROBE_TIMING.get(profile, "-T4")
     ports = ([int(x) for x in ports_spec.split(",")] if ports_spec else [])
     args = (
-        ["nmap", scan_type, "-sV", "-O", "-p", ports_spec, "--open",
+        ["nmap", scan_type, "-n", "-sV", "-O", "-p", ports_spec, "--open",
          timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
-         "--host-timeout", "90s", ip, "-oX", "-"]
+         "--max-retries", "1", "--host-timeout", "90s", ip, "-oX", "-"]
     )
     client.log(task_id, " ".join(args), level="cmd")
     xml = run_nmap(args)
@@ -1430,8 +1437,8 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
             ip, _meta = ip_meta
             if not _await_go(client, task_id):
                 return None
-            args = ["nmap", scan_type_b, "-p", sweep_spec, "--open", timing_b,
-                    "--host-timeout", "45s", "-oX", "-", ip]
+            args = ["nmap", scan_type_b, "-n", "-p", sweep_spec, "--open", timing_b,
+                    "--max-retries", "1", "--host-timeout", "45s", "-oX", "-", ip]
             client.log(task_id, " ".join(args), level="cmd")
             pxml = run_nmap(args)
             found = _parse_open_ports(pxml)

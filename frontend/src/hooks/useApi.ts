@@ -80,7 +80,7 @@ export function useDeleteEngagement() {
 export function useStartScan(engagementId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: { targets: string[]; profile: string; port_range: string; protocol: string }) =>
+    mutationFn: (data: { targets: string[]; profile: string; port_range: string; protocol: string; mode: string }) =>
       api.post<Scan>(`/api/engagements/${engagementId}/scans`, data).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['engagement', engagementId, 'scans'] }),
   })

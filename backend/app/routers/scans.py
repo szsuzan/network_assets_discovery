@@ -90,6 +90,7 @@ async def start_scan(
         profile=profile,
         port_range=port_range,
         protocol=protocol,
+        mode=data.mode or "standard",
         status="queued",
         hosts_total_in_scope=count_hosts_in_scope(data.targets),
         started_by=current_user.id

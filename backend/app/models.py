@@ -38,6 +38,7 @@ class Scan(Base):
     protocol = Column(Text, nullable=False, default="tcp")
     status = Column(Text, nullable=False, default="queued")
     kind = Column(Text, nullable=False, default="discover")  # discover|reverify
+    mode = Column(Text, nullable=False, default="standard")  # standard|discovery
     risk_rules = Column(JSONB, nullable=False, default=dict, server_default="{}")
     hosts_total_in_scope = Column(Integer, default=0)
     hosts_discovered = Column(Integer, default=0)

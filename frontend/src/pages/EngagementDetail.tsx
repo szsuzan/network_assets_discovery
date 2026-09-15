@@ -53,6 +53,7 @@ export default function EngagementDetail() {
     profile: 'full',
     port_range: '1-10000',
     protocol: 'tcp',
+    mode: 'standard',
     scope_confirmed: false,
   })
   const [touched, setTouched] = useState(false)
@@ -133,6 +134,7 @@ export default function EngagementDetail() {
         profile: form.profile,
         port_range: form.port_range,
         protocol: form.protocol,
+        mode: form.mode,
       })
       navigate(`/engagements/${engagementId}/scans/${scan.id}/live`)
     } catch (err: any) {
@@ -309,6 +311,40 @@ export default function EngagementDetail() {
             </div>
           </div>
 
+          <div className="mt-4">
+            <label className="mb-2 block text-sm text-gray-300">Findings &amp; Report</label>
+            <div className="grid grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() => { setTouched(true); setForm({ ...form, mode: 'standard' }) }}
+                className={`rounded border p-3 text-left transition-colors ${
+                  form.mode === 'standard'
+                    ? 'border-blue-500 bg-blue-500/10'
+                    : 'border-gray-700 hover:border-gray-500'
+                }`}
+              >
+                <div className="font-medium text-white">On</div>
+                <div className="mt-1 text-xs text-gray-400">
+                  Full port scan + service/OS fingerprint + findings + topology.
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={() => { setTouched(true); setForm({ ...form, mode: 'discovery' }) }}
+                className={`rounded border p-3 text-left transition-colors ${
+                  form.mode === 'discovery'
+                    ? 'border-blue-500 bg-blue-500/10'
+                    : 'border-gray-700 hover:border-gray-500'
+                }`}
+              >
+                <div className="font-medium text-white">Discovery only</div>
+                <div className="mt-1 text-xs text-gray-400">
+                  Host inventory (ARP + mDNS + passive) only. No port scan, findings or report.
+                </div>
+              </button>
+            </div>
+          </div>
+
           <label className="mt-4 flex items-center gap-2 text-sm text-gray-300">
             <input
               type="checkbox"
@@ -360,6 +396,11 @@ export default function EngagementDetail() {
                       {s.profile.replace('_', ' ')}
                     </Link>
                     <span className="ml-2 rounded border border-gray-700 px-1.5 py-0.5 text-[10px] uppercase text-gray-400">{s.protocol}</span>
+                    {s.mode === 'discovery' && (
+                      <span className="ml-1.5 rounded border border-emerald-700 px-1.5 py-0.5 text-[10px] uppercase text-emerald-400">
+                        discovery
+                      </span>
+                    )}
                   </td>
                   <td className="px-4 py-3"><StatusBadge status={s.status} /></td>
                   <td className="px-4 py-3 mono text-gray-300">{s.targets.join(', ')}</td>
