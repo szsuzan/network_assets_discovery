@@ -351,7 +351,7 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
             scan.status = "scanning"
             db.commit()
 
-            if scan.profile != "passive_only":
+            if scan.profile != "passive_only" and scan.mode != "discovery":
                 # Phase 1: re-verify "down" hosts with nmap -sn. Only useful
                 # when discovery had real Layer-2 (ARP returned data). The
                 # container has no L2 (Docker NAT), and L3 nmap -sn is
@@ -378,13 +378,17 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
 
             _raise_if_stopped(scan)
             _wait_if_paused(scan)
-            fingerprint_hosts(db, scan, host_rows)
+            if scan.mode != "discovery":
+                fingerprint_hosts(db, scan, host_rows)
             _raise_if_stopped(scan)
             scan.status = "analyzing"
             db.commit()
-            _emit_log(scan, "--- Analyzing: risk rules + topology ---")
-            run_risk_rules(db, scan)
-            capture_topology(db, scan)
+            if scan.mode == "discovery":
+                _emit_log(scan, "--- Discovery-only mode: skipping risk rules, topology + findings ---")
+            else:
+                _emit_log(scan, "--- Analyzing: risk rules + topology ---")
+                run_risk_rules(db, scan)
+                capture_topology(db, scan)
 
             _raise_if_stopped(scan)
             db.add(AuditLog(
@@ -870,7 +874,7 @@ def _run_streamed(scan, cmd: str, timeout: int = 60) -> str:
     process exits. Full stdout is captured and returned so callers can parse
     the XML/JSON payload. Returns "" on launch failure or timeout.
     """
-    _emit_log(scan, f"$ {cmd}", level="cmd")
+    _emit_log(scan, cmd, level="cmd")
     try:
         proc = subprocess.Popen(
             shlex.split(cmd),

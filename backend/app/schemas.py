@@ -62,6 +62,7 @@ class ScanCreate(BaseModel):
     profile: Optional[str] = Field(default=None, pattern="^(quick|full|stealth|passive_only)$")
     port_range: Optional[str] = None
     protocol: Optional[str] = Field(default=None, pattern="^(tcp|udp)$")
+    mode: Optional[str] = Field(default="standard", pattern="^(standard|discovery)$")
 
     @field_validator("port_range")
     @classmethod
@@ -139,6 +140,7 @@ class ScanOut(BaseModel):
     protocol: str
     status: str
     kind: str = "discover"
+    mode: str = "standard"
     hosts_total_in_scope: int
     hosts_discovered: int
     progress_pct: int
@@ -369,6 +371,7 @@ class AgentTaskOut(BaseModel):
     port_range: str
     protocol: str
     kind: str = "discover"
+    mode: str = "standard"
     reverify: Optional[dict] = None
     workers: Optional[int] = None
 

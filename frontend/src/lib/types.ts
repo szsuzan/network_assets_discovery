@@ -43,6 +43,7 @@ export interface Scan {
   protocol: string
   status: string
   kind: string
+  mode: string
   hosts_total_in_scope: number
   hosts_discovered: number
   progress_pct: number
