@@ -284,96 +284,98 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
                 return
             if completed:
                 from concurrent.futures import ThreadPoolExecutor as _SMPool
-                # Discovery-only scans are pure ARP/passive/mDNS inventory: no
-                # open ports exist, so skip the SNMP walks + container NSE
-                # fingerprint pass + findings/topology entirely.
+                # Discovery-only scans are a full ARP/L3/TCP discovery pass
+                # (agent runs nmap port scan + banner grab + OS) but skip only
+                # the findings pipeline (container NSE pass + risk rules).
                 discovery_only = scan.mode == "discovery"
                 for host in scan.hosts:
                     classify_device_type(host)
-                if not discovery_only:
-                    # Identify the hosts to probe, then run the SNMP walks
-                    # concurrently (each walk can block ~1-2s on a silent target) so
-                    # finalisation isn't a long serial tail. Results are applied on
-                    # the main thread so the session objects are only touched there.
-                    probes = []
-                    for host in scan.hosts:
-                        if host.status != "up":
-                            continue
-                        ip = str(host.ip)
-                        # SNMP enrichment matching the in-worker fingerprint path:
-                        # probe UDP 161 (and best-effort on unknown/network gear)
-                        # so agent scans also get sysDescr/sysName/vendor/OS hints.
-                        probed = sdb.execute(select(Port).where(
-                            Port.host_id == host.id,
-                            Port.port == 161,
-                            Port.protocol == "udp",
-                        )).scalar_one_or_none()
-                        if probed or host.device_type in ("unknown", "network_gear", "router", "firewall", "wireless_access_point", "switch"):
-                            probes.append((str(host.id), ip))
-                    host_by_id = {str(h.id): h for h in scan.hosts}
-                    snmp_community = settings_svc.get("nmap.snmp_community", "public")
-                    snmp_timeout = settings_svc.get_float("nmap.snmp_timeout", 3.0)
+                # Identify the hosts to probe, then run the SNMP walks
+                # concurrently (each walk can block ~1-2s on a silent target) so
+                # finalisation isn't a long serial tail. Results are applied on
+                # the main thread so the session objects are only touched there.
+                probes = []
+                for host in scan.hosts:
+                    if host.status != "up":
+                        continue
+                    ip = str(host.ip)
+                    # SNMP enrichment matching the in-worker fingerprint path:
+                    # probe UDP 161 (and best-effort on unknown/network gear)
+                    # so agent scans also get sysDescr/sysName/vendor/OS hints.
+                    probed = sdb.execute(select(Port).where(
+                        Port.host_id == host.id,
+                        Port.port == 161,
+                        Port.protocol == "udp",
+                    )).scalar_one_or_none()
+                    if probed or host.device_type in ("unknown", "network_gear", "router", "firewall", "wireless_access_point", "switch"):
+                        probes.append((str(host.id), ip))
+                host_by_id = {str(h.id): h for h in scan.hosts}
+                snmp_community = settings_svc.get("nmap.snmp_community", "public")
+                snmp_timeout = settings_svc.get_float("nmap.snmp_timeout", 3.0)
 
-                    def _snmp_probe(item):
-                        hid, ip = item
-                        try:
-                            return hid, _snmp_walk(ip, snmp_community, snmp_timeout)
-                        except Exception:
-                            return hid, None
+                def _snmp_probe(item):
+                    hid, ip = item
+                    try:
+                        return hid, _snmp_walk(ip, snmp_community, snmp_timeout)
+                    except Exception:
+                        return hid, None
 
-                    if probes:
-                        with _SMPool(max_workers=min(8, len(probes))) as pool:
-                            for hid, snmp_info in pool.map(_snmp_probe, probes):
-                                host = host_by_id.get(hid)
-                                if not host or not snmp_info:
-                                    continue
-                                existing = sdb.execute(
-                                    select(SNMPInfo).where(SNMPInfo.host_id == host.id)
-                                ).scalar_one_or_none()
-                                if not existing:
-                                    sdb.add(SNMPInfo(
-                                        host_id=host.id,
-                                        sys_descr=snmp_info.get("sys_descr"),
-                                        sys_name=snmp_info.get("sys_name"),
-                                        sys_location=snmp_info.get("sys_location"),
-                                        sys_objectid=snmp_info.get("sys_objectid"),
-                                        sys_uptime=snmp_info.get("uptime"),
-                                        default_community_found=True,
-                                    ))
-                                if snmp_info.get("sys_name") and not host.hostname:
-                                    host.hostname = snmp_info["sys_name"]
-                                if snmp_info.get("vendor") and not host.vendor:
-                                    host.vendor = snmp_info["vendor"]
-                                if snmp_info.get("sys_descr") and (
-                                    not host.os_guess
-                                    or host.os_guess.startswith("Most probably")
-                                    or (host.os_confidence or 100) < 60
-                                ):
-                                    host.os_guess = snmp_info["sys_descr"][:200]
-                                    host.os_confidence = 60 if host.os_guess else host.os_confidence
-                    # Container nmap fingerprint + NSE pass on the agent-confirmed
-                    # open ports so agent scans also get structured NSE findings
-                    # (weak TLS, SMB signing, anonymous FTP, web surface, OS refresh)
-                    # stored under scan_output/<scan>/fingerprint_<ip>.xml. Skipped
-                    # for passive_only profiles AND for re-verify passes: the agent
-                    # already deep-scanned the same ports (and any reverify-hidden
-                    # ones) with its own NSE script set, so re-running the full
-                    # container fingerprint here would duplicate that work and stall
-                    # finalisation for minutes.
-                    if (getattr(scan, "profile", "full") != "passive_only"
-                            and scan.kind != "reverify"):
-                        up_hosts = [h for h in scan.hosts if h.status == "up"]
-                        if up_hosts:
-                            from ..services.scan_worker import fingerprint_open_ports
-                            # probe=False: the agent already ran full -sV/-O service
-                            # fingerprinting, so this is a packed NSE-evidence pass
-                            # over known-open ports -- avoid duplicating the probe
-                            # work and stalling finalisation for minutes.
-                            fingerprint_open_ports(sdb, scan, up_hosts, probe=False)
+                if probes:
+                    with _SMPool(max_workers=min(8, len(probes))) as pool:
+                        for hid, snmp_info in pool.map(_snmp_probe, probes):
+                            host = host_by_id.get(hid)
+                            if not host or not snmp_info:
+                                continue
+                            existing = sdb.execute(
+                                select(SNMPInfo).where(SNMPInfo.host_id == host.id)
+                            ).scalar_one_or_none()
+                            if not existing:
+                                sdb.add(SNMPInfo(
+                                    host_id=host.id,
+                                    sys_descr=snmp_info.get("sys_descr"),
+                                    sys_name=snmp_info.get("sys_name"),
+                                    sys_location=snmp_info.get("sys_location"),
+                                    sys_objectid=snmp_info.get("sys_objectid"),
+                                    sys_uptime=snmp_info.get("uptime"),
+                                    default_community_found=True,
+                                ))
+                            if snmp_info.get("sys_name") and not host.hostname:
+                                host.hostname = snmp_info["sys_name"]
+                            if snmp_info.get("vendor") and not host.vendor:
+                                host.vendor = snmp_info["vendor"]
+                            if snmp_info.get("sys_descr") and (
+                                not host.os_guess
+                                or host.os_guess.startswith("Most probably")
+                                or (host.os_confidence or 100) < 60
+                            ):
+                                host.os_guess = snmp_info["sys_descr"][:200]
+                                host.os_confidence = 60 if host.os_guess else host.os_confidence
+                # Container nmap fingerprint + NSE pass on the agent-confirmed
+                # open ports so agent scans also get structured NSE findings
+                # (weak TLS, SMB signing, anonymous FTP, web surface, OS refresh)
+                # stored under scan_output/<scan>/fingerprint_<ip>.xml. Skipped
+                # for passive_only profiles, discovery-only scans (no findings
+                # wanted there) AND for re-verify passes: the agent already
+                # deep-scanned the same ports (and any reverify-hidden ones)
+                # with its own NSE script set, so re-running the full container
+                # fingerprint here would duplicate that work and stall
+                # finalisation for minutes.
+                if (not discovery_only
+                        and getattr(scan, "profile", "full") != "passive_only"
+                        and scan.kind != "reverify"):
+                    up_hosts = [h for h in scan.hosts if h.status == "up"]
+                    if up_hosts:
+                        from ..services.scan_worker import fingerprint_open_ports
+                        # probe=False: the agent already ran full -sV/-O service
+                        # fingerprinting, so this is a packed NSE-evidence pass
+                        # over known-open ports -- avoid duplicating the probe
+                        # work and stalling finalisation for minutes.
+                        fingerprint_open_ports(sdb, scan, up_hosts, probe=False)
                 sdb.commit()
                 if not discovery_only:
                     run_risk_rules(sdb, scan)
-                    capture_topology(sdb, scan)
+                # Topology is part of the report (kept for discovery-only too).
+                capture_topology(sdb, scan)
                 sdb.add(AuditLog(
                     engagement_id=scan.engagement_id,
                     scan_id=scan.id,

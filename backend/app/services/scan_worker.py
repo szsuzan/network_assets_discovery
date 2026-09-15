@@ -351,7 +351,7 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
             scan.status = "scanning"
             db.commit()
 
-            if scan.profile != "passive_only" and scan.mode != "discovery":
+            if scan.profile != "passive_only":
                 # Phase 1: re-verify "down" hosts with nmap -sn. Only useful
                 # when discovery had real Layer-2 (ARP returned data). The
                 # container has no L2 (Docker NAT), and L3 nmap -sn is
@@ -378,13 +378,13 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
 
             _raise_if_stopped(scan)
             _wait_if_paused(scan)
-            if scan.mode != "discovery":
-                fingerprint_hosts(db, scan, host_rows)
+            fingerprint_hosts(db, scan, host_rows)
             _raise_if_stopped(scan)
             scan.status = "analyzing"
             db.commit()
             if scan.mode == "discovery":
-                _emit_log(scan, "--- Discovery-only mode: skipping risk rules, topology + findings ---")
+                _emit_log(scan, "--- Discovery-only mode: skipping risk rules + findings (topology kept for report) ---")
+                capture_topology(db, scan)
             else:
                 _emit_log(scan, "--- Analyzing: risk rules + topology ---")
                 run_risk_rules(db, scan)

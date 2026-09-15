@@ -312,7 +312,7 @@ export default function EngagementDetail() {
           </div>
 
           <div className="mt-4">
-            <label className="mb-2 block text-sm text-gray-300">Findings &amp; Report</label>
+            <label className="mb-2 block text-sm text-gray-300">Report &amp; Findings</label>
             <div className="grid grid-cols-2 gap-3">
               <button
                 type="button"
@@ -323,9 +323,9 @@ export default function EngagementDetail() {
                     : 'border-gray-700 hover:border-gray-500'
                 }`}
               >
-                <div className="font-medium text-white">On</div>
+                <div className="font-medium text-white">Full (report + findings)</div>
                 <div className="mt-1 text-xs text-gray-400">
-                  Full port scan + service/OS fingerprint + findings + topology.
+                  Port scan + banner grab + OS/device type + risk findings + topology.
                 </div>
               </button>
               <button
@@ -337,9 +337,9 @@ export default function EngagementDetail() {
                     : 'border-gray-700 hover:border-gray-500'
                 }`}
               >
-                <div className="font-medium text-white">Discovery only</div>
+                <div className="font-medium text-white">Discovery only (no findings)</div>
                 <div className="mt-1 text-xs text-gray-400">
-                  Host inventory (ARP + mDNS + passive) only. No port scan, findings or report.
+                  Report generated (findings section empty). Host + port + banner + OS/device type still discovered.
                 </div>
               </button>
             </div>
