@@ -780,15 +780,23 @@ HTTP_PORTS = frozenset({80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 7000,
                         7001, 8081, 8082, 9000, 9001, 9080, 9443, 10000, 8083})
 
 
-def _scripts_for_ports(ports: list) -> str:
+def _scripts_for_ports(ports: list, discovery: bool = False) -> str:
     """Pick nmap scripts from the ports actually open, so HTTP enumeration only
     runs where a web service listens, RTSP only on stream ports, and SMB
     discovery on Windows file shares (also the main source of Windows
-    hostnames). 'default' always runs and targets each service itself."""
+    hostnames). 'default' always runs and targets each service itself.
+
+    In discovery-only mode the heavyweight findings scripts (http-enum's
+    directory walk, http-methods, http-headers, http-generator) are dropped -
+    they exist purely to enrich findings/risk rules which are OFF there - while
+    the identity-bearing ones (http-title, http-server-header, smb-os-discovery,
+    nbstat, rtsp-methods) are kept because they feed os_guess/device_type/
+    hostname. This is the main speedup for a discovery-only sweep."""
     s = ["default"]
     if any(int(p) in HTTP_PORTS for p in ports):
-        s += ["http-title", "http-headers", "http-methods",
-              "http-server-header", "http-enum", "http-generator"]
+        s += ["http-title", "http-server-header"]
+        if not discovery:
+            s += ["http-methods", "http-headers", "http-generator", "http-enum"]
     if 554 in [int(p) for p in ports]:
         s.append("rtsp-methods")
     if 445 in [int(p) for p in ports]:
@@ -1205,8 +1213,8 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
             # `_await_go` failure surfaces as None (which the loop treats as stop).
             return host or {}
         args = (
-            ["nmap", scan_type, "-n", "-sV", "-O", "-p", ",".join(ports), "--open",
-             fp_timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
+            ["nmap", scan_type, "-n", *([] if mode == "discovery" else ["-sV"]), "-O", "-p", ",".join(ports), "--open",
+             fp_timing, *shlex.split(f"--script {_scripts_for_ports(ports, discovery=(mode == 'discovery'))}"),
              "--max-retries", "1", "--host-timeout", "90s", str(ip), "-oX", "-"]
         )
         client.log(task_id, f"$ {' '.join(args)}", level="cmd")
@@ -1334,15 +1342,16 @@ def _leftover_ports_spec(already: set) -> str:
 
 def _deep_scan_host(client: ApiClient, task_id: str, ip: str, meta: dict,
                     ports_spec: str, use_connect: bool = False,
-                    profile: str = "quick"):
+                    profile: str = "quick", discovery: bool = False):
     """Run -sV -O + scripts on the given open ports of a host and post the
     result as a partial update so the server merges it live."""
     scan_type = "-sT" if use_connect else "-sS"
     timing = PROBE_TIMING.get(profile, "-T4")
     ports = ([int(x) for x in ports_spec.split(",")] if ports_spec else [])
     args = (
-        ["nmap", scan_type, "-n", "-sV", "-O", "-p", ports_spec, "--open",
-         timing, *shlex.split(f"--script {_scripts_for_ports(ports)}"),
+        ["nmap", scan_type, "-n", *([] if discovery else ["-sV"]),
+         "-O", "-p", ports_spec, "--open",
+         timing, *shlex.split(f"--script {_scripts_for_ports(ports, discovery=discovery)}"),
          "--max-retries", "1", "--host-timeout", "90s", ip, "-oX", "-"]
     )
     client.log(task_id, " ".join(args), level="cmd")
@@ -1416,7 +1425,8 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
                         client.log(task_id, f"Partial post failed: {e}", level="err")
                 return {"ip": ip, "ports": []}
             return _deep_scan_host(client, task_id, ip, meta or {},
-                                   ",".join(found), use_connect, profile) or {"ip": ip, "ports": []}
+                                   ",".join(found), use_connect, profile,
+                                   discovery=(mode == "discovery")) or {"ip": ip, "ports": []}
 
         for (ip, _meta), host in _map_hosts(_rv_down_worker, [(a["ip"], a) for a in alive],
                                             _p2_workers(), client, task_id, "re-verify-up"):
@@ -1445,7 +1455,8 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
             found = _parse_open_ports(pxml)
             if found:
                 _deep_scan_host(client, task_id, ip, {"mac": None, "vendor": None},
-                                ",".join(found), use_connect, profile)
+                                ",".join(found), use_connect, profile,
+                                discovery=(mode == "discovery"))
             return found
 
         leftover_done = 0

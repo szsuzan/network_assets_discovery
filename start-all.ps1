@@ -25,9 +25,11 @@ if (-not (Test-Path $DC)) {
 }
 
 Write-Host '=== [1/5] Ensuring Docker engine is running ... ===' -ForegroundColor Cyan
-& $DC info *> $null
-if ($LASTEXITCODE -ne 0) {
+$DockerUp = $false
+try { & $DC info *> $null; if ($LASTEXITCODE -eq 0) { $DockerUp = $true } } catch { $DockerUp = $false }
+if (-not $DockerUp) {
     $Candidates = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\Docker Desktop.exe'),
         'C:\Program Files\Docker\Docker\Docker Desktop.exe',
         (Join-Path $env:LOCALAPPDATA 'Docker\Docker Desktop.exe'),
         (Join-Path $env:LOCALAPPDATA 'Programs\Docker\Docker Desktop.exe')
@@ -40,18 +42,19 @@ if ($LASTEXITCODE -ne 0) {
     }
     Write-Host '  Docker engine is down - launching Docker Desktop ...'
     Start-Process -FilePath $Desktop
-    Write-Host '  waiting for the Docker engine to become reachable (up to 120s) ...'
+    Write-Host '  waiting for the Docker engine to become reachable (30s rounds, keeps retrying) ...'
     $EngineReady = $false
-    for ($i = 1; $i -le 24; $i++) {
-        Start-Sleep -Seconds 5
-        & $DC info *> $null
-        if ($LASTEXITCODE -eq 0) { $EngineReady = $true; break }
-        Write-Host "  engine not ready yet ... (${i}x5s)"
+    for ($i = 1; $i -le 12; $i++) {
+        Start-Sleep -Seconds 30
+        $EngineProbeOK = $false
+        try { & $DC info *> $null; if ($LASTEXITCODE -eq 0) { $EngineProbeOK = $true } } catch { $EngineProbeOK = $false }
+        if ($EngineProbeOK) { $EngineReady = $true; break }
+        Write-Host "  engine not ready yet ... (${i}x30s, will wait another 30s)"
         # Give up early if Docker Desktop already exited right after launch.
         if (-not (Get-Process 'Docker Desktop' -ErrorAction SilentlyContinue)) { break }
     }
     if (-not $EngineReady) {
-        Write-Host 'ERROR: Docker engine did not become ready within ~120s.' -ForegroundColor Red
+        Write-Host 'ERROR: Docker engine did not become ready within ~360s.' -ForegroundColor Red
         Write-Host 'Start Docker Desktop manually, then re-run this script.' -ForegroundColor Yellow
         exit 1
     }
