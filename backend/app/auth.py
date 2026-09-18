@@ -30,6 +30,8 @@ async def _decode_user_from_bearer(
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if not getattr(user, "active", True):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is disabled")
     if payload.get("ver", 0) != getattr(user, "jwt_version", 0):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
     return user
@@ -54,6 +56,24 @@ async def get_current_user(
             headers={"X-Require-Password-Change": "true"},
         )
     return user
+
+def require_roles(*roles: str):
+    """Dependency factory: restrict an endpoint to the given roles.
+
+    Usage: ``admin = Depends(require_roles("admin"))`` — injects the resolved
+    User and rejects any other role with a 403.
+    """
+    async def _dep(
+        user: User = Depends(get_current_user),
+    ) -> User:
+        if user.role not in roles:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Insufficient permissions",
+            )
+        return user
+    return _dep
+
 
 def create_access_token(user: User) -> str:
     payload = {

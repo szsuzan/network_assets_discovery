@@ -22,6 +22,7 @@ export default function Login() {
       const res = await login.mutateAsync({ email, password })
       localStorage.setItem('token', res.access_token)
       localStorage.setItem('role', res.role)
+      if (res.id) localStorage.setItem('user_id', res.id)
       if (res.must_change_password) {
         navigate('/change-password', { replace: true })
       } else {

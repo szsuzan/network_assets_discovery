@@ -1,4 +1,4 @@
-"""Best-effort webhook delivery for finding lifecycle events.
+"""Best-effort webhook delivery for scan lifecycle events.
 
 Delivers JSON payloads to every enabled webhook subscribed to the event, signed
 with the webhook's shared secret via an HMAC-SHA256 signature header when one is
@@ -16,15 +16,17 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Webhook
+from ..models import Host, Port, Webhook
 
 logger = logging.getLogger(__name__)
 
 EVENT_CREATED = "finding_created"
 EVENT_UPDATED = "finding_updated"
+EVENT_SCAN_COMPLETED = "scan_completed"
+EVENT_HOST_DISCOVERED = "host_discovered"
 
 
 def validate_webhook_url(url: str) -> str:
@@ -54,6 +56,40 @@ def validate_webhook_url(url: str) -> str:
     return url
 
 
+def engagement_brief(engagement) -> dict:
+    return {
+        "id": str(engagement.id) if engagement else None,
+        "client_name": getattr(engagement, "client_name", None),
+        "engagement_name": getattr(engagement, "engagement_name", None),
+    }
+
+
+def scan_brief(scan) -> dict:
+    return {
+        "id": str(scan.id) if scan else None,
+        "kind": getattr(scan, "kind", None),
+        "profile": getattr(scan, "profile", None),
+        "mode": getattr(scan, "mode", None),
+        "protocol": getattr(scan, "protocol", None),
+        "targets": getattr(scan, "targets", None) or [],
+        "port_range": getattr(scan, "port_range", None),
+    }
+
+
+def host_brief(host) -> dict:
+    return {
+        "ip": str(host.ip),
+        "mac": str(host.mac) if getattr(host, "mac", None) else None,
+        "macs": list(getattr(host, "macs", None) or []),
+        "vendor": host.vendor,
+        "hostname": host.hostname,
+        "device_type": host.device_type,
+        "os_guess": host.os_guess,
+        "status": host.status,
+        "discovery_method": list(host.discovery_method or []),
+    }
+
+
 def finding_payload(finding, host=None, scan=None, engagement=None, actor=None) -> dict:
     return {
         "finding": {
@@ -78,18 +114,53 @@ def finding_payload(finding, host=None, scan=None, engagement=None, actor=None) 
             "device_type": host.device_type if host else None,
             "os_guess": host.os_guess if host else None,
         } if host else None,
-        "scan": {
-            "id": str(scan.id) if scan else None,
-            "kind": scan.kind if scan else None,
-            "profile": scan.profile if scan else None,
-            "targets": scan.targets if scan else None,
-        } if scan else None,
-        "engagement": {
-            "id": str(engagement.id) if engagement else None,
-            "client_name": getattr(engagement, "client_name", None),
-            "engagement_name": getattr(engagement, "engagement_name", None),
-        } if engagement else None,
+        "scan": scan_brief(scan) if scan else None,
+        "engagement": engagement_brief(engagement) if engagement else None,
         "actor": {"email": actor.email, "role": actor.role} if actor else None,
+    }
+
+
+def scan_completed_payload(db: Session, scan, engagement=None) -> dict:
+    """Summary payload emitted when a scan (or re-verify pass) finishes."""
+    n_hosts = n_up = n_ports = 0
+    try:
+        base = select(func.count()).select_from(Host).where(Host.scan_id == scan.id)
+        n_hosts = db.execute(base).scalar_one()
+        n_up = db.execute(base.where(Host.status == "up")).scalar_one()
+        n_ports = db.execute(
+            select(func.count())
+            .select_from(Port)
+            .join(Host, Host.id == Port.host_id)
+            .where(Host.scan_id == scan.id)
+        ).scalar_one()
+    except Exception:
+        logger.exception("scan_completed summary query failed")
+    started = getattr(scan, "started_at", None) or getattr(scan, "reverify_started_at", None)
+    completed = getattr(scan, "completed_at", None)
+    duration = int(max((completed - started).total_seconds(), 0)) if started and completed else None
+    return {
+        "scan": scan_brief(scan),
+        "summary": {
+            "status": scan.status,
+            "started_at": started.isoformat() if started else None,
+            "completed_at": completed.isoformat() if completed else None,
+            "duration_seconds": duration,
+            "progress_pct": getattr(scan, "progress_pct", None),
+            "hosts_total_in_scope": getattr(scan, "hosts_total_in_scope", 0),
+            "hosts_discovered": getattr(scan, "hosts_discovered", 0),
+            "hosts": n_hosts,
+            "hosts_up": n_up,
+            "open_ports": n_ports,
+        },
+        "engagement": engagement_brief(engagement) if engagement else None,
+    }
+
+
+def host_discovered_payload(host, scan=None, engagement=None) -> dict:
+    return {
+        "host": host_brief(host),
+        "scan": scan_brief(scan) if scan else None,
+        "engagement": engagement_brief(engagement) if engagement else None,
     }
 
 
@@ -183,3 +254,11 @@ def deliver_finding_updated(db: Session, finding, host=None, scan=None, engageme
     payload = finding_payload(finding, host, scan, engagement, actor)
     payload["changes"] = changes or []
     deliver_event(db, EVENT_UPDATED, payload)
+
+
+def deliver_scan_completed(db: Session, scan, engagement=None):
+    deliver_event(db, EVENT_SCAN_COMPLETED, scan_completed_payload(db, scan, engagement))
+
+
+def deliver_host_discovered(db: Session, host, scan=None, engagement=None):
+    deliver_event(db, EVENT_HOST_DISCOVERED, host_discovered_payload(host, scan, engagement))

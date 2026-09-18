@@ -10,9 +10,31 @@ class User(Base):
     email = Column(Text, unique=True, nullable=False)
     password_hash = Column(Text, nullable=False)
     role = Column(Text, nullable=False, default="pentester")
+    active = Column(Boolean, nullable=False, default=True)
     must_change_password = Column(Boolean, nullable=False, default=False)
     jwt_version = Column(Integer, nullable=False, default=0)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class DeletionRequest(Base):
+    """An admin-approval queue for deleting engagements or scans.
+
+    Admins delete directly; pentesters submit a request here instead. When an
+    admin approves, the target is deleted and the request is marked resolved,
+    keeping a durable audit trail of who asked and who approved.
+    """
+    __tablename__ = "deletion_requests"
+    id = Column(Uuid, primary_key=True, default=uuid.uuid4)
+    target_type = Column(Text, nullable=False)          # "engagement" | "scan"
+    target_id = Column(Uuid, nullable=False)
+    target_label = Column(Text, nullable=False)
+    parent_label = Column(Text)                          # engagement name for scans
+    reason = Column(Text)
+    requested_by = Column(Uuid, ForeignKey("users.id"), nullable=False)
+    status = Column(Text, nullable=False, default="pending")  # pending|approved|rejected|cancelled
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    resolved_at = Column(DateTime(timezone=True))
+    resolved_by = Column(Uuid, ForeignKey("users.id"))
+    resolver_comment = Column(Text)
 
 class Engagement(Base):
     __tablename__ = "engagements"
@@ -33,6 +55,7 @@ class Scan(Base):
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     engagement_id = Column(Uuid, ForeignKey("engagements.id"), nullable=False)
     targets = Column(ARRAY(Text), nullable=False)
+    name = Column(Text)
     profile = Column(Text, nullable=False)
     port_range = Column(Text, nullable=False)
     protocol = Column(Text, nullable=False, default="tcp")

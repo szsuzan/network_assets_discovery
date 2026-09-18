@@ -1,8 +1,8 @@
 import asyncio
 from app.database import AsyncSessionLocal, engine
 from app.models import User
+from app.passwords import hash_password
 from sqlalchemy import func, select
-from app.routers.auth import hash_password
 
 async def seed_users() -> None:
     """Create the demo admin user if no users exist yet.

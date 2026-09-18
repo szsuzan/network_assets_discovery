@@ -1,16 +1,186 @@
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { useEngagements, useCreateEngagement, useDeleteEngagement, useUpdateEngagement } from '../hooks/useApi'
-import { StatusBadge } from '../components/Badge'
+import { useNavigate } from 'react-router-dom'
+import {
+  useEngagements,
+  useCreateEngagement,
+  useDeleteEngagement,
+  useUpdateEngagement,
+  useCreateDeletionRequest,
+} from '../hooks/useApi'
+import { StatCard, Chip, DotPill, ActionButton, PrimaryButton } from '../components/ui'
 import type { Engagement } from '../lib/types'
+import { isAdmin, canMutate, currentUserId } from '../lib/auth'
+
+const inputCls =
+  'w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-indigo-500'
+
+function EngagementAvatar({ name }: { name: string }) {
+  return (
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500/30 to-fuchsia-500/20 text-sm font-bold text-indigo-200 ring-1 ring-white/10">
+      {(name[0] || '?').toUpperCase()}
+    </div>
+  )
+}
+
+function EngagementCard({ e, editing, editForm, editError, onStartEdit, onCancelEdit, onEditChange, onSaveEdit, confirmDelete, onConfirmToggle, onDelete, canEdit, canArchive, canDelete, onToggleArchive }: {
+  e: Engagement
+  editing: boolean
+  editForm: { client_name: string; engagement_name: string; authorized_scope: string; start_date: string; end_date: string }
+  editError: string | null
+  onStartEdit: () => void
+  onCancelEdit: () => void
+  onEditChange: (patch: Partial<typeof editForm>) => void
+  onSaveEdit: () => void
+  confirmDelete: boolean
+  onConfirmToggle: () => void
+  onDelete: () => void
+  canEdit: boolean
+  canArchive: boolean
+  canDelete: boolean
+  onToggleArchive: () => void
+}) {
+  const archived = e.status === 'archived'
+  const navigate = useNavigate()
+  return (
+    <div
+      onClick={() => navigate(`/engagements/${e.id}`)}
+      className={`overflow-hidden rounded-xl border bg-gray-900 transition-colors hover:border-gray-700 cursor-pointer ${archived ? 'border-gray-800/60 opacity-90' : 'border-gray-800'}`}
+    >
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-3 px-4 py-3.5">
+        <EngagementAvatar name={e.engagement_name} />
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span
+              className="truncate text-base font-semibold text-white transition-colors hover:text-indigo-300"
+            >
+              {e.engagement_name}
+            </span>
+            <DotPill tone={archived ? 'offline' : 'online'}>{e.status}</DotPill>
+            {archived && canEdit && (
+              <span className="text-[11px] text-gray-500">read-only — restore to make changes</span>
+            )}
+          </div>
+          <div className="mt-0.5 text-xs text-gray-500">
+            Client <span className="text-gray-300">{e.client_name}</span>
+            {e.start_date || e.end_date ? (
+              <span className="ml-2">
+                {[e.start_date, e.end_date].filter(Boolean).join(' → ') || ''}
+              </span>
+            ) : null}
+          </div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[12px] font-semibold uppercase tracking-wider text-gray-600">Scope</span>
+            {e.authorized_scope.map((s) => (
+              <Chip key={s} tone="indigo">{s}</Chip>
+            ))}
+          </div>
+        </div>
+        {canEdit && (
+          <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            {!archived && (
+              <ActionButton onClick={editing ? onCancelEdit : onStartEdit} tone="ghost">
+                {editing ? 'Cancel' : 'Edit'}
+              </ActionButton>
+            )}
+            {canArchive && (
+              <ActionButton onClick={onToggleArchive} tone={archived ? 'primary' : 'reset'}>
+                {archived ? 'Restore' : 'Archive'}
+              </ActionButton>
+            )}
+            {canDelete && (
+              <ActionButton
+                onClick={confirmDelete ? onDelete : onConfirmToggle}
+                tone={confirmDelete ? 'confirm' : 'danger'}
+              >
+                {confirmDelete ? 'Confirm?' : 'Delete'}
+              </ActionButton>
+            )}
+          </div>
+        )}
+      </div>
+
+      {editing && !archived && (
+        <div className="border-t border-gray-800 bg-gray-950/40 px-5 py-4" onClick={(e) => e.stopPropagation()}>
+          <div className="mb-3">
+            <span className="text-sm font-semibold text-gray-200">Edit Engagement</span>
+            <span className="mt-0.5 block text-xs text-gray-500">
+              Changes apply immediately to this engagement.
+            </span>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">Client Name *</label>
+              <input
+                value={editForm.client_name}
+                onChange={(e) => onEditChange({ client_name: e.target.value })}
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">Engagement Name *</label>
+              <input
+                value={editForm.engagement_name}
+                onChange={(e) => onEditChange({ engagement_name: e.target.value })}
+                className={inputCls}
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className="mb-1 block text-xs text-gray-500">Authorized Scope (CIDR list, comma-separated) *</label>
+              <input
+                value={editForm.authorized_scope}
+                onChange={(e) => onEditChange({ authorized_scope: e.target.value })}
+                className={inputCls + ' mono'}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">Start Date</label>
+              <input
+                type="date"
+                value={editForm.start_date}
+                onChange={(e) => onEditChange({ start_date: e.target.value })}
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-500">End Date</label>
+              <input
+                type="date"
+                value={editForm.end_date}
+                onChange={(e) => onEditChange({ end_date: e.target.value })}
+                className={inputCls}
+              />
+            </div>
+          </div>
+          {editError && (
+            <p className="mt-3 whitespace-pre-line text-sm text-red-400">{editError}</p>
+          )}
+          <div className="mt-4 flex items-center gap-2">
+            <PrimaryButton onClick={onSaveEdit}>Save Changes</PrimaryButton>
+            <ActionButton onClick={onCancelEdit} tone="ghost">Cancel</ActionButton>
+          </div>
+        </div>
+      )}
+
+      {confirmDelete && (
+        <div className="border-t border-red-900/60 bg-red-950/30 px-4 py-2 text-xs text-red-300">
+          This permanently deletes the engagement and all its scans, hosts, findings and audit
+          trail. Click <span className="font-semibold text-red-200">Confirm?</span> again to proceed.
+        </div>
+      )}
+    </div>
+  )
+}
 
 export default function Engagements() {
   const { data: engagements, isLoading } = useEngagements()
   const createEngagement = useCreateEngagement()
   const deleteEngagement = useDeleteEngagement()
   const updateEngagement = useUpdateEngagement()
+  const createDeletionRequest = useCreateDeletionRequest()
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
-  const isAdmin = localStorage.getItem('role') === 'admin'
+  const admin = isAdmin()
+  const canEdit = canMutate()
+  const myId = currentUserId()
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({
     client_name: '',
@@ -31,6 +201,10 @@ export default function Engagements() {
   })
   const [editError, setEditError] = useState<string | null>(null)
 
+  const [deleteRequestFor, setDeleteRequestFor] = useState<Engagement | null>(null)
+  const [deleteReason, setDeleteReason] = useState('')
+  const [deleteReqError, setDeleteReqError] = useState<string | null>(null)
+
   const startEdit = (e: Engagement) => {
     setEditForm({
       client_name: e.client_name,
@@ -43,14 +217,12 @@ export default function Engagements() {
     setEditingId(e.id)
   }
 
-  const handleUpdate = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!editingId) return
+  const handleUpdate = async (id: string) => {
     setEditError(null)
     const scope = editForm.authorized_scope.split(',').map((s) => s.trim()).filter(Boolean)
     try {
       await updateEngagement.mutateAsync({
-        id: editingId,
+        id,
         client_name: editForm.client_name,
         engagement_name: editForm.engagement_name,
         authorized_scope: scope,
@@ -59,7 +231,17 @@ export default function Engagements() {
       })
       setEditingId(null)
     } catch (err: any) {
-      setEditError(err?.response?.data?.detail || 'Failed to update engagement')
+      setEditError(err?.response?.data?.detail?.toString?.() || 'Failed to update engagement')
+    }
+  }
+
+  const handleToggleArchive = async (e: Engagement) => {
+    setEditError(null)
+    try {
+      await updateEngagement.mutateAsync({ id: e.id, status: e.status === 'archived' ? 'active' : 'archived' })
+      setEditingId(null)
+    } catch (err: any) {
+      setEditError(err?.response?.data?.detail?.toString?.() || 'Could not change archive state')
     }
   }
 
@@ -78,7 +260,7 @@ export default function Engagements() {
       setShowForm(false)
       setForm({ client_name: '', engagement_name: '', authorized_scope: '', start_date: '', end_date: '' })
     } catch (err: any) {
-      setCreateError(err?.response?.data?.detail || 'Failed to create engagement')
+      setCreateError(err?.response?.data?.detail?.toString?.() || 'Failed to create engagement')
     }
   }
 
@@ -87,242 +269,226 @@ export default function Engagements() {
     await deleteEngagement.mutateAsync(id)
   }
 
+  const submitDeleteRequest = async () => {
+    if (!deleteRequestFor) return
+    setDeleteReqError(null)
+    try {
+      await createDeletionRequest.mutateAsync({
+        target_type: 'engagement',
+        target_id: deleteRequestFor.id,
+        reason: deleteReason || undefined,
+      })
+      setDeleteRequestFor(null)
+      setDeleteReason('')
+    } catch (err: any) {
+      setDeleteReqError(err?.response?.data?.detail?.toString?.() || 'Could not submit deletion request')
+    }
+  }
+
+  const total = engagements?.length || 0
+  const active = engagements?.filter((e) => e.status === 'active').length || 0
+  const archived = total - active
+
   return (
-    <div>
-      <div className="mb-6 flex items-center justify-between">
+    <div className="mx-auto max-w-6xl">
+      <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold">Engagements</h1>
-          <p className="mt-1 text-sm text-gray-400">Client engagements and their scan history</p>
+          <h1 className="text-2xl font-bold text-white">Engagements</h1>
+          <p className="mt-1 max-w-2xl text-sm text-gray-400">
+            Client engagements and their scan history — define the authorized scope, then run
+            scans against it.
+          </p>
         </div>
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
-        >
-          {showForm ? 'Cancel' : '+ New Engagement'}
-        </button>
+        {canEdit && (
+          <PrimaryButton onClick={() => setShowForm(!showForm)}>
+            {showForm ? 'Close form' : '+ New Engagement'}
+          </PrimaryButton>
+        )}
       </div>
 
-      {showForm && (
-        <form onSubmit={handleCreate} className="mb-6 rounded-lg border border-gray-800 bg-gray-900 p-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Client Name *</label>
-              <input
-                value={form.client_name}
-                onChange={(e) => setForm({ ...form, client_name: e.target.value })}
-                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
-                required
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Engagement Name *</label>
-              <input
-                value={form.engagement_name}
-                onChange={(e) => setForm({ ...form, engagement_name: e.target.value })}
-                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
-                required
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Authorized Scope (CIDR list, comma-separated)</label>
-              <input
-                value={form.authorized_scope}
-                onChange={(e) => setForm({ ...form, authorized_scope: e.target.value })}
-                placeholder="10.0.0.0/24, 192.168.1.0/24"
-                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white mono"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
+      <div className="mb-6 grid grid-cols-3 gap-4">
+        <StatCard label="Total engagements" value={total} tone="text-white" />
+        <StatCard label="Active" value={active} tone="text-emerald-400" />
+        <StatCard label="Archived" value={archived} tone="text-gray-400" />
+      </div>
+
+      {showForm && canEdit && (
+        <form onSubmit={handleCreate} className="mb-6 overflow-hidden rounded-xl border border-gray-800 bg-gray-900">
+          <div className="border-b border-gray-800/80 bg-gray-900/70 px-5 py-3">
+            <h2 className="text-sm font-semibold text-gray-200">New Engagement</h2>
+            <p className="mt-0.5 text-xs text-gray-500">
+              Create the client engagement that scans will report against.
+            </p>
+          </div>
+          <div className="px-5 py-4">
+            <div className="grid gap-4 md:grid-cols-2">
               <div>
-                <label className="mb-1 block text-sm text-gray-300">Start Date</label>
+                <label className="mb-1 block text-xs text-gray-500">Client Name *</label>
+                <input
+                  value={form.client_name}
+                  onChange={(e) => setForm({ ...form, client_name: e.target.value })}
+                  className={inputCls}
+                  required
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">Engagement Name *</label>
+                <input
+                  value={form.engagement_name}
+                  onChange={(e) => setForm({ ...form, engagement_name: e.target.value })}
+                  className={inputCls}
+                  required
+                />
+              </div>
+              <div className="md:col-span-2">
+                <label className="mb-1 block text-xs text-gray-500">Authorized Scope (CIDR list, comma-separated) *</label>
+                <input
+                  value={form.authorized_scope}
+                  onChange={(e) => setForm({ ...form, authorized_scope: e.target.value })}
+                  placeholder="10.0.0.0/24, 192.168.1.0/24"
+                  className={inputCls + ' mono'}
+                  required
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">Start Date</label>
                 <input
                   type="date"
                   value={form.start_date}
                   onChange={(e) => setForm({ ...form, start_date: e.target.value })}
-                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                  className={inputCls}
                 />
               </div>
               <div>
-                <label className="mb-1 block text-sm text-gray-300">End Date</label>
+                <label className="mb-1 block text-xs text-gray-500">End Date</label>
                 <input
                   type="date"
                   value={form.end_date}
                   onChange={(e) => setForm({ ...form, end_date: e.target.value })}
-                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
+                  className={inputCls}
                 />
               </div>
             </div>
-          </div>
-          <button
-            type="submit"
-            disabled={createEngagement.isPending}
-            className="mt-4 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            {createEngagement.isPending ? 'Creating...' : 'Create Engagement'}
-          </button>
-          {createError && (
-            <div className="mt-3 whitespace-pre-line rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-400">
-              {createError}
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                type="submit"
+                disabled={createEngagement.isPending}
+                className="rounded-md bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {createEngagement.isPending ? 'Creating…' : 'Create Engagement'}
+              </button>
+              <span className="text-xs text-gray-500">the engagement can be edited later</span>
             </div>
-          )}
+            {createError && (
+              <div className="mt-3 whitespace-pre-line rounded-md border border-red-800/60 bg-red-950/30 px-3 py-2 text-sm text-red-400">
+                {createError}
+              </div>
+            )}
+          </div>
         </form>
       )}
 
-      {editingId && (
-        <form onSubmit={handleUpdate} className="mb-6 rounded-lg border border-blue-800 bg-gray-900 p-4">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="font-medium">Edit Engagement</h2>
-            <button
-              type="button"
-              onClick={() => setEditingId(null)}
-              className="rounded bg-gray-700 px-3 py-1 text-xs font-medium text-white hover:bg-gray-600"
-            >
-              Cancel
-            </button>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Client Name *</label>
-              <input
-                value={editForm.client_name}
-                onChange={(e) => setEditForm({ ...editForm, client_name: e.target.value })}
-                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
-                required
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Engagement Name *</label>
-              <input
-                value={editForm.engagement_name}
-                onChange={(e) => setEditForm({ ...editForm, engagement_name: e.target.value })}
-                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
-                required
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-sm text-gray-300">Authorized Scope (CIDR list, comma-separated)</label>
-              <input
-                value={editForm.authorized_scope}
-                onChange={(e) => setEditForm({ ...editForm, authorized_scope: e.target.value })}
-                placeholder="10.0.0.0/24, 192.168.1.0/24"
-                className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white mono"
-                required
-              />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">Start Date</label>
-                <input
-                  type="date"
-                  value={editForm.start_date}
-                  onChange={(e) => setEditForm({ ...editForm, start_date: e.target.value })}
-                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm text-gray-300">End Date</label>
-                <input
-                  type="date"
-                  value={editForm.end_date}
-                  onChange={(e) => setEditForm({ ...editForm, end_date: e.target.value })}
-                  className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white"
-                />
-              </div>
-            </div>
-          </div>
-          {editError && (
-            <p className="mt-3 whitespace-pre-line text-sm text-red-400">{editError}</p>
-          )}
-          <button
-            type="submit"
-            disabled={updateEngagement.isPending}
-            className="mt-4 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-          >
-            {updateEngagement.isPending ? 'Saving...' : 'Save Changes'}
-          </button>
-        </form>
-      )}
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <span className="text-xs font-medium uppercase tracking-wider text-gray-500">Client engagements</span>
+        {engagements?.length ? (
+          <span className="text-[12px] text-gray-500">
+            {admin ? 'admins delete directly (two-step confirm); archiving makes an engagement read-only'
+              : canEdit ? 'deletion requests are queued for admin approval'
+              : 'read-only access'}
+          </span>
+        ) : null}
+      </div>
 
       {isLoading ? (
         <div className="py-12 text-center text-gray-400">Loading engagements...</div>
+      ) : engagements?.length ? (
+        <div className="space-y-4">
+          {engagements.map((e: Engagement) => (
+            <EngagementCard
+              key={e.id}
+              e={e}
+              editing={editingId === e.id}
+              editForm={editForm}
+              editError={editingId === e.id ? editError : null}
+              onStartEdit={() => startEdit(e)}
+              onCancelEdit={() => setEditingId(null)}
+              onEditChange={(patch) => setEditForm((f) => ({ ...f, ...patch }))}
+              onSaveEdit={() => handleUpdate(e.id)}
+              confirmDelete={confirmDelete === e.id}
+              onConfirmToggle={() => {
+                if (confirmDelete === e.id) {
+                  setConfirmDelete(null)
+                } else {
+                  setConfirmDelete(e.id)
+                  setTimeout(() => setConfirmDelete((c) => (c === e.id ? null : c)), 3000)
+                }
+              }}
+              onDelete={() => handleDelete(e.id)}
+              canEdit={canEdit}
+              canArchive={admin || e.created_by === myId}
+              canDelete={admin}
+              onToggleArchive={() => handleToggleArchive(e)}
+            />
+          ))}
+        </div>
       ) : (
-        <div className="overflow-hidden rounded-lg border border-gray-800">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-900 text-left text-gray-400">
-              <tr>
-                <th className="px-4 py-3 font-medium">Client</th>
-                <th className="px-4 py-3 font-medium">Engagement</th>
-                <th className="px-4 py-3 font-medium">Scope</th>
-                <th className="px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3 font-medium">Date Range</th>
-                <th className="px-4 py-3 font-medium">Created</th>
-                <th className="px-4 py-3 font-medium text-right">Actions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-800">
-              {engagements?.map((e: Engagement) => (
-                <tr key={e.id} className="bg-gray-900/50 hover:bg-gray-800/50">
-                  <td className="px-4 py-3 font-medium text-white">{e.client_name}</td>
-                  <td className="px-4 py-3">
-                    <Link to={`/engagements/${e.id}`} className="text-blue-400 hover:underline">
-                      {e.engagement_name}
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3 mono text-gray-300">{e.authorized_scope.join(', ')}</td>
-                  <td className="px-4 py-3"><StatusBadge status={e.status} /></td>
-                  <td className="px-4 py-3 text-gray-300">
-                    {e.start_date && e.end_date ? `${e.start_date} → ${e.end_date}` : e.start_date || '—'}
-                  </td>
-                  <td className="px-4 py-3 text-gray-400">{new Date(e.created_at).toLocaleDateString()}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-2">
-                      <button
-                        onClick={() => (editingId === e.id ? setEditingId(null) : startEdit(e))}
-                        className="rounded border border-blue-800 px-3 py-1 text-xs font-medium text-blue-400 hover:bg-blue-950"
-                      >
-                        {editingId === e.id ? 'Cancel' : 'Edit'}
-                      </button>
-                      {isAdmin && (
-                        confirmDelete === e.id ? (
-                          <span className="inline-flex gap-2">
-                            <button
-                              onClick={() => handleDelete(e.id)}
-                              disabled={deleteEngagement.isPending}
-                              className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
-                            >
-                              Confirm
-                            </button>
-                            <button
-                              onClick={() => setConfirmDelete(null)}
-                              className="rounded bg-gray-700 px-3 py-1 text-xs font-medium text-white hover:bg-gray-600"
-                            >
-                              Cancel
-                            </button>
-                          </span>
-                        ) : (
-                          <button
-                            onClick={() => setConfirmDelete(e.id)}
-                            disabled={deleteEngagement.isPending}
-                            className="rounded border border-red-800 px-3 py-1 text-xs font-medium text-red-400 hover:bg-red-950 disabled:opacity-50"
-                          >
-                            Delete
-                          </button>
-                        )
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-              {!engagements?.length && (
-                <tr>
-                  <td colSpan={7} className="px-4 py-12 text-center text-gray-400">
-                    No engagements yet. Create your first one.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
+        <div className="rounded-xl border border-dashed border-gray-700 px-6 py-16 text-center">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gray-800">
+            <svg viewBox="0 0 24 24" className="h-7 w-7 text-indigo-400" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3v18M3 12h18" />
+              <circle cx="12" cy="12" r="9" />
+            </svg>
+          </div>
+          <h3 className="text-lg font-semibold text-gray-200">No engagements yet</h3>
+          <p className="mx-auto mt-1 max-w-md text-sm text-gray-500">
+            Define the client and its authorized scope, then start a scan to build the asset inventory.
+          </p>
+          <ol className="mx-auto mt-5 flex max-w-2xl flex-col gap-2 text-left text-sm text-gray-400 sm:flex-row sm:gap-4">
+            {[
+              ['1', 'Create the engagement'],
+              ['2', 'Open it and start a scan'],
+              ['3', 'Review hosts, findings and the report'],
+            ].map(([n, t]) => (
+              <li key={n} className="flex items-center gap-2">
+                <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-indigo-600/40 text-xs font-bold text-indigo-200">{n}</span>
+                {t}
+              </li>
+            ))}
+          </ol>
+          {canEdit && (
+            <PrimaryButton onClick={() => setShowForm(true)} className="mt-6">New Engagement</PrimaryButton>
+          )}
+        </div>
+      )}
+
+      {deleteRequestFor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">
+          <div className="w-full max-w-md rounded-xl border border-gray-700 bg-gray-900 p-5">
+            <h3 className="text-sm font-semibold text-gray-200">Request engagement deletion</h3>
+            <p className="mt-1 text-xs text-gray-400">
+              "{deleteRequestFor.engagement_name}" will be queued for an admin to review. Nothing is
+              deleted until an admin approves.
+            </p>
+            <label className="mt-4 mb-1 block text-xs text-gray-500">Reason (recommended)</label>
+            <textarea
+              value={deleteReason}
+              onChange={(e) => setDeleteReason(e.target.value)}
+              rows={3}
+              placeholder="Why should this engagement be removed?"
+              className={inputCls}
+            />
+            {deleteReqError && (
+              <p className="mt-2 text-sm text-red-400">{deleteReqError}</p>
+            )}
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <ActionButton tone="ghost" onClick={() => { setDeleteRequestFor(null); setDeleteReason(''); setDeleteReqError(null) }}>
+                Cancel
+              </ActionButton>
+              <PrimaryButton onClick={submitDeleteRequest} disabled={createDeletionRequest.isPending}>
+                {createDeletionRequest.isPending ? 'Submitting…' : 'Submit request'}
+              </PrimaryButton>
+            </div>
+          </div>
         </div>
       )}
     </div>

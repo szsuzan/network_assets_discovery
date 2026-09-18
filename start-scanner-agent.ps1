@@ -16,22 +16,30 @@ $Subnets    = '192.168.1.0/24'
 $PidFile    = Join-Path $env:TEMP 'opencode\agent_pid.txt'
 $OutLog     = Join-Path $env:TEMP 'opencode\agent_out.log'
 $ErrLog     = Join-Path $env:TEMP 'opencode\agent_err.log'
-$KeyFile    = Join-Path $env:TEMP 'opencode\new_agent_key.txt'   # local-only fallback (never committed)
+$RepoKeyFile = Join-Path $PSScriptRoot 'agent_key_local.txt'    # durable, gitignored
+$TmpKeyFile  = Join-Path $env:TEMP 'opencode\new_agent_key.txt' # legacy fallback
+$AgentCtlDir = Join-Path $env:USERPROFILE '.subnex'
+$SubnexKeyFile = Join-Path $AgentCtlDir 'agent_key'            # agentctl-managed
 
 # API key resolution order: 1) SCANNER_AGENT_KEY env var, 2) SCANNER_AGENT_API_KEY
-# env var, 3) the local key file written when the agent was (re)created. Keeps
-# the secret out of the repo AND out of the process command line.
+# env var, 3) repo-local agent_key_local.txt, 4) agentctl's ~/.subnex/agent_key,
+# 5) the legacy temp key file. Keeps the secret out of the repo AND out of the
+# process command line.
 $ApiKey = ''
 if (-not [string]::IsNullOrWhiteSpace($env:SCANNER_AGENT_KEY)) {
     $ApiKey = ($env:SCANNER_AGENT_KEY).Trim()
 } elseif (-not [string]::IsNullOrWhiteSpace($env:SCANNER_AGENT_API_KEY)) {
     $ApiKey = ($env:SCANNER_AGENT_API_KEY).Trim()
-} elseif (Test-Path -LiteralPath $KeyFile) {
-    $ApiKey = (Get-Content -Raw -LiteralPath $KeyFile).Trim()
+} elseif (Test-Path -LiteralPath $RepoKeyFile) {
+    $ApiKey = (Get-Content -Raw -LiteralPath $RepoKeyFile).Trim()
+} elseif (Test-Path -LiteralPath $SubnexKeyFile) {
+    $ApiKey = (Get-Content -Raw -LiteralPath $SubnexKeyFile).Trim()
+} elseif (Test-Path -LiteralPath $TmpKeyFile) {
+    $ApiKey = (Get-Content -Raw -LiteralPath $TmpKeyFile).Trim()
 }
 
 if ([string]::IsNullOrWhiteSpace($ApiKey)) {
-    Write-Host "ERROR: agent API key not found. Set env SCANNER_AGENT_KEY, or place the key in:`n  $KeyFile" -ForegroundColor Red
+    Write-Host "ERROR: agent API key not found. Set env SCANNER_AGENT_KEY, or place the key in:`n  $RepoKeyFile" -ForegroundColor Red
     exit 1
 }
 

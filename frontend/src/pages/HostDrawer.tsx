@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useHostDetail, usePatchHost } from '../hooks/useApi'
 import { DeviceIcon, SeverityBadge } from '../components/SeverityBadge'
@@ -13,6 +13,19 @@ export default function HostDrawer() {
   const [notes, setNotes] = useState('')
   const [tagInput, setTagInput] = useState('')
   const [saved, setSaved] = useState(false)
+  const [expandedPorts, setExpandedPorts] = useState<Set<string>>(new Set())
+
+  const togglePort = (portId: string) => {
+    setExpandedPorts((prev) => {
+      const next = new Set(prev)
+      if (next.has(portId)) {
+        next.delete(portId)
+      } else {
+        next.add(portId)
+      }
+      return next
+    })
+  }
 
   useEffect(() => {
     if (host) setNotes(host.notes || '')
@@ -47,7 +60,7 @@ export default function HostDrawer() {
       ) : (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
           {/* Host info */}
-          <div className="rounded-lg border border-gray-800 bg-gray-900 p-6">
+          <div className="self-start rounded-lg border border-gray-800 bg-gray-900 p-6">
             <div className="mb-4 flex items-center gap-3">
               <DeviceIcon type={host.device_type || undefined} size="lg" />
               <div>
@@ -119,7 +132,14 @@ export default function HostDrawer() {
           <div className="lg:col-span-2 space-y-6">
             <div className="rounded-lg border border-gray-800 bg-gray-900">
               <h2 className="border-b border-gray-800 bg-gray-900/70 px-4 py-3 font-medium">Open Ports ({host.ports?.length || 0})</h2>
-              <table className="w-full text-sm">
+              <table className="w-full table-fixed text-sm">
+                <colgroup>
+                  <col className="w-[12%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[16%]" />
+                  <col />
+                </colgroup>
                 <thead className="bg-gray-900/50 text-left text-gray-400">
                   <tr>
                     <th className="px-4 py-2 font-medium">Port</th>
@@ -130,15 +150,59 @@ export default function HostDrawer() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-800">
-                  {(host.ports || []).map((p) => (
-                    <tr key={p.id} className="bg-gray-900/50">
-                      <td className="mono px-4 py-2 text-blue-400">{p.port}/{p.protocol}</td>
-                      <td className="px-4 py-2 text-emerald-400">{p.state}</td>
-                      <td className="px-4 py-2 text-gray-200">{p.service || '—'}</td>
-                      <td className="px-4 py-2 text-gray-400">{p.version || '—'}</td>
-                      <td className="max-w-64 truncate px-4 py-2 text-gray-400 mono text-xs">{p.banner || '—'}</td>
-                    </tr>
-                  ))}
+                  {(host.ports || []).map((p) => {
+                    const portScripts = p.scripts || []
+                    const expanded = expandedPorts.has(p.id)
+                    return (
+                      <Fragment key={p.id}>
+                        <tr
+                          className={'cursor-pointer border-t border-gray-800 bg-gray-900/50 hover:bg-gray-800' + (expanded ? ' bg-gray-800' : '')}
+                          onClick={() => togglePort(p.id)}
+                          title="Click to expand port details"
+                        >
+                          <td className="mono px-4 py-2 text-blue-400">{p.port}/{p.protocol}</td>
+                          <td className="px-4 py-2 text-emerald-400">{p.state}</td>
+                          <td className="px-4 py-2 text-gray-200">{p.service || '—'}</td>
+                          <td className="px-4 py-2 text-gray-400">{p.version || '—'}</td>
+                          <td className="max-w-64 truncate px-4 py-2 text-gray-400 mono text-xs">
+                            {p.banner || '—'}
+                            {portScripts.length > 0 && (
+                              <span className="ml-2 rounded bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-400">
+                                {expanded ? '▾' : '▸'} {portScripts.length} script{portScripts.length === 1 ? '' : 's'}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                        {expanded && (
+                          <tr>
+                            <td colSpan={5} className="bg-gray-950 px-4 py-3">
+                              <div className="space-y-3">
+                                {portScripts.length === 0 && (
+                                  <div className="rounded border border-gray-800 bg-gray-900/40 px-3 py-3">
+                                    <p className="text-xs text-gray-400">
+                                      No NSE scripts captured for this port.
+                                      {p.version && <span> Version detected: <span className="text-gray-200">{p.version}</span></span>}
+                                      {p.banner && <span> Banner: <span className="mono text-gray-200">{p.banner}</span></span>}
+                                    </p>
+                                  </div>
+                                )}
+                                {portScripts.map((s) => (
+                                  <div key={s.id} className="overflow-hidden rounded border border-gray-800 bg-gray-900/70">
+                                    <div className="mono border-b border-gray-800 bg-gray-900 px-3 py-1.5 text-xs font-medium text-amber-400">
+                                      {s.id}
+                                    </div>
+                                    <pre className="mono max-h-72 overflow-auto whitespace-pre-wrap px-3 py-2 text-xs leading-relaxed text-gray-300">
+                                      {s.output || '(no output)'}
+                                    </pre>
+                                  </div>
+                                ))}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
+                    )
+                  })}
                   {!host.ports?.length && (
                     <tr><td colSpan={5} className="px-4 py-8 text-center text-gray-500">No open ports detected</td></tr>
                   )}

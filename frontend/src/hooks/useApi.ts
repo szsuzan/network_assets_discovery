@@ -1,11 +1,96 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '../lib/api'
-import type { Engagement, Scan, Host, HostDetail, Finding, Topology, Setting } from '../lib/types'
+import type { Engagement, Scan, Host, HostDetail, Finding, Topology, Setting, User, DeletionRequest } from '../lib/types'
 
 export function useLogin() {
   return useMutation({
     mutationFn: (data: { email: string; password: string }) =>
-      api.post('/api/auth/login', data).then((r) => r.data),
+      api.post('/api/auth/login', data).then((r) => r.data as { access_token: string; token_type: string; role: string; must_change_password: boolean; id?: string | null }),
+  })
+}
+
+export function useMe() {
+  return useQuery({
+    queryKey: ['me'],
+    queryFn: () => api.get<User>('/api/auth/me').then((r) => r.data),
+  })
+}
+
+export function useUsers() {
+  return useQuery({
+    queryKey: ['users'],
+    queryFn: () => api.get<User[]>('/api/users').then((r) => r.data),
+  })
+}
+
+export function useCreateUser() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { email: string; password: string; role: string; active?: boolean }) =>
+      api.post<User>('/api/users', data).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  })
+}
+
+export function useUpdateUser() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { role?: string; active?: boolean } }) =>
+      api.patch<User>(`/api/users/${id}`, data).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  })
+}
+
+export function useResetUserPassword() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, password }: { id: string; password: string }) =>
+      api.post<User>(`/api/users/${id}/reset-password`, { password }).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['users'] }),
+  })
+}
+
+export function useDeletionRequests() {
+  return useQuery({
+    queryKey: ['deletion-requests'],
+    queryFn: () => api.get<DeletionRequest[]>('/api/deletion-requests').then((r) => r.data),
+    refetchInterval: 15000,
+  })
+}
+
+export function useCreateDeletionRequest() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { target_type: 'engagement' | 'scan'; target_id: string; reason?: string }) =>
+      api.post<DeletionRequest>('/api/deletion-requests', data).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['deletion-requests'] }),
+  })
+}
+
+export function useApproveDeletionRequest() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/api/deletion-requests/${id}/approve`).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['deletion-requests'] }),
+  })
+}
+
+export function useRejectDeletionRequest() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, reason }: { id: string; reason?: string }) =>
+      api
+        .post(`/api/deletion-requests/${id}/reject${reason ? `?reason=${encodeURIComponent(reason)}` : ''}`)
+        .then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['deletion-requests'] }),
+  })
+}
+
+export function useCancelDeletionRequest() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api.post(`/api/deletion-requests/${id}/cancel`).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['deletion-requests'] }),
   })
 }
 
@@ -80,7 +165,7 @@ export function useDeleteEngagement() {
 export function useStartScan(engagementId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: { targets: string[]; profile: string; port_range: string; protocol: string; mode: string }) =>
+    mutationFn: (data: { name?: string; targets: string[]; profile: string; port_range: string; protocol: string; mode: string }) =>
       api.post<Scan>(`/api/engagements/${engagementId}/scans`, data).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['engagement', engagementId, 'scans'] }),
   })
@@ -333,9 +418,26 @@ export function useResumeScan() {
 export function useReverifyScan() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (scanId: string) =>
-      api.post<Scan>(`/api/scans/${scanId}/reverify`).then((r) => r.data),
+    mutationFn: (opts: { scanId: string; check_new_hosts?: boolean; port_range?: string }) =>
+      api
+        .post<Scan>(`/api/scans/${opts.scanId}/reverify`, {
+          check_new_hosts: opts.check_new_hosts,
+          port_range: opts.port_range,
+        })
+        .then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['scan'] }),
+  })
+}
+
+export function useUpdateScan() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (opts: { scanId: string; data: Partial<Pick<Scan, 'name' | 'targets' | 'profile' | 'port_range' | 'protocol'>> }) =>
+      api.patch<Scan>(`/api/scans/${opts.scanId}`, opts.data).then((r) => r.data),
+    onSuccess: (_, vars) => {
+      qc.invalidateQueries({ queryKey: ['scan', vars.scanId] })
+      qc.invalidateQueries({ queryKey: ['engagement'] })
+    },
   })
 }
 
@@ -350,6 +452,7 @@ export type AgentInfo = {
   subnets: string[]
   capabilities: string[]
   notes?: string
+  current_version?: string | null
   created_at: string
 }
 
@@ -375,6 +478,57 @@ export function useDeleteAgent() {
   return useMutation({
     mutationFn: (id: string) => api.delete(`/api/agents/${id}`),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
+  })
+}
+
+export function useResetAgentKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<AgentInfo & { api_key: string }>(`/api/agents/${id}/reset-key`).then((r) => r.data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
+  })
+}
+
+export type AgentHealth = {
+  id: string
+  name: string
+  live: string
+  status: string
+  last_seen: string | null
+  age_seconds: number | null
+  version?: string | null
+  hostname?: string | null
+  os?: string | null
+  subnets: string[]
+  capabilities: string[]
+  notes?: string
+  current_version?: string | null
+  server_time: string
+}
+
+export function useAgentHealth() {
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.get<AgentHealth>(`/api/agents/${id}/health`).then((r) => r.data),
+  })
+}
+
+export function useRestartAgent() {
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post<{ ok: boolean; requested: boolean; name: string }>(`/api/agents/${id}/restart`).then((r) => r.data),
+  })
+}
+
+export function useUpdateAgent() {
+  return useMutation({
+    mutationFn: (id: string) =>
+      api
+        .post<{ ok: boolean; requested: boolean; name: string; current_version?: string }>(
+          `/api/agents/${id}/update`,
+        )
+        .then((r) => r.data),
   })
 }
 

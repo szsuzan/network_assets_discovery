@@ -10,13 +10,19 @@ required, agents register once with an API key and can run anywhere (Linux,
 Windows/macOS with Npcap, or a Docker container with --network=host).
 """
 import hashlib
+import hmac
+import json
+import os
+import re
 import secrets
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 import uuid
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, delete, cast
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,12 +34,33 @@ from ..schemas import (
     AgentLogIn, AgentResultIn,
 )
 from ..auth import get_current_user
-from ..websocket import manager
+from ..websocket import manager, _redis_client
 from ..services import settings as settings_svc
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
 ONLINE_WINDOW_SECONDS = 90  # default; overridden per-request by the settings cache
+
+
+# The scanner_agent.py source served to agents for remote self-update. The
+# backend image mounts ./agent read-only at /app/agent (docker-compose).
+_AGENT_SCRIPT = Path(os.environ.get("AGENT_SCRIPT_PATH", "/app/agent/scanner_agent.py"))
+_agent_version_cache = {"version": None}
+
+
+def _agent_script_source() -> Optional[str]:
+    try:
+        return _AGENT_SCRIPT.read_text(encoding="utf-8")
+    except Exception:
+        return None
+
+
+def _agent_script_current_version() -> str:
+    if _agent_version_cache["version"] is None:
+        src = _agent_script_source()
+        m = re.search(r'^VERSION\s*=\s*"([^"]+)"', src or "", re.M)
+        _agent_version_cache["version"] = m.group(1) if m else "unknown"
+    return _agent_version_cache["version"]
 
 
 def _hash_key(key: str) -> str:
@@ -115,6 +142,7 @@ async def list_agents(
             subnets=a.subnets or [],
             capabilities=a.capabilities or [],
             notes=a.notes,
+            current_version=_agent_script_current_version(),
             created_at=a.created_at,
         ))
     return out
@@ -138,6 +166,115 @@ async def delete_agent(
     return None
 
 
+@router.get("/{agent_id}/health")
+async def agent_health(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Live health snapshot for the Agents page (repair mode).
+
+    Reads the last heartbeat the server received; `live` is computed the same
+    way as the list view so the UI can show exactly why an agent looks broken
+    (offline vs stale vs disabled) before offering one-click repair.
+    """
+    agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    now = datetime.now(timezone.utc)
+    age = None if not agent.last_seen else (now - agent.last_seen).total_seconds()
+    return {
+        "id": str(agent.id),
+        "name": agent.name,
+        "live": _live_status(agent),
+        "status": agent.status,
+        "last_seen": agent.last_seen.isoformat() if agent.last_seen else None,
+        "age_seconds": round(age, 1) if age is not None else None,
+        "version": agent.version,
+        "hostname": agent.hostname,
+        "os": agent.os,
+        "subnets": agent.subnets or [],
+        "capabilities": agent.capabilities or [],
+        "notes": agent.notes,
+        "current_version": _agent_script_current_version(),
+        "server_time": now.isoformat(),
+    }
+
+
+@router.post("/{agent_id}/reset-key", response_model=AgentKeyOut)
+async def reset_agent_key(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Rotate an agent's API key: the old key stops working immediately and a
+    fresh one is returned (shown once). Use this to 'repair' an agent whose key
+    leaked, or to kick an existing install off the server."""
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403, detail="Only admins/pentesters can reset agent keys")
+    agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    new_key = secrets.token_urlsafe(32)
+    # Since the hash below is swapped immediately, the OLD key stops working
+    # right away. The pending rotation is published to Redis so the agent can
+    # exchange its old key for the new one on its next poll (grace window).
+    old_hash = agent.api_key_hash
+    agent.api_key_hash = _hash_key(new_key)
+    rc = _redis_client()
+    try:
+        rc.set(f"agent:key_new:{agent.id}", new_key, ex=300)
+        rc.set(f"agent:key_old:{agent.id}", old_hash, ex=300)
+    finally:
+        rc.close()
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="agent_key_rotated",
+        detail={"name": agent.name, "id": str(agent.id)},
+    ))
+    await db.commit()
+    return AgentKeyOut(id=agent.id, name=agent.name, api_key=new_key)
+
+
+def _claim_pending_rotation(agent_id: uuid.UUID, presented_key: Optional[str]) -> Optional[str]:
+    """Give the agent the new key if it still presents the pre-rotation key.
+
+    Used by the key-sync endpoint: the old key is invalid against the DB the
+    moment rotation happens, but the pending rotation record (old-hash + new
+    plaintext, both TTL'd) lets exactly that old key redeem the new one once.
+    Returns the new key, or None when there is nothing redeemable.
+    """
+    rc = _redis_client()
+    try:
+        stored_old = rc.get(f"agent:key_old:{agent_id}")
+        if not stored_old or not presented_key:
+            return None
+        if not hmac.compare_digest(stored_old, _hash_key(presented_key)):
+            return None
+        new_key = rc.get(f"agent:key_new:{agent_id}")
+        if not new_key:
+            return None
+        rc.delete(f"agent:key_old:{agent_id}", f"agent:key_new:{agent_id}")
+        return new_key
+    finally:
+        rc.close()
+
+
+@router.post("/key/sync")
+async def agent_key_sync(
+    agent_id: uuid.UUID,
+    x_api_key: str = Header(default=None),
+):
+    """Agent-side counterpart of key rotation: redeem the new API key with the
+    old one during the 5-minute grace window after reset-key is clicked (the old
+    key is otherwise already revoked). The agent persists the returned key and
+    uses it for all subsequent polls."""
+    new_key = _claim_pending_rotation(agent_id, x_api_key)
+    if new_key is None:
+        raise HTTPException(status_code=401, detail="No pending key rotation for this agent/key")
+    return {"api_key": new_key}
+
+
 @router.post("/heartbeat")
 async def heartbeat(
     data: AgentHeartbeatIn,
@@ -157,7 +294,103 @@ async def heartbeat(
     if data.capabilities:
         agent.capabilities = data.capabilities
     await db.commit()
-    return {"ok": True, "server_time": datetime.now(timezone.utc).isoformat(), "agent_id": str(agent.id)}
+    # A pending restart request (issued from the Agents page) is claimed here so
+    # the agent can self-restart on its next poll.
+    restart_requested = False
+    update_requested = False
+    rc = _redis_client()
+    try:
+        if rc.exists(f"agent:restart:{agent.id}"):
+            rc.delete(f"agent:restart:{agent.id}")
+            restart_requested = True
+        if rc.exists(f"agent:update:{agent.id}"):
+            rc.delete(f"agent:update:{agent.id}")
+            update_requested = True
+    finally:
+        rc.close()
+    return {
+        "ok": True,
+        "server_time": datetime.now(timezone.utc).isoformat(),
+        "agent_id": str(agent.id),
+        "restart_requested": restart_requested,
+        "update_requested": update_requested,
+    }
+
+
+@router.post("/{agent_id}/restart")
+async def request_agent_restart(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Ask an agent to restart itself.
+
+    Agents only ever dial out to the server, so the server can't push a
+    restart. Instead a short-lived flag is stored in Redis and the agent picks
+    it up on its next heartbeat, then exits (its supervisor relaunches it).
+    Useful after deploying agent code updates or clearing a wedged process.
+    """
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403, detail="Only admins/pentesters can restart agents")
+    agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    rc = _redis_client()
+    try:
+        rc.set(f"agent:restart:{agent.id}", "1", ex=300)
+    finally:
+        rc.close()
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="agent_restart_requested",
+        detail={"name": agent.name, "id": str(agent.id)},
+    ))
+    await db.commit()
+    return {"ok": True, "requested": True, "name": agent.name}
+
+
+@router.post("/{agent_id}/update")
+async def request_agent_update(
+    agent_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Ask an agent to pull the latest scanner_agent.py and self-update.
+
+    Same heart-beat flag pattern as restart: the agent sees the request, fetches
+    /api/agents/script, replaces its own file atomically, then re-execs so the
+    new code takes over under the same supervisor.
+    """
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403, detail="Only admins/pentesters can update agents")
+    agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    rc = _redis_client()
+    try:
+        rc.set(f"agent:update:{agent.id}", "1", ex=300)
+    finally:
+        rc.close()
+    db.add(AuditLog(
+        user_id=current_user.id,
+        action="agent_update_requested",
+        detail={"name": agent.name, "id": str(agent.id)},
+    ))
+    await db.commit()
+    return {
+        "ok": True, "requested": True, "name": agent.name,
+        "current_version": _agent_script_current_version(),
+    }
+
+
+@router.get("/script")
+async def agent_script(agent: Agent = Depends(get_agent)):
+    """Serve the current scanner_agent.py so an agent can update itself in
+    place. Only reachable with a live agent key."""
+    src = _agent_script_source()
+    if src is None:
+        raise HTTPException(status_code=404, detail="Agent script not available on server")
+    return PlainTextResponse(src, media_type="text/x-python")
 
 
 @router.get("/tasks/next", response_model=Optional[AgentTaskOut])
@@ -201,6 +434,20 @@ async def claim_next_task(
             "already_ports": scan.port_range,
             "protocol": scan.protocol,
         }
+        # Non-scan re-verify options (check_new_hosts etc.) are cached in redis
+        # by the reverify endpoint; fold them into the context the agent sees.
+        check_new_hosts = False
+        try:
+            rc = _redis_client()
+            raw = rc.get(f"scan:reverify:cfg:{scan.id}")
+            rc.delete(f"scan:reverify:cfg:{scan.id}")
+            rc.close()
+            if raw:
+                rcfg = json.loads(raw)
+                check_new_hosts = bool(rcfg.get("check_new_hosts", False))
+        except Exception:
+            pass
+        reverify_ctx["check_new_hosts"] = check_new_hosts
 
     return AgentTaskOut(
         id=task.id,
@@ -267,6 +514,28 @@ async def agent_log(
         "type": "cmd_log", "scan_id": str(task.scan_id), "level": data.level, "line": line[:500],
     })
     return {"ok": True}
+
+
+def _deliver_agent_hosts(scan_id: str, host_ids: list):
+    """Post-commit host_discovered webhook delivery (background thread, sync session)."""
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from ..services.db import SessionLocal
+        from ..services.webhook import deliver_host_discovered
+        from ..models import Host as SyncHost, Scan as SyncScan, Engagement as SyncEng
+        with SessionLocal() as s:
+            scan = s.get(SyncScan, uuid.UUID(scan_id))
+            engagement = s.get(SyncEng, scan.engagement_id) if scan else None
+            for hid in host_ids:
+                try:
+                    host = s.get(SyncHost, uuid.UUID(hid))
+                    if host:
+                        deliver_host_discovered(s, host, scan=scan, engagement=engagement)
+                except Exception:
+                    continue  # delivery is best-effort per host
+    except Exception:
+        logger.exception("host_discovered webhook delivery failed")
 
 
 def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
@@ -389,6 +658,8 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
                 from ..services.scan_worker import _snapshot_pass
                 _snapshot_pass(sdb, scan)
                 sdb.commit()
+                from ..services.scan_worker import _deliver_scan_completed_webhook
+                _deliver_scan_completed_webhook(sdb, scan)
             else:
                 scan.status = "failed"
                 scan.completed_at = datetime.now(timezone.utc)
@@ -448,6 +719,7 @@ async def agent_result(
     partial = data.status == "partial"
     up_count = 0
     open_ports_total = 0
+    newly_created_up = []
     for hd in data.hosts:
         host = existing.get(hd.ip)
         if not host:
@@ -475,6 +747,8 @@ async def agent_result(
                 db.add(host)
                 await db.flush()
                 existing[hd.ip] = host
+                if host.status == "up":
+                    newly_created_up.append(host)
                 by_identity = _by_identity()
         if "agent" not in (host.discovery_method or []):
             host.discovery_method = list(host.discovery_method or []) + ["agent"]
@@ -587,6 +861,13 @@ async def agent_result(
     task.status = "succeeded"
     task.completed_at = datetime.now(timezone.utc)
     await db.commit()
+
+    if newly_created_up:
+        threading.Thread(
+            target=_deliver_agent_hosts,
+            args=(str(scan.id), [str(h.id) for h in newly_created_up]),
+            daemon=True,
+        ).start()
 
     await manager.broadcast(str(scan.id), {
         "type": "cmd_log", "scan_id": str(scan.id), "level": "info",

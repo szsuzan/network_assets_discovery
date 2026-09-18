@@ -45,6 +45,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - ./agent:/app/agent:ro
       - ./database/migrations:/app/database/migrations:ro
       - ./frontend/dist:/app/static:ro
     command: python -m app.run_server --worker --reload

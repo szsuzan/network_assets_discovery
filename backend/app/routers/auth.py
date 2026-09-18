@@ -4,15 +4,13 @@ from collections import deque
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from passlib.context import CryptContext
 from ..database import get_db
 from ..models import User
+from ..passwords import hash_password, verify_password
 from ..schemas import LoginRequest, TokenResponse, UserOut, ChangePasswordRequest
 from ..auth import create_access_token, get_current_user_unchecked
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
-
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto", bcrypt__rounds=13)
 
 # Simple in-memory brute-force guard keyed by client IP: failed logins are
 # remembered for 15 minutes, and after 10 failed attempts from one IP further
@@ -47,8 +45,14 @@ async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
+    if not getattr(user, "active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Account is disabled"
+        )
     token = create_access_token(user)
-    return TokenResponse(access_token=token, role=user.role, must_change_password=user.must_change_password)
+    return TokenResponse(access_token=token, role=user.role, must_change_password=user.must_change_password,
+                         id=user.id)
 
 @router.post("/change-password")
 async def change_password(
@@ -83,8 +87,14 @@ async def refresh_token():
     # In production this would validate a refresh token
     raise HTTPException(status_code=501, detail="Refresh token flow not yet implemented")
 
-def verify_password(plain, hashed):
-    return pwd_context.verify(plain, hashed)
+@router.get("/me", response_model=UserOut)
+async def me(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user_unchecked),
+):
+    """Return the current user's identity (id, email, role, active status).
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
+    Uses the unchecked dependency so an account that is still flagged
+    ``must_change_password`` can fetch its own profile.
+    """
+    return current_user

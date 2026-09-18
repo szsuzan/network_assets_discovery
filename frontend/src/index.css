@@ -5,10 +5,22 @@
 :root {
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
   --font-sans: 'Inter', system-ui, sans-serif;
+  font-size: 17px;
 }
 
 body {
   font-family: var(--font-sans);
+  margin: 0;
+}
+
+/*
+ * Always reserve the vertical scrollbar gutter. Otherwise expanding an
+ * accordion/drawer that passes the fold makes the classic scrollbar appear,
+ * the viewport narrows by its width, and the whole layout jitters sideways
+ * (and back when it is closed again).
+ */
+html {
+  scrollbar-gutter: stable;
 }
 
 .mono {
@@ -24,17 +36,31 @@ body {
  * (0,1,0): container-scoped rules such as the terminal console (.bg-black …)
  * then win over these, keeping dark UI islands dark even in light mode.
  */
-:where(html:not(.dark)) .bg-gray-950 { background-color: #f3f4f6; }
-:where(html:not(.dark)) .bg-gray-900 { background-color: #ffffff; }
-:where(html:not(.dark)) .bg-gray-900\/70 { background-color: rgba(249, 250, 251, 0.85); }
-:where(html:not(.dark)) .bg-gray-900\/50 { background-color: rgba(249, 250, 251, 0.65); }
-:where(html:not(.dark)) .bg-gray-900\/95 { background-color: rgba(249, 250, 251, 0.95); }
-:where(html:not(.dark)) .bg-gray-800 { background-color: #f9fafb; }
-:where(html:not(.dark)) .bg-gray-800\/70 { background-color: rgba(255, 255, 255, 0.85); }
-:where(html:not(.dark)) .bg-gray-800\/50 { background-color: rgba(243, 244, 246, 0.85); }
-:where(html:not(.dark)) .bg-gray-700 { background-color: #e5e7eb; }
-:where(html:not(.dark)) .bg-gray-600 { background-color: #d1d5db; }
-:where(html:not(.dark)) .bg-gray-600\/20 { background-color: rgba(209, 213, 219, 0.55); }
+:where(html:not(.dark)) .bg-gray-950 { background-color: #e6e7e9; }
+:where(html:not(.dark)) .bg-gray-950\/40 { background-color: #e6e7e9; }
+:where(html:not(.dark)) .bg-gray-900 { background-color: #edeef0; }
+:where(html:not(.dark)) .bg-gray-900\/40 { background-color: #edeef0; }
+:where(html:not(.dark)) .bg-gray-900\/50 { background-color: rgba(237, 238, 240, 0.85); }
+:where(html:not(.dark)) .bg-gray-900\/60 { background-color: #edeef0; }
+:where(html:not(.dark)) .bg-gray-900\/70 { background-color: rgba(237, 238, 240, 0.9); }
+:where(html:not(.dark)) .bg-gray-900\/95 { background-color: rgba(237, 238, 240, 0.95); }
+:where(html:not(.dark)) .bg-gray-800 { background-color: #f1f2f3; }
+:where(html:not(.dark)) .bg-gray-800\/70 { background-color: rgba(237, 238, 240, 0.85); }
+:where(html:not(.dark)) .bg-gray-800\/50 { background-color: rgba(238, 239, 241, 0.85); }
+:where(html:not(.dark)) .bg-gray-700 { background-color: #d8dade; }
+:where(html:not(.dark)) .bg-gray-700\/60 { background-color: #d8dade; }
+:where(html:not(.dark)) .bg-gray-600 { background-color: #c9ccd1; }
+:where(html:not(.dark)) .bg-gray-600\/20 { background-color: rgba(201, 204, 209, 0.55); }
+
+/* Tinted notice banners (amber / red / indigo) keep a readable pastel in light */
+:where(html:not(.dark)) .bg-amber-950\/30 { background-color: rgba(250, 245, 229, 0.95); }
+:where(html:not(.dark)) .bg-red-950\/30 { background-color: rgba(252, 240, 240, 0.95); }
+:where(html:not(.dark)) .bg-red-950\/50 { background-color: rgba(251, 225, 225, 0.9); }
+:where(html:not(.dark)) .bg-indigo-950\/30 { background-color: rgba(236, 240, 252, 0.95); }
+
+/* The intro/create-agent gradient must end light, not near-black */
+:where(html:not(.dark)) .from-emerald-950\/50 { --tw-gradient-from: #e3eee8; }
+:where(html:not(.dark)) .to-gray-900 { --tw-gradient-to: #edeef0; }
 
 /* Text — dark and crisp on the light background */
 :where(html:not(.dark)) .text-white { color: #111827; }
@@ -47,19 +73,25 @@ body {
 :where(html:not(.dark)) .placeholder-gray-500::placeholder { color: #4b5563; }
 
 /* Borders / dividers — separators clearly visible */
-:where(html:not(.dark)) .border-gray-800 { border-color: #d1d5db; }
-:where(html:not(.dark)) .border-gray-700 { border-color: #9ca3af; }
-:where(html:not(.dark)) .border-gray-600 { border-color: #6b7280; }
-:where(html:not(.dark)) .divide-gray-800 > :not([hidden]) ~ :not([hidden]) { border-color: #d1d5db; }
+:where(html:not(.dark)) .border-gray-800 { border-color: #c6c9ce; }
+:where(html:not(.dark)) .border-gray-800\/80 { border-color: #c6c9ce; }
+:where(html:not(.dark)) .border-gray-700 { border-color: #9499a0; }
+:where(html:not(.dark)) .border-gray-600 { border-color: #656c73; }
+:where(html:not(.dark)) .divide-gray-800 > :not([hidden]) ~ :not([hidden]) { border-color: #c6c9ce; }
 
-html:not(.dark) .hover\:bg-gray-800:hover { background-color: #eef0f2; }
-html:not(.dark) .hover\:bg-gray-800\/50:hover { background-color: rgba(238, 240, 242, 0.9); }
-html:not(.dark) .hover\:bg-gray-700:hover { background-color: #d1d5db; }
-html:not(.dark) .hover\:bg-gray-600:hover { background-color: #c7ccd2; }
+html:not(.dark) .hover\:bg-gray-800:hover { background-color: #e9eaec; }
+html:not(.dark) .hover\:bg-gray-800\/50:hover { background-color: rgba(233, 234, 236, 0.9); }
+html:not(.dark) .hover\:bg-gray-800\/40:hover { background-color: rgba(233, 234, 236, 0.9); }
+html:not(.dark) .hover\:bg-gray-800\/60:hover { background-color: #d8dade; }
+html:not(.dark) .hover\:bg-gray-700:hover { background-color: #c9ccd1; }
+html:not(.dark) .hover\:bg-gray-600:hover { background-color: #bec2c8; }
+html:not(.dark) .hover\:bg-red-950:hover { background-color: #f8d4d4; }
 html:not(.dark) .hover\:text-white:hover { color: #111827; }
 html:not(.dark) .hover\:text-gray-300:hover { color: #1f2937; }
+html:not(.dark) .hover\:text-gray-200:hover { color: #111827; }
 html:not(.dark) .hover\:border-gray-600:hover { border-color: #4b5563; }
 html:not(.dark) .hover\:border-gray-500:hover { border-color: #6b7280; }
+html:not(.dark) .hover\:border-gray-700:hover { border-color: #4b5563; }
 
 /* Colored text — the -400/-300 pastels read poorly on white, so pull them
  * several steps darker while keeping the hue. */
@@ -129,7 +161,7 @@ html:not(.dark) .hover\:bg-red-500\/10:hover { background-color: rgba(185, 28, 2
  * These rules out-scope the :where() globals above (higher specificity) so
  * only the console-related overrides below apply.
  */
-html:not(.dark) .bg-black { background-color: #f8fafc; }
+html:not(.dark) .bg-black { background-color: #e2e4e7; }
 html:not(.dark) .bg-black .text-white { color: #111827; }
 html:not(.dark) .bg-black .text-gray-300 { color: #374151; }
 html:not(.dark) .bg-black .text-gray-400 { color: #4b5563; }

@@ -11,6 +11,7 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     role: str
     must_change_password: bool = False
+    id: Optional[uuid.UUID] = None
 
 class LoginRequest(BaseModel):
     email: str
@@ -24,10 +25,69 @@ class UserOut(BaseModel):
     id: uuid.UUID
     email: str
     role: str
+    active: bool = True
+    must_change_password: bool = False
     created_at: datetime
 
     class Config:
         from_attributes = True
+
+VALID_ROLES = {"admin", "pentester", "viewer"}
+
+class UserCreate(BaseModel):
+    email: str
+    password: str
+    role: str = "pentester"
+    active: bool = True
+
+    @field_validator("email")
+    @classmethod
+    def _email_valid(cls, v: str) -> str:
+        v = v.strip()
+        if "@" not in v or "." not in v.rsplit("@", 1)[-1]:
+            raise ValueError("A valid email address is required")
+        return v.lower()
+
+    @field_validator("password")
+    @classmethod
+    def _password_valid(cls, v: str) -> str:
+        if len(v) < 10:
+            raise ValueError("Password must be at least 10 characters")
+        if v.strip().lower() in ("password123", "changeme", "password"):
+            raise ValueError("That password is too weak; choose a stronger one")
+        return v
+
+    @field_validator("role")
+    @classmethod
+    def _role_valid(cls, v: str) -> str:
+        if v not in VALID_ROLES:
+            raise ValueError(f"role must be one of: {', '.join(sorted(VALID_ROLES))}")
+        return v
+
+class UserUpdate(BaseModel):
+    """Admin edit of an account. Role and active-state live here so permissions
+    can change without ever touching the user's password."""
+    role: Optional[str] = None
+    active: Optional[bool] = None
+
+    @field_validator("role")
+    @classmethod
+    def _role_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in VALID_ROLES:
+            raise ValueError(f"role must be one of: {', '.join(sorted(VALID_ROLES))}")
+        return v
+
+class ResetPasswordRequest(BaseModel):
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def _password_valid(cls, v: str) -> str:
+        if len(v) < 10:
+            raise ValueError("Password must be at least 10 characters")
+        if v.strip().lower() in ("password123", "changeme", "password"):
+            raise ValueError("That password is too weak; choose a stronger one")
+        return v
 
 class EngagementCreate(BaseModel):
     client_name: str
@@ -42,6 +102,14 @@ class EngagementUpdate(BaseModel):
     authorized_scope: Optional[List[str]] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
+    status: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def _status_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("active", "archived"):
+            raise ValueError("status must be 'active' or 'archived'")
+        return v
 
 class EngagementOut(BaseModel):
     id: uuid.UUID
@@ -57,8 +125,39 @@ class EngagementOut(BaseModel):
     class Config:
         from_attributes = True
 
+class DeletionRequestCreate(BaseModel):
+    target_type: str
+    target_id: uuid.UUID
+    reason: Optional[str] = None
+
+    @field_validator("target_type")
+    @classmethod
+    def _type_valid(cls, v: str) -> str:
+        if v not in ("engagement", "scan"):
+            raise ValueError("target_type must be 'engagement' or 'scan'")
+        return v
+
+class DeletionRequestOut(BaseModel):
+    id: uuid.UUID
+    target_type: str
+    target_id: uuid.UUID
+    target_label: str
+    parent_label: Optional[str] = None
+    reason: Optional[str] = None
+    requested_by: uuid.UUID
+    requested_by_email: Optional[str] = None
+    status: str
+    created_at: datetime
+    resolved_at: Optional[datetime] = None
+    resolved_by: Optional[uuid.UUID] = None
+    resolver_comment: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
 class ScanCreate(BaseModel):
     targets: List[str]
+    name: Optional[str] = None
     profile: Optional[str] = Field(default=None, pattern="^(quick|full|stealth|passive_only)$")
     port_range: Optional[str] = None
     protocol: Optional[str] = Field(default=None, pattern="^(tcp|udp)$")
@@ -91,15 +190,58 @@ class ScanCreate(BaseModel):
             raise ValueError("At least one target (IP or CIDR) is required")
         return cleaned
 
+class ScanUpdate(BaseModel):
+    """Editable scan details. Targets/profile/port_range/protocol may only be
+    changed on a finished scan; name may be changed anytime."""
+    name: Optional[str] = None
+    targets: Optional[List[str]] = None
+    profile: Optional[str] = Field(default=None, pattern="^(quick|full|stealth|passive_only)$")
+    port_range: Optional[str] = None
+    protocol: Optional[str] = Field(default=None, pattern="^(tcp|udp)$")
+
+    @field_validator("port_range")
+    @classmethod
+    def _port_range_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = "".join(v.split()) if isinstance(v, str) else v
+        if not PORT_RANGE_RE.match(v):
+            raise ValueError("port_range must be nmap-style ranges, e.g. '1-1000' or '22,80,443-445'")
+        for part in v.split(","):
+            lo, _, hi = part.partition("-")
+            lo_v = int(lo)
+            if not (0 < lo_v <= 65535):
+                raise ValueError("port numbers must be between 1 and 65535")
+            if hi:
+                hi_v = int(hi)
+                if not (0 < hi_v <= 65535) or hi_v < lo_v:
+                    raise ValueError("invalid port range bounds")
+        return v
+
+    @field_validator("targets")
+    @classmethod
+    def _targets_nonempty(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return v
+        cleaned = [t.strip() for t in v if t and t.strip()]
+        if not cleaned:
+            raise ValueError("At least one target (IP or CIDR) is required")
+        return cleaned
+
 class ReverifyIn(BaseModel):
     """Optional controls for a re-verify scan of a previously-completed scan.
 
     If port_range is omitted, the residual sweep covers all TCP ports the
     original scan did not already check (computed from the stored scan range).
+
+    check_new_hosts: re-run host discovery across the scan targets first, and
+    run the full port + fingerprint pipeline on any host that was not in the
+    previous scan (it has no prior port data to reuse).
     """
     port_range: Optional[str] = None
     recheck_down_hosts: Optional[bool] = None
     sweep_remaining_ports: Optional[bool] = None
+    check_new_hosts: Optional[bool] = None
 
     @field_validator("port_range")
     @classmethod
@@ -135,6 +277,7 @@ class ScanOut(BaseModel):
     id: uuid.UUID
     engagement_id: uuid.UUID
     targets: List[str]
+    name: Optional[str] = None
     profile: str
     port_range: str
     protocol: str
@@ -186,6 +329,12 @@ class HostOut(BaseModel):
     class Config:
         from_attributes = True
 
+class PortScriptOut(BaseModel):
+    """One NSE script result (id + raw output) recorded against an open port."""
+    id: str
+    output: str = ""
+
+
 class PortOut(BaseModel):
     id: uuid.UUID
     port: int
@@ -194,6 +343,7 @@ class PortOut(BaseModel):
     service: Optional[str] = None
     version: Optional[str] = None
     banner: Optional[str] = None
+    scripts: List[PortScriptOut] = []
 
     class Config:
         from_attributes = True
@@ -345,6 +495,7 @@ class AgentOut(BaseModel):
     subnets: List[str] = []
     capabilities: List[str] = []
     notes: str = ""
+    current_version: Optional[str] = None
     created_at: datetime
 
     class Config:

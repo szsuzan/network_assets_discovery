@@ -175,53 +175,142 @@ PROFILE_TIMING = {
 # --------------------------------------------------------------------------- #
 
 _HTTP_NSE = "http-title,http-headers,http-methods,http-server-header,http-enum,http-generator,http-git"
+# The heavy end of _HTTP_NSE: directory brute-force + page crawlers that are
+# slow on cramped web servers. Resolved per scan via Settings (nmap.heavy_scripts).
+_HEAVY_NSE = {"http-enum", "http-generator", "http-git"}
 _SSL_NSE = ",ssl-cert,ssl-enum-ciphers,ssl-ccs-injection,ssl-poodle"
 _SMB_NSE = ("smb-protocols,smb-security-mode,smb2-security-mode,"
             "smb-enum-shares,smb-os-discovery,smb2-capabilities,"
             "smb-vuln-ms17-010,smb-vuln-ms10-061")
 
 PORT_NSE_SCRIPTS = {
-    25:  "smtp-open-relay",
-    20:  "ftp-anon,ftp-syst",
-    21:  "ftp-anon,ftp-syst",
-    22:  "ssh2-enum-algos,ssh-hostkey,ssh-auth-methods",
-    23:  "telnet-encryption,telnet-ntlm-info",
-    53:  "dns-nsid,dns-mx,dns-zone-transfer,dns-recursion",
-    80:  _HTTP_NSE,
-    111: "rpc-info",
-    123: "ntp-info",
-    135: "msrpc-enum",
-    137: "nbstat",
-    139: _SMB_NSE,
-    161: "snmp-info",
-    389: "ldap-rootdse",
-    443: _HTTP_NSE + _SSL_NSE,
-    445: _SMB_NSE,
-    515: "cups-queue-info",
-    554: "rtsp-methods",
-    631: "cups-queue-info",
-    636: "ssl-cert,ssl-enum-ciphers",
-    993: "ssl-cert,ssl-enum-ciphers,imap-ntlm-info",
-    995: "ssl-cert,ssl-enum-ciphers",
+    20:   "ftp-anon,ftp-syst",
+    21:   "ftp-anon,ftp-syst",
+    22:   "ssh2-enum-algos,ssh-hostkey,ssh-auth-methods,sshv1",
+    23:   "telnet-encryption,telnet-ntlm-info",
+    25:   "smtp-commands,smtp-open-relay",
+    53:   "dns-nsid,dns-zone-transfer,dns-recursion,dns-service-discovery",
+    69:   "tftp-enum,tftp-version",
+    79:   "finger",
+    80:   _HTTP_NSE,
+    102:  "s7-info",
+    110:  "pop3-capabilities,pop3-ntlm-info",
+    111:  "rpc-grind",
+    119:  "nntp-ntlm-info",
+    123:  "ntp-info",
+    135:  "msrpc-enum",
+    137:  "nbstat",
+    139:  _SMB_NSE,
+    143:  "imap-capabilities,imap-ntlm-info",
+    161:  "snmp-info,snmp-interfaces,snmp-netstat",
+    194:  "irc-info",
+    389:  "ldap-rootdse",
+    443:  _HTTP_NSE + _SSL_NSE,
+    445:  _SMB_NSE,
+    502:  "modbus-discover",
+    515:  "cups-queue-info",
+    554:  "rtsp-methods",
+    587:  "smtp-commands,smtp-open-relay",
+    631:  "cups-queue-info",
+    636:  "ssl-cert,ssl-enum-ciphers,ldap-rootdse",
+    993:  "ssl-cert,ssl-enum-ciphers,imap-capabilities,imap-ntlm-info",
+    995:  "ssl-cert,ssl-enum-ciphers,pop3-capabilities,pop3-ntlm-info",
+    1433: "ms-sql-info,ms-sql-ntlm-info,ms-sql-config,ms-sql-dac",
+    1521: "oracle-tns-version",
+    1522: "oracle-tns-version",
+    2049: "nfs-ls,nfs-showmount,nfs-statfs",
+    2375: "docker-version",
+    2376: "docker-version",
+    3000: _HTTP_NSE,
+    3128: _HTTP_NSE,
     3269: "msrpc-enum",
     3306: "mysql-info,mysql-enum,mysql-empty-password",
-3389: "rdp-enum-encryption,rdp-ntlm-info",
-     # no dedicated postgres NSE ships with nmap; 5432 inherits the default set
-     5900: "vnc-info",
-     6000: "x11-access",
-     6379: "redis-info",
+    3389: "rdp-enum-encryption,rdp-ntlm-info",
+    44818: "omron-info",
+    4569: "iax2-version",
+    5000: _HTTP_NSE,
+    5060: "sip-methods",
+    5061: "sip-methods,ssl-cert",
+    5432: "pgsql-brute",
+    5433: "pgsql-brute",
+    5900: "vnc-info",
+    6000: "x11-access",
+    6379: "redis-info",
+    6380: "redis-info",
+    6667: "irc-info",
+    6697: "irc-info,ssl-cert,ssl-enum-ciphers",
+    7001: _HTTP_NSE,
     8000: _HTTP_NSE,
-    8009: "ajp-header",
+    8009: "ajp-headers",
+    8069: _HTTP_NSE,
     8080: _HTTP_NSE,
+    8081: _HTTP_NSE,
     8443: _HTTP_NSE + _SSL_NSE,
     8834: _HTTP_NSE,
+    8888: _HTTP_NSE,
+    9000: _HTTP_NSE,
+    9090: _HTTP_NSE,
+    9443: _HTTP_NSE + _SSL_NSE,
+    11211: "memcached-info",
     27017: "mongodb-info",
+    27018: "mongodb-info",
+}
+
+# Service-name fallback so services on NON-STANDARD ports still get their
+# script set (e.g. postgres on 6432, http on 4180). Port-number hits in
+# PORT_NSE_SCRIPTS always win; this map only fills the gap.
+SERVICE_NSE_SCRIPTS = {
+    "ssh": "ssh2-enum-algos,ssh-hostkey,ssh-auth-methods,sshv1",
+    "http": _HTTP_NSE,
+    "http-alt": _HTTP_NSE,
+    "http-proxy": _HTTP_NSE,
+    "https": _HTTP_NSE + _SSL_NSE,
+    "https-alt": _HTTP_NSE + _SSL_NSE,
+    "ssl/http": _HTTP_NSE + _SSL_NSE,
+    "postgresql": "pgsql-brute",
+    "postgres": "pgsql-brute",
+    "ms-sql-s": "ms-sql-info,ms-sql-ntlm-info,ms-sql-config,ms-sql-dac",
+    "mssql": "ms-sql-info,ms-sql-ntlm-info,ms-sql-config,ms-sql-dac",
+    "mysql": "mysql-info,mysql-enum,mysql-empty-password",
+    "redis": "redis-info",
+    "mongodb": "mongodb-info",
+    "memcached": "memcached-info",
+    "docker": "docker-version",
+    "mqtt": "mqtt-subscribe",
+    "oracle-tns": "oracle-tns-version",
+    "nfs": "nfs-ls,nfs-showmount,nfs-statfs",
+    "snmp": "snmp-info,snmp-interfaces,snmp-netstat",
+    "rtsp": "rtsp-methods",
+    "sip": "sip-methods",
+    "irc": "irc-info",
+    "ircd": "irc-info",
+    "imap": "imap-capabilities,imap-ntlm-info",
+    "imaps": "ssl-cert,ssl-enum-ciphers,imap-capabilities,imap-ntlm-info",
+    "pop3": "pop3-capabilities,pop3-ntlm-info",
+    "pop3s": "ssl-cert,ssl-enum-ciphers,pop3-capabilities,pop3-ntlm-info",
+    "smtp": "smtp-commands,smtp-open-relay",
+    "telnet": "telnet-encryption,telnet-ntlm-info",
+    "ftp": "ftp-anon,ftp-syst",
+    "vnc": "vnc-info",
+    "cups": "cups-queue-info",
+    "ipp": "cups-queue-info",
+    "ldap": "ldap-rootdse",
+    "s7": "s7-info",
+    "modbus": "modbus-discover",
+    "omron": "omron-info",
+    "msrpc": "msrpc-enum",
+    "microsoft-ds": _SMB_NSE,
+    "netbios-ssn": "nbstat," + _SMB_NSE,
+    "netbios-ns": "nbstat",
+    "x11": "x11-access",
+    "ajp": "ajp-headers",
 }
 
 
 def _nse_scripts_for_ports(open_ports) -> str:
     """Build a per-host '--script a,b,...' list from its open ports.
 
+    Items are either a bare int (port number) or a (port, service) tuple.
     Always includes `default` (=-sC) as the baseline, then appends each
     service-appropriate script set in ascending port order, deduplicated.
     Unknown/misc ports simply get the default set. Extra per-port scripts from
@@ -238,12 +327,30 @@ def _nse_scripts_for_ports(open_ports) -> str:
                 continue
     scripts = ["default"]
     seen = set()
-    for p in sorted(open_ports):
-        for s in mapping.get(p, "").split(","):
+    heavy_ok = settings_svc.get_bool("nmap.heavy_scripts", True)
+
+    def _add(text):
+        for s in (text or "").split(","):
             s = s.strip()
+            if not heavy_ok and s in _HEAVY_NSE:
+                continue
             if s and s not in seen:
                 seen.add(s)
                 scripts.append(s)
+
+    def _port_key(item):
+        return item[0] if isinstance(item, tuple) else int(item)
+
+    for item in sorted(open_ports, key=_port_key):
+        if isinstance(item, tuple):
+            port = int(item[0])
+            service = (item[1] or "") if len(item) > 1 else ""
+        else:
+            port, service = int(item), ""
+        hit = mapping.get(port)
+        if hit is None and service:
+            hit = SERVICE_NSE_SCRIPTS.get(str(service).lower())
+        _add(hit)
     return ",".join(scripts)
 
 def cancel_scan(scan_id: str):
@@ -406,6 +513,7 @@ def run_scan(self, scan_id: str, reverify_cfg: dict = None):
             db.commit()
             _emit_log(scan, f"=== Scan completed: {scan.hosts_discovered} hosts ===", level="info")
             manager.broadcast_sync(scan_id, {"type": "scan_completed", "scan_id": scan_id, "progress_pct": 100, "hosts_discovered": scan.hosts_discovered})
+            _deliver_scan_completed_webhook(db, scan)
         except ScanStopped:
             # Intentionally stopped: keep the authoritative 'stopped' state and
             # the UTC completed_at the user's stop set. Do not mark failed.
@@ -533,6 +641,7 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
     sweep_ports = cfg.get("sweep_remaining_ports")
     if sweep_ports is None:
         sweep_ports = settings_svc.get_bool("reverify.sweep_remaining_ports", True)
+    check_new_hosts = bool(cfg.get("check_new_hosts", False))
     override_range = cfg.get("port_range")
 
     scan.status = "reverifying"
@@ -555,6 +664,68 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         existing_hosts = db.execute(select(Host).where(Host.scan_id == scan.id)).scalars().all()
         up_ips = {str(h.ip) for h in existing_hosts if h.status == "up"}
         down_rows = [h for h in existing_hosts if h.status != "up"]
+
+        # ---- Phase 0: host discovery for NEW hosts (optional) ----
+        # Re-discovers the targets with ARP-equivalent probing and registers any
+        # IPs that were NOT part of the previous scan. New hosts have no prior
+        # port data, so they get the full pipeline (port scan + fingerprint),
+        # while existing hosts keep the delta-only re-verify below.
+        new_hosts_up = []
+        if check_new_hosts:
+            _wait_if_paused(scan)
+            _emit_log(scan, "--- Checking for NEW hosts across targets ---")
+            _raise_if_stopped(scan)
+            existing_ips = {str(h.ip) for h in existing_hosts}
+            candidate_ips = _expand_targets(scan.targets)
+            fresh_ips = [ip for ip in candidate_ips if ip not in existing_ips]
+            alive = _probe_alive(fresh_ips) if fresh_ips else set()
+            alive |= _probe_udp_alive(fresh_ips) if fresh_ips else set()
+
+            added = 0
+            for ip in candidate_ips:
+                if ip in existing_ips:
+                    continue
+                is_up = ip in alive
+                host = Host(
+                    scan_id=scan.id,
+                    ip=ip,
+                    status="up" if is_up else "down",
+                    device_type="unknown",
+                    discovery_method=["tcp_probe", "reverify"] if is_up else ["scope", "reverify"],
+                    tags=[],
+                    notes="",
+                )
+                db.add(host)
+                db.flush()
+                added += 1
+                if is_up:
+                    new_hosts_up.append(host)
+                    scan.hosts_discovered += 1
+                    manager.broadcast_sync(str(scan.id), {
+                        "type": "host_discovered", "host_id": str(host.id), "ip": ip, "up": True,
+                    })
+            db.commit()
+            if new_hosts_up:
+                _emit_log(scan, f"  {len(new_hosts_up)} NEW host(s) found: {', '.join(sorted(str(h.ip) for h in new_hosts_up))}", level="out")
+            elif added:
+                _emit_log(scan, f"  no new live host(s) (registered {added} new scope entr{'y' if added == 1 else 'ies'})")
+            else:
+                _emit_log(scan, "  targets fully covered by the previous scan — no new hosts")
+
+            if new_hosts_up:
+                _raise_if_stopped(scan)
+                _wait_if_paused(scan)
+                _emit_log(scan, f"--- Full port scan + fingerprint on {len(new_hosts_up)} NEW host(s) ---")
+                scan.status = "scanning"
+                db.commit()
+                port_scan_hosts(db, scan, new_hosts_up)
+                _raise_if_stopped(scan)
+                scan.status = "fingerprinting"
+                db.commit()
+                _wait_if_paused(scan)
+                fingerprint_open_ports(db, scan, new_hosts_up)
+                fingerprint_hosts(db, scan, new_hosts_up)
+                db.commit()
 
         # ---- Phase A: re-check hosts that were marked down ----
         newly_up = []
@@ -662,7 +833,7 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         # ---- Re-run risk rules + topology so the final report is current ----
         # Deleting + re-adding findings would churn existing ones, so only run
         # for newly-up hosts; topology is recomputed wholesale (deduped).
-        if newly_up:
+        if newly_up or new_hosts_up:
             run_risk_rules(db, scan)
         db.execute(select(Scan))
 
@@ -674,6 +845,7 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         db.commit()
         _emit_log(scan, f"=== Re-verify complete: {scan.hosts_discovered} hosts, report updated (no duplicates) ===")
         manager.broadcast_sync(str(scan.id), {"type": "scan_completed", "scan_id": str(scan.id), "progress_pct": 100, "hosts_discovered": scan.hosts_discovered})
+        _deliver_scan_completed_webhook(db, scan)
     except ScanStopped:
         _emit_log(scan, "=== Re-verify stopped ===", level="warn")
         manager.broadcast_sync(str(scan.id), {"type": "scan_stopped", "scan_id": str(scan.id), "progress_pct": scan.progress_pct})
@@ -779,6 +951,25 @@ def _probe_udp_alive(candidates: list) -> set:
     return alive
 
 
+def _deliver_scan_completed_webhook(db, scan):
+    """Post-commit scan_completed webhook delivery (best-effort)."""
+    try:
+        from .webhook import has_subscribers, deliver_scan_completed
+        if not has_subscribers(db, "scan_completed"):
+            return
+        engagement = None
+        try:
+            from ..models import Engagement
+            engagement = db.execute(
+                select(Engagement).where(Engagement.id == scan.engagement_id)
+            ).scalar_one_or_none()
+        except Exception:
+            pass
+        deliver_scan_completed(db, scan, engagement)
+    except Exception:
+        pass
+
+
 def discover_hosts(db, scan: Scan) -> list:
     hosts = []
 
@@ -805,9 +996,10 @@ def discover_hosts(db, scan: Scan) -> list:
     alive_ips |= extra_alive
 
     seen_ips = set()
+    new_up_hosts = []
     def _register(ip: str, mac: str = None, vendor: str = None,
                   method: list = None, status: str = "up"):
-        nonlocal hosts
+        nonlocal hosts, new_up_hosts
         if ip in seen_ips:
             return
         seen_ips.add(ip)
@@ -829,6 +1021,7 @@ def discover_hosts(db, scan: Scan) -> list:
         scan.progress_pct = min(20, int(scan.hosts_discovered / max(scan.hosts_total_in_scope, 1) * 20))
         db.flush()
         if host.status == "up":
+            new_up_hosts.append(host)
             manager.broadcast_sync(str(scan.id), {
                 "type": "host_discovered",
                 "host_id": str(host.id),
@@ -848,6 +1041,25 @@ def discover_hosts(db, scan: Scan) -> list:
             _register(ip, method=["scope"], status="down")
 
     db.commit()
+    # Deliver host_discovered webhook events for live hosts found this pass.
+    try:
+        from .webhook import has_subscribers, deliver_host_discovered
+        if new_up_hosts and has_subscribers(db, "host_discovered"):
+            engagement = None
+            try:
+                from ..models import Engagement
+                engagement = db.execute(
+                    select(Engagement).where(Engagement.id == scan.engagement_id)
+                ).scalar_one_or_none()
+            except Exception:
+                pass
+            for host in new_up_hosts:
+                try:
+                    deliver_host_discovered(db, host, scan=scan, engagement=engagement)
+                except Exception:
+                    continue  # delivery is best-effort per host
+    except Exception:
+        pass
     return hosts
 
 def _emit_log(scan, line: str, level: str = "info"):
@@ -1005,6 +1217,9 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
     p2_host_timeout = settings_svc.get_int("execution.phase2_host_timeout", 75)
     fp_host_timeout = settings_svc.get_int("execution.fingerprint_host_timeout", 300)
     profile_timing = PROFILE_TIMING.get(scan.profile, "-T4")
+    timing_override = (settings_svc.get("execution.scan_timing", "auto") or "auto").strip()
+    if timing_override and timing_override.lower() != "auto":
+        profile_timing = timing_override
     proto = getattr(scan, "protocol", "tcp") or "tcp"
     port_spec = f"-p {scan.port_range}" if getattr(scan, "port_range", None) else ""
 
@@ -1032,7 +1247,7 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
             if not open_ports:
                 continue
             port_list = ",".join(str(p.port) for p in open_ports)
-            script_set = _nse_scripts_for_ports([p.port for p in open_ports])
+            script_set = _nse_scripts_for_ports([(p.port, p.service) for p in open_ports])
             if proto == "udp":
                 scan_mode = "-sU -sV"
                 extra = f"--script {script_set}"
@@ -1044,7 +1259,10 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
                 # chosen per-port from the safe set (-sC plus service-aware ids).
                 if probe:
                     scan_mode = "-sT -sV -O"
-                    extra = (f"--version-intensity 7 --script {script_set} "
+                    fp_version_intensity = settings_svc.get_int(
+                        "execution.fingerprint_version_intensity", 2)
+                    extra = (f"--version-intensity {fp_version_intensity} "
+                             f"--script {script_set} "
                              f"--host-timeout {fp_host_timeout}s")
                 else:
                     # Agent already deep fingerprinted service/version/OS on

@@ -32,10 +32,14 @@ OUTLOG="$PIDDIR/agent_out.log"
 ERRLOG="$PIDDIR/agent_err.log"
 
 # API key resolution order: 1) SCANNER_AGENT_KEY, 2) SCANNER_AGENT_API_KEY,
-# 3) a local key file (~/.subnex_agent_key). Keeps the secret out of argv.
+# 3) a local key file (~/.subnex/agent_key), 4) legacy ~/.subnex_agent_key.
+# Keeps the secret out of argv.
 API_KEY="${SCANNER_AGENT_KEY:-}"
 if [ -z "$API_KEY" ] && [ -n "${SCANNER_AGENT_API_KEY:-}" ]; then
   API_KEY="$SCANNER_AGENT_API_KEY"
+fi
+if [ -z "$API_KEY" ] && [ -f "$HOME/.subnex/agent_key" ]; then
+  API_KEY="$(tr -d '[:space:]' < "$HOME/.subnex/agent_key")"
 fi
 if [ -z "$API_KEY" ] && [ -f "$HOME/.subnex_agent_key" ]; then
   API_KEY="$(tr -d '[:space:]' < "$HOME/.subnex_agent_key")"

@@ -1,6 +1,7 @@
 import { lazy, ReactNode, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import Layout from './components/Layout'
+import { isAdmin } from './lib/auth'
 
 const Login = lazy(() => import('./pages/Login'))
 const ChangePassword = lazy(() => import('./pages/ChangePassword'))
@@ -15,6 +16,7 @@ const Report = lazy(() => import('./pages/Report'))
 const Agents = lazy(() => import('./pages/Agents'))
 const Integrations = lazy(() => import('./pages/Integrations'))
 const Settings = lazy(() => import('./pages/Settings'))
+const Administration = lazy(() => import('./pages/Administration'))
 
 function RequireAuth({ children }: { children: ReactNode }) {
   const token = localStorage.getItem('token')
@@ -28,6 +30,11 @@ function PageFallback() {
       <div className="h-6 w-6 animate-spin rounded-full border-2 border-gray-300 border-t-indigo-500" />
     </div>
   )
+}
+
+function RequireAdmin({ children }: { children: ReactNode }) {
+  if (!isAdmin()) return <Navigate to="/" replace />
+  return <>{children}</>
 }
 
 function LazyPage({ children }: { children: ReactNode }) {
@@ -57,6 +64,7 @@ export default function App() {
         <Route path="/agents" element={<LazyPage><Agents /></LazyPage>} />
         <Route path="/integrations" element={<LazyPage><Integrations /></LazyPage>} />
         <Route path="/settings" element={<LazyPage><Settings /></LazyPage>} />
+        <Route path="/admin" element={<RequireAdmin><LazyPage><Administration /></LazyPage></RequireAdmin>} />
       </Route>
     </Routes>
   )

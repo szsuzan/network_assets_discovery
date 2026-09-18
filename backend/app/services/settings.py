@@ -66,6 +66,14 @@ SETTINGS_CATALOG = [
     _s("execution.fingerprint_host_timeout", "execution", "Fingerprint host timeout (s)",
        "nmap --host-timeout for the container -sV/-O fingerprint phase.",
        "number", 300),
+    _s("execution.fingerprint_version_intensity", "execution", "Fingerprint version-intensity",
+       "nmap --version-intensity for the container -sV fingerprint phase (1-9; lower is lighter/faster).",
+       "number", 2),
+    _s("execution.scan_timing", "execution", "Scan timing template",
+       "nmap timing template override (-T0..-T5) for the container port-scan and fingerprint "
+       "phases. 'auto' keeps the profile default (full=-T3, quick=-T4). -T4 speeds scans up "
+       "without disabling any NSE scripts.",
+       "select", "auto", options=["auto", "-T0", "-T1", "-T2", "-T3", "-T4", "-T5"]),
     _s("execution.tcp_probe_timeout", "execution", "Liveness probe timeout (s)",
        "Per-port connect timeout in the quick TCP liveness probe.",
        "number", 1.0),
@@ -99,6 +107,11 @@ SETTINGS_CATALOG = [
        "Community string used for SNMP system enumeration.", "text", "public"),
     _s("nmap.snmp_timeout", "nmap", "SNMP timeout (s)",
        "Per-OID timeout for SNMP system enumeration.", "number", 3.0),
+    _s("nmap.heavy_scripts", "nmap", "Heavy NSE scripts",
+       "Run heavyweight per-port scripts (http-enum directory walk, http-generator, "
+       "http-git). Off makes per-host fingerprinting several minutes faster on slow web "
+       "devices, at the cost of those verbose findings.",
+       "boolean", True),
 ]
 
 CATALOG_BY_KEY = {c["key"]: c for c in SETTINGS_CATALOG}

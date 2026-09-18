@@ -12,6 +12,40 @@ export interface Setting {
   options?: string[]
 }
 
+export interface User {
+  id: string
+  email: string
+  role: string
+  active: boolean
+  must_change_password: boolean
+  created_at: string
+}
+
+export const USER_ROLES = ['admin', 'pentester', 'viewer'] as const
+
+export interface DeletionRequest {
+  id: string
+  target_type: 'engagement' | 'scan'
+  target_id: string
+  target_label: string
+  parent_label: string | null
+  reason: string | null
+  requested_by: string
+  requested_by_email: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  created_at: string
+  resolved_at: string | null
+  resolved_by: string | null
+  resolver_comment: string | null
+}
+
+export const DELETION_REQUEST_LABELS: Record<string, string> = {
+  pending: 'Pending',
+  approved: 'Approved',
+  rejected: 'Rejected',
+  cancelled: 'Cancelled',
+}
+
 export interface Engagement {
   id: string
   client_name: string
@@ -38,6 +72,7 @@ export interface Scan {
   id: string
   engagement_id: string
   targets: string[]
+  name: string | null
   profile: string
   port_range: string
   protocol: string
@@ -78,6 +113,11 @@ export interface Host {
   tags: string[] | null
 }
 
+export interface PortScript {
+  id: string
+  output: string
+}
+
 export interface Port {
   id: string
   port: number
@@ -86,6 +126,7 @@ export interface Port {
   service: string | null
   version: string | null
   banner: string | null
+  scripts: PortScript[]
 }
 
 export interface HostDetail extends Host {

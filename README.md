@@ -459,7 +459,7 @@ The **Live Scan** screen shows a WebSocket-driven real-time feed: discovery/port
 
 - **Inventory** — virtualized table of every host (IP, MAC, vendor, hostname, device type, OS guess, open ports, risk, tags). Search / filter / sort, bulk tag and bulk export.
 - **Host Detail** — click any host IP: full attributes, open-ports table with service/version/banner, SNMP block, editable notes & tags.
-- **Topology** — force-directed graph: nodes colored by risk severity, dashed **subnet-zone rings** plus an internet/edge cloud node, device-type icons, gray `in_subnet`, amber dashed `gateway`, and cyan `l2` links, zoom/pan/drag, responsive canvas.
+- **Topology** — force-directed graph: nodes colored by risk severity, dashed **subnet-zone rings** plus an internet/edge cloud node, device-type icons, gray `in_subnet`, amber dashed `gateway`, and cyan `l2` links, zoom/pan/drag, responsive canvas. Host IP captions stay **constant-size on screen** (bigger than the subnet/zone labels) at any zoom; when packed hosts crowd so their on-screen captions would touch, both collapse to just the last octet (`.4`, `.8`, `.250`) — zooming in restores the full IP.
 - **Findings** — severity-sorted findings (default SNMP community, unencrypted protocols, outdated software, exposed admin panels); group by severity/type/host, toggle include-in-report, edit recommendations.
 - **Diff two scans** — pick an A/B scan pair to see `+` new hosts, `−` gone hosts, `~` changed ports, and new/resolved findings. Tracks what changed since the last scan.
 - **Report / Export** — executive summary, device + severity charts, coverage & limitations; export **JSON**, **CSV**, or a WeasyPrint-rendered **PDF** client report.

@@ -104,7 +104,7 @@ export default function TopologyMinimap({ nodes, width, height, viewport, onNavi
 
   return (
     <div className={`pointer-events-auto absolute bottom-3 right-3 z-10 rounded-md border p-1 shadow-lg ${
-      dark ? 'border-gray-700 bg-[#0b1020]/90' : 'border-gray-300 bg-white/90'
+      dark ? 'border-gray-700 bg-[#0b1020]/90' : 'border-gray-300 bg-gray-100/90'
     }`}>
       <canvas
         ref={canvasRef}

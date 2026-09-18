@@ -1,6 +1,7 @@
 # Secrets / local env
 .env
 *.env.local
+agent_key_local.txt
 
 # Python
 __pycache__/

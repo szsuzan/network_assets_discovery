@@ -259,7 +259,7 @@ export default function Findings() {
                     {/* Workflow column */}
                     <div className="flex w-56 shrink-0 flex-col gap-3">
                       <div>
-                        <label className="mb-1 block text-[11px] uppercase tracking-wide text-gray-500">Status</label>
+                        <label className="mb-1 block text-[12px] uppercase tracking-wide text-gray-500">Status</label>
                         <select
                           value={f.status}
                           onChange={(e) => patch(f, { status: e.target.value })}
@@ -269,7 +269,7 @@ export default function Findings() {
                         </select>
                       </div>
                       <div>
-                        <label className="mb-1 block text-[11px] uppercase tracking-wide text-gray-500">Analyst Notes</label>
+                        <label className="mb-1 block text-[12px] uppercase tracking-wide text-gray-500">Analyst Notes</label>
                         <textarea
                           rows={2}
                           defaultValue={f.notes || ''}

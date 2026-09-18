@@ -27,6 +27,7 @@ Flags:
 import argparse
 import ipaddress
 import json
+import os
 import re
 import shlex
 import shutil
@@ -44,7 +45,30 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import List, Optional
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
+
+
+class RemoteAuthError(RuntimeError):
+    """The server rejected the agent credentials (401/403).
+
+    After the user rotates the key in the web UI, the next heartbeat is
+    rejected; the agent redeems the new key via /key/sync with the old one."""
+
+
+def _key_file() -> str:
+    return os.path.join(os.path.expanduser("~"), ".subnex", "agent_key")
+
+
+def _write_disk_key(key: str) -> None:
+    try:
+        dirpath = os.path.dirname(_key_file())
+        os.makedirs(dirpath, exist_ok=True)
+        with open(_key_file(), "w", encoding="utf-8") as fh:
+            fh.write(key.strip())
+    except Exception as e:
+        print(f"[agent] could not persist API key to {_key_file()}: {e}")
+    else:
+        print(f"[agent] API key persisted to {_key_file()}")
 
 # Per-host nmap runs in parallel across a bounded worker pool. The agent used to
 # launch one nmap per host strictly serially (worst case: N hosts x {45 s port
@@ -144,8 +168,39 @@ class ApiClient:
                 body = resp.read()
                 return json.loads(body) if body else None
         except urllib.error.HTTPError as e:
+            code = e.code
             detail = e.read().decode("utf-8", "replace")[:200]
-            raise RuntimeError(f"HTTP {e.code}: {detail}") from e
+            if code in (401, 403):
+                raise RemoteAuthError(f"HTTP {code}: {detail}") from e
+            raise RuntimeError(f"HTTP {code}: {detail}") from e
+
+    def sync_key(self, agent_id: str) -> str:
+        """Redeem the new API key using the (already-revoked) old one.
+
+        Called when the server rotated the key in the UI: the old key is dead
+        against the DB instantly, but the pending rotation record lets exactly
+        this key fetch the replacement during the 5-minute grace window."""
+        url = f"{self.server}/api/agents/key/sync?agent_id={agent_id}"
+        req = urllib.request.Request(url, data=b"", method="POST")
+        req.add_header("X-Api-Key", self.api_key)
+        with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            res = json.loads(resp.read())
+        new_key = res.get("api_key") if isinstance(res, dict) else None
+        if not new_key:
+            raise RuntimeError("key sync returned no api_key")
+        return new_key
+
+    def persist_key(self, key: str) -> None:
+        self.api_key = key
+        _write_disk_key(key)
+
+    def fetch_script(self) -> str:
+        """Download the current server-side scanner_agent.py for self-update."""
+        url = f"{self.server}/api/agents/script"
+        req = urllib.request.Request(url)
+        req.add_header("X-Api-Key", self.api_key)
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return resp.read().decode("utf-8")
 
     def heartbeat(self, subnets: List[str], capabilities: List[str], hostname: str, os: str):
         res = self._request("POST", "/api/agents/heartbeat", {
@@ -154,6 +209,7 @@ class ApiClient:
         })
         if res and res.get("agent_id"):
             self.agent_id = res["agent_id"]
+        return res
 
     def claim(self) -> Optional[dict]:
         return self._request("GET", "/api/agents/tasks/next")
@@ -1376,6 +1432,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
     task_id = task["id"]
     scan_id = task["scan_id"]
     profile = task.get("profile") or "quick"
+    mode = task.get("mode") or "standard"
     rv = task.get("reverify") or {}
     down_ips = [ip for ip in (rv.get("down_ips") or []) if _valid_target(ip)]
     up_ips = [ip for ip in (rv.get("up_ips") or []) if _valid_target(ip)]
@@ -1386,6 +1443,85 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
 
     client.log(task_id, f"=== Agent re-verify started (scan={scan_id}) ===")
     client.log(task_id, f"  down hosts to re-check: {len(down_ips)}, up hosts to sweep: {len(up_ips)}, leftover ports: {sweep_spec or 'none'}")
+
+    # ---- Phase 0: check for NEW hosts (optional, ARP discovery) ----
+    # Re-discovers the targets at L2 and registers hosts that were not part of
+    # the previous scan. New hosts have no prior port data, so they get the FULL
+    # pipeline (discovery -> port scan -> deep fingerprint), unlike the delta
+    # re-checks below which reuse the scanned state.
+    known_ips = set(down_ips) | set(up_ips)
+    new_hosts_up = []
+    if rv.get("check_new_hosts"):
+        if not _await_go(client, task_id):
+            return
+        scan_type_0 = "-sT" if use_connect else "-sS"
+        timing_0 = PROBE_TIMING.get(profile, "-T4")
+        client.log(task_id, "Phase 0: host discovery -> NEW hosts not in the previous scan")
+        new_live = {}
+        for t in (task.get("targets") or []):
+            if not _valid_target(t):
+                continue
+            args = ["nmap", "-sn", "-n", "-oX", "-", "--max-retries", "1",
+                    "--host-timeout", "40s", "--min-hostgroup", "256", t]
+            client.log(task_id, f"$ {' '.join(args)}", level="cmd")
+            xml = run_nmap(args)
+            for h in parse_discovery(xml):
+                if h.get("state") == "up" and h.get("ip") not in known_ips:
+                    new_live.setdefault(h["ip"], h)
+        # Fold the ARP liveness cache for in-scope addresses ARP -sn missed
+        scope_nets = []
+        for t in (task.get("targets") or []):
+            try:
+                scope_nets.append(ipaddress.ip_network(t, strict=False))
+            except Exception:
+                pass
+        arp_cache = _arp_snapshot()
+        for ip, entry in arp_cache.items():
+            if ip in known_ips or ip in new_live:
+                continue
+            if scope_nets and not any(ipaddress.ip_address(ip) in n for n in scope_nets):
+                continue
+            new_live[ip] = {"ip": ip, "mac": entry.get("mac"),
+                            "vendor": entry.get("vendor"), "state": "up"}
+        if not new_live:
+            client.log(task_id, "Phase 0: no new hosts found - inventory unchanged")
+        else:
+            client.log(task_id, f"Phase 0: {len(new_live)} new host(s) found: {', '.join(sorted(new_live))}", level="out")
+            if not _await_go(client, task_id):
+                return
+            full_range = _sane_port_range(task.get("port_range") or "1-10000")
+            client.log(task_id, f"Phase 0: full port scan ({scan_type_0} -p {full_range}) + fingerprint on new host(s), {_p2_workers()} parallel worker(s)")
+
+            def _new_host_worker(ip_meta):
+                ip, meta = ip_meta
+                if not _await_go(client, task_id):
+                    return None
+                p_args = ["nmap", scan_type_0, "-n", "-p", full_range, "--open", timing_0,
+                          "--max-retries", "1", "--host-timeout", "45s", "-oX", "-", ip]
+                client.log(task_id, f"$ {' '.join(p_args)}", level="cmd")
+                pxml = run_nmap(p_args)
+                found = _parse_open_ports(pxml)
+                if not found:
+                    if meta and meta.get("mac"):
+                        try:
+                            client.result(task_id, [{"ip": ip, "mac": meta.get("mac"),
+                                                     "vendor": meta.get("vendor"),
+                                                     "status": "up", "ports": []}],
+                                          status="partial", notes="host")
+                        except Exception as e:
+                            client.log(task_id, f"Partial post failed: {e}", level="err")
+                    return {"ip": ip, "ports": []}
+                return _deep_scan_host(client, task_id, ip, meta or {},
+                                       ",".join(found), use_connect, profile,
+                                       discovery=(mode == "discovery")) or {"ip": ip, "ports": []}
+
+            for (ip, _meta), host in _map_hosts(_new_host_worker, [(a["ip"], a) for a in new_live.values()],
+                                                _p2_workers(), client, task_id, "new-host-scan"):
+                if host is None:
+                    client.log(task_id, "Scan stopped by user", level="warn")
+                    break
+                new_hosts_up.append(ip)
+                client.log(task_id, f"  {ip}: {len(host.get('ports', []))} open port(s)")
 
     # ---- Phase A: re-check previously-down hosts via L2/ARP ----
     newly_up = []
@@ -2844,6 +2980,38 @@ def _dhcp6_nudge(iface: Optional[str], min_gap_s: float = 90.0) -> bool:
 # --------------------------------------------------------------------------- #
 # Entrypoint
 # --------------------------------------------------------------------------- #
+def self_update(client: "ApiClient") -> None:
+    """Pull the latest scanner_agent.py from the server, swap it in atomically,
+    then re-exec a fresh process under the same supervisor/args."""
+    script = os.path.realpath(sys.argv[0]) if os.path.exists(sys.argv[0]) else os.path.abspath(__file__)
+    try:
+        cur = open(script, encoding="utf-8").read()
+    except Exception:
+        cur = ""
+    new_src = client.fetch_script()
+    if not new_src or "def execute_task" not in new_src or "class ApiClient" not in new_src:
+        raise RuntimeError("refusing: fetched script does not look like the agent")
+    if new_src == cur:
+        print("[agent] agent code is already current")
+        return
+    tmp = script + ".new"
+    backup = script + ".bak"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(new_src)
+    try:
+        shutil.copy(script, backup)
+    except Exception as e:
+        print(f"[agent] could not write backup {backup}: {e}")
+    os.replace(tmp, script)
+    print(f"[agent] updated agent code at {script}; re-executing")
+    argv = [sys.executable, "-u", script] + sys.argv[1:]
+    try:
+        os.execv(sys.executable, argv)
+    except OSError:
+        pass  # Windows may emulate execv via spawn; supervisor relaunch handles it
+    sys.exit(0)
+
+
 def main():
     parser = argparse.ArgumentParser(description="LAN scanner agent for SubNex")
     parser.add_argument("--server", required=True, help="server base URL, e.g. http://1.2.3.4:8000")
@@ -2954,7 +3122,35 @@ def main():
 
     while True:
         try:
-            client.heartbeat(subnets, caps, hostname, os_name)
+            try:
+                hb = client.heartbeat(subnets, caps, hostname, os_name)
+            except RemoteAuthError as e:
+                print(f"[agent] heartbeat rejected ({e}); trying key sync with previous key...")
+                try:
+                    if client.agent_id and client.agent_id != "?":
+                        new_key = client.sync_key(client.agent_id)
+                        client.persist_key(new_key)
+                        print("[agent] new API key synced and persisted")
+                        hb = client.heartbeat(subnets, caps, hostname, os_name)
+                    else:
+                        raise RuntimeError("agent id unknown — cannot sync key")
+                except RemoteAuthError as ke:
+                    print(f"[agent] key sync rejected ({ke}); grace window expired or key already rotated again — "
+                          "re-rotate in the UI or set the key manually")
+                    time.sleep(max(args.interval, 5))
+                    continue
+                except Exception as ke:
+                    print(f"[agent] key sync failed: {ke}")
+                    time.sleep(max(args.interval, 5))
+                    continue
+            if hb and hb.get("restart_requested"):
+                print("[agent] restart requested by server — exiting so supervisor relaunches")
+                sys.exit(0)
+            if hb and hb.get("update_requested"):
+                try:
+                    self_update(client)
+                except Exception as ue:
+                    print(f"[agent] self-update failed: {ue}")
         except Exception as e:
             print(f"[agent] heartbeat failed: {e}")
             time.sleep(max(args.interval, 5))

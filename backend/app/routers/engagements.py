@@ -12,12 +12,29 @@ from ..scope_utils import validate_scope
 
 router = APIRouter(prefix="/api/engagements", tags=["engagements"])
 
+ACTIVE_SCAN_STATUSES = ("queued", "discovering", "scanning", "fingerprinting",
+                        "analyzing", "paused", "agent_running", "reverifying")
+
+
+async def _ensure_engagement_writable(db: AsyncSession, engagement: Engagement, actor: User):
+    """Admins may mutate an archived engagement (delete/restore); everyone else
+    is limited to reading it. Used by scan-level mutations through a shared
+    helper in scans.py."""
+    if engagement.status == "archived" and actor.role != "admin":
+        raise HTTPException(
+            status_code=409,
+            detail="This engagement is archived and read-only; unarchive it before making changes",
+        )
+    return engagement
+
 @router.post("", response_model=EngagementOut, status_code=status.HTTP_201_CREATED)
 async def create_engagement(
     data: EngagementCreate,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    if current_user.role == "viewer":
+        raise HTTPException(status_code=403, detail="Viewers cannot create engagements")
     scope = [s.strip() for s in (data.authorized_scope or []) if s and s.strip()]
     try:
         validate_scope(scope)
@@ -66,6 +83,28 @@ async def update_engagement(
     if current_user.role != "admin" and engagement.created_by != current_user.id:
         raise HTTPException(status_code=403, detail="No access to this engagement")
 
+    # Archiving is the one "edit" that happens while the engagement is archived:
+    # requesting anything else on an archived engagement is rejected unless the
+    # engagement is being unarchived in the same call.
+    becomes_archived = data.status == "archived" and data.status != engagement.status
+    unarchiving = data.status == "active" and engagement.status == "archived"
+    if data.status is not None and data.status not in ("active", "archived"):
+        raise HTTPException(status_code=422, detail="status must be 'active' or 'archived'")
+    if engagement.status == "archived" and not unarchiving:
+        non_status_fields = [f for f in ("client_name", "engagement_name", "start_date", "end_date", "authorized_scope")
+                             if getattr(data, f) is not None]
+        if non_status_fields:
+            raise HTTPException(status_code=409,
+                                detail="This engagement is archived and read-only; unarchive it before editing")
+
+    if becomes_archived and current_user.role != "admin":
+        running = (await db.execute(
+            select(Scan.id).where(Scan.engagement_id == engagement_id,
+                                  Scan.status.in_(ACTIVE_SCAN_STATUSES)).limit(1))).first()
+        if running:
+            raise HTTPException(status_code=409,
+                                detail="Stop or complete all scans before archiving this engagement")
+
     changes = {}
     if data.client_name is not None and data.client_name != engagement.client_name:
         engagement.client_name = data.client_name
@@ -88,6 +127,9 @@ async def update_engagement(
         if scope != engagement.authorized_scope:
             engagement.authorized_scope = scope
             changes["scope"] = scope
+    if data.status is not None and data.status != engagement.status:
+        engagement.status = data.status
+        changes["status"] = data.status
 
     if changes:
         db.add(AuditLog(
@@ -131,23 +173,14 @@ async def get_engagement_scans(
     )
     return result.scalars().all()
 
-@router.delete("/{engagement_id}", status_code=204)
-async def delete_engagement(
-    engagement_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    if current_user.role != "admin":
-        raise HTTPException(status_code=403, detail="Only admins can delete engagements")
-    
-    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
-    engagement = result.scalar_one_or_none()
-    if not engagement:
-        raise HTTPException(status_code=404, detail="Engagement not found")
-    
-    # Cascade: remove scans (and their hosts/ports/snmp/findings/topology) and
-    # any audit log rows referencing this engagement or its scans before
-    # deleting them.
+async def _perform_delete_engagement(db: AsyncSession, engagement: Engagement) -> None:
+    """Cascade-delete an engagement and all rows that reference it.
+
+    Removes scans (with their hosts/ports/findings), audit trail rows and agent
+    tasks in the right FK order. Used by the admin DELETE endpoint and by the
+    deletion-request approval flow.
+    """
+    engagement_id = engagement.id
     scan_result = await db.execute(select(Scan).where(Scan.engagement_id == engagement_id))
     scans = scan_result.scalars().all()
     scan_ids = [s.id for s in scans]
@@ -170,3 +203,21 @@ async def delete_engagement(
 
     await db.delete(engagement)
     await db.commit()
+
+
+@router.delete("/{engagement_id}", status_code=204)
+async def delete_engagement(
+    engagement_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403,
+                            detail="Only admins can delete engagements. Pentesters should submit a deletion request instead.")
+
+    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
+    engagement = result.scalar_one_or_none()
+    if not engagement:
+        raise HTTPException(status_code=404, detail="Engagement not found")
+
+    await _perform_delete_engagement(db, engagement)

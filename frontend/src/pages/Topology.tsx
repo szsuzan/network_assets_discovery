@@ -276,7 +276,7 @@ function drawZoneContainer(ctx: CanvasRenderingContext2D, node: any, scale: numb
   ctx.restore()
 }
 
-function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _color: string, dark: boolean) {
+function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _color: string, dark: boolean, short?: boolean) {
   const x = node.x || 0
   const y = node.y || 0
   const r = 6 / scale
@@ -295,15 +295,60 @@ function drawHostNode(ctx: CanvasRenderingContext2D, node: any, scale: number, _
   ctx.lineWidth = 1 / scale
   ctx.stroke()
 
-  // IP caption below node — constant size regardless of zoom
-  const label = node.ip || (node.kind === 'host' ? node.id : '') || node.name || ''
-  ctx.font = `${dark ? '600 ' : ''}9 / scale}px monospace`
+  // IP caption below node — constant size regardless of zoom. When the caption
+  // would collide with a neighbour's on screen, fall back to the last octet.
+  const full = node.ip || (node.kind === 'host' ? node.id : '') || node.name || ''
+  const label = short && node.ip ? hostShortCaption(node.ip) : full
+  ctx.font = `${dark ? '600 ' : ''}${14 / scale}px monospace`
   ctx.textAlign = 'center'
   ctx.textBaseline = 'top'
   ctx.fillStyle = dark ? 'rgba(226,232,240,0.9)' : '#111827'
   ctx.fillText(label, 0, r + 4 / scale)
 
   ctx.restore()
+}
+
+// Measure text at its on-screen font size (independent of the graph zoom),
+// using a throwaway canvas so label widths feed the fit calculation below.
+const textWidthPx = (() => {
+  const c = document.createElement('canvas')
+  const ctx = c.getContext('2d')!
+  return (text: string, px: number) => {
+    ctx.font = `${px}px monospace`
+    return ctx.measureText(text).width
+  }
+})()
+
+// Host IP captions are constant on screen. When two hosts are packed so close
+// (at the current zoom) that their full-IP captions would touch, both collapse
+// to just the last octet (".4", ".8", ".250"); zooming in gives screen room and
+// the full IP comes back. Vertical band: captions sit ≤ the label height below
+// each node circle, so only pairs sharing a screen row can collide.
+const hostCaptionCollisions = (nodes: any[], k: number) => {
+  const hosts = nodes.filter((n) => n.kind === 'host' && n.x != null && n.y != null)
+  const short = new Set<string>()
+  for (let i = 0; i < hosts.length; i++) {
+    const a = hosts[i]
+    const la = a.ip || a.id || a.name || ''
+    const wa = textWidthPx(la, 14) / 2
+    for (let j = i + 1; j < hosts.length; j++) {
+      const b = hosts[j]
+      const lb = b.ip || b.id || b.name || ''
+      const wb = textWidthPx(lb, 14) / 2
+      const dx = Math.abs((a.x - b.x) * k)
+      const dy = Math.abs((a.y - b.y) * k)
+      if (dy <= 28 && dx < wa + wb + 6) {
+        short.add(a.id)
+        short.add(b.id)
+      }
+    }
+  }
+  return short
+}
+
+const hostShortCaption = (full: string) => {
+  const parts = full.split('.')
+  return parts.length > 1 ? '.' + parts[parts.length - 1] : full
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -328,6 +373,8 @@ export default function Topology() {
   const [showLegend, setShowLegend] = useState(true)
   const [viewport, setViewport] = useState<{ x: number; y: number; k: number } | null>(null)
   const dragStartRef = useRef<{ id: string; x: number; y: number; orig: Map<string, { dx: number; dy: number }> } | null>(null)
+  const fitViewRef = useRef<() => void>(() => {})
+  const hostShortRef = useRef<Set<string>>(new Set())
 
   const { data: hostDetail } = useHostDetail(
     scanId || undefined,
@@ -360,7 +407,7 @@ export default function Topology() {
     setSize({ w, h })
     setTimeout(() => {
       try {
-        graphRef.current?.zoomToFit?.(0, 40)
+        fitViewRef.current?.()
         graphRef.current?.flushShadowCanvas?.()
       } catch {}
     }, 80)
@@ -590,6 +637,18 @@ export default function Topology() {
     return parts.join('<br/>')
   }, [])
 
+  // Which host captions currently collapse to the last octet. Computed from the
+  // live screen positions at the CURRENT zoom (viewport.k) so that zooming in —
+  // which gives screen room — restores the full IP and zooming out re-shortens.
+  // Written into the ref so the per-frame canvas painter reads the freshest set.
+  const hostCollisions = useMemo(
+    () => hostCaptionCollisions(visibleNodes, viewport?.k ?? 1),
+    [visibleNodes, viewport?.k],
+  )
+  useEffect(() => {
+    hostShortRef.current = hostCollisions
+  }, [hostCollisions])
+
   // Custom canvas rendering — ALL node types (mode 'after': drawn on top of
   // the invisible default circles used for built-in hit-testing)
   const nodeCanvasObject = useCallback((node: any, ctx: CanvasRenderingContext2D, globalScale: number) => {
@@ -598,7 +657,7 @@ export default function Topology() {
     } else if (node.kind === 'zone') {
       drawZoneContainer(ctx, node, globalScale, dark)
     } else if (node.kind === 'host') {
-      drawHostNode(ctx, node, globalScale, SEV_RING[node.severity] || SEV_RING.info, dark)
+      drawHostNode(ctx, node, globalScale, SEV_RING[node.severity] || SEV_RING.info, dark, hostShortRef.current.has(node.id))
     }
   }, [dark])
 
@@ -632,9 +691,70 @@ export default function Topology() {
     }, 100)
   }, [focusId, visibleNodes])
 
+  // Fit so the ENTIRE drawn content — node circles, subnet borders, and every
+  // constant-size label (host IPs, subnet names, internet cloud) — is fully
+  // visible and centered in the viewport, for any amount of IPs/notes.
+  // Labels draw at constant screen size, so their world-space footprint grows
+  // as the graph zooms out: converge on the final scale then centre on it.
+  const fitView = useCallback(() => {
+    const graph = graphRef.current
+    const nodes = visibleNodes
+    if (!graph || !nodes.length) return
+    const el = containerRef.current
+    const w = el?.clientWidth || size.w || 960
+    const h = el?.clientHeight || size.h || 520
+    if (!w || !h) return
+
+    const pad = 40
+    const fitScale = (bw: number, bh: number) => {
+      const k = Math.min((w - pad * 2) / Math.max(1, bw), (h - pad * 2) / Math.max(1, bh))
+      return Math.min(Math.max(k, 0.05), 6)
+    }
+
+    let k = 1
+    let minX = 0, minY = 0, maxX = 0, maxY = 0
+    for (let iter = 0; iter < 5; iter++) {
+      for (const n of nodes) {
+        if (n.x == null || n.y == null) continue
+        const rr = n.kind === 'zone' ? Math.max(30, n._zoneR || 60) : n.kind === 'internet' ? 55 : 16
+        let hl = rr, hr = rr, ht = rr, hb = rr
+        if (n.kind === 'host') {
+          const half = textWidthPx(n.ip || n.id || n.name || '', 14) / 2 / k
+          const below = 26 / k // 6px dot + 4px gap + 14px label leg + slack
+          hl = Math.max(rr, half); hr = Math.max(rr, half); hb = Math.max(rr, below)
+        } else if (n.kind === 'zone') {
+          const cap = n.host_count > 0 ? `${n.name} · ${n.host_count} hosts` : n.name || ''
+          const half = textWidthPx(cap, 12) / 2 / k
+          const above = 18 / k // dash gap + label height over the circle
+          hl = Math.max(rr, half); hr = Math.max(rr, half); ht = rr + above
+        } else if (n.kind === 'internet') {
+          const half = (textWidthPx('Internet', 11) + 52) / 2 / k
+          hl = Math.max(rr, half); hr = Math.max(rr, half)
+        }
+        minX = Math.min(minX, n.x - hl); maxX = Math.max(maxX, n.x + hr)
+        minY = Math.min(minY, n.y - ht); maxY = Math.max(maxY, n.y + hb)
+      }
+      if (!isFinite(minX)) return
+      k = fitScale(maxX - minX, maxY - minY)
+    }
+
+    try {
+      graph.centerAt((minX + maxX) / 2, (minY + maxY) / 2, 0)
+      graph.zoom(k, 0)
+      graph.flushShadowCanvas?.()
+      setTimeout(() => { graph.flushShadowCanvas?.() }, 300)
+    } catch {}
+  }, [visibleNodes, size])
+
   const handleFitAll = useCallback(() => {
-    try { graphRef.current?.zoomToFit(400, 60) } catch {}
-  }, [])
+    fitView()
+  }, [fitView])
+
+  // Keep the fullscreen refit routing current; fitView is defined after
+  // refitOnFsChange, so call it through a ref updated each render.
+  useEffect(() => {
+    fitViewRef.current = fitView
+  }, [fitView])
 
   // Length-based flow sizing: particle speed is a *ratio* of the link length
   // per frame, so on long links it produces huge on-screen jumps per frame and
@@ -672,14 +792,14 @@ export default function Topology() {
       const graph = graphRef.current
       if (!graph) return
       try {
-        graph.zoomToFit(0, 40)
+        fitView()
         graph.flushShadowCanvas?.()
         setTimeout(() => { graph.flushShadowCanvas?.() }, 900)
         graph.d3ReheatSimulation?.()
       } catch {}
     }, 50)
     return () => clearTimeout(t)
-  }, [graphNodes.length])
+  }, [graphNodes.length, fitView])
 
   // Minimap
   const minimapNodes = useMemo(() => {
@@ -730,7 +850,7 @@ export default function Topology() {
         <div
           ref={containerRef}
           className={`relative mt-3 min-h-[320px] flex-1 overflow-hidden rounded-lg border touch-none select-none ${
-            dark ? 'border-gray-800 bg-[#0b1020]' : 'border-gray-200 bg-white shadow-sm'
+            dark ? 'border-gray-800 bg-[#0b1020]' : 'border-gray-200 bg-gray-100 shadow-sm'
           }`}
         >
           {!graphNodes.length ? (

@@ -4,7 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from .routers import auth, engagements, scans, export, agents, webhooks, settings
+from .routers import auth, engagements, scans, export, agents, webhooks, settings, users, deletion_requests
 
 app = FastAPI(
     title="SubNex",
@@ -27,6 +27,8 @@ app.include_router(agents.router)
 app.include_router(export.router)
 app.include_router(webhooks.router)
 app.include_router(settings.router)
+app.include_router(users.router)
+app.include_router(deletion_requests.router)
 
 
 # Built UI bundle. Served from the host's ./frontend/dist (mounted read-only),

@@ -183,6 +183,65 @@ def _rule_ssl_cert(entry, port) -> list:
     if not not_after and not bits and "self-signed" not in text.lower():
         return out
 
+    # Factory-default TLS certificate merge. Hikvision (and dozens of other
+    # camera/NVR vendors) ship a stock self-signed certificate in firmware.
+    # Every DS-2CD1023G0E-class device presents the same artifact: CN is the
+    # camera's 32-hex serial, it is self-signed, and its validity window is
+    # stamped from the factory clock baseline (validFrom ~ Unix epoch, i.e.
+    # 1969/1970, validTo ~3 years later ~1972/1973). That makes every such
+    # camera fire BOTH `expired_certificate` AND `weak_crypto` on :443 -- a
+    # loud, redundant pair that is really just "stock firmware cert, ignore".
+    #
+    # Evidence-driven: we merge ONLY when the structured XML / raw output
+    # proves all three of (self-signed, 32-hex CN, epoch validity). Any
+    # operator-installed cert (real-ish dates, DNS CN, proper CA) sails past
+    # and keeps the normal expired/weak/self-signed rules.
+    cn = el.get("subject/commonName") or ""
+    issuer_cn = el.get("issuer/commonName") or ""
+    if not cn:
+        m = re.search(r"Subject:\s*commonName=([^\n]+)", text, re.I)
+        if m:
+            cn = m.group(1).strip()
+    self_signed_now = False
+    if cn and issuer_cn:
+        self_signed_now = cn.lower() == issuer_cn.lower()
+    elif "self-signed" in text.lower():
+        self_signed_now = True
+    not_before = (el.get("validity/notBefore") or el.get("notBefore") or None)
+    if not not_before:
+        m = re.search(r"Not valid before:\s*([^\n]+)", text)
+        if m:
+            not_before = m.group(1).strip()
+    epoch_clock = False
+    if not_before:
+        try:
+            bd = datetime.fromisoformat(not_before.replace("Z", "+00:00").replace(" ", "T"))
+            epoch_clock = bd.year <= 1980
+        except ValueError:
+            m = re.match(r"(\d{4})", not_before or "")
+            if m:
+                epoch_clock = int(m.group(1)) <= 1980
+    if self_signed_now and re.fullmatch(r"[0-9a-f]{32}", cn or "", re.I) and epoch_clock:
+        parts = [f"CN={cn}"]
+        if bits:
+            parts.append(f"bits={bits}")
+        if not_before:
+            parts.append(f"validFrom={not_before}")
+        if not_after:
+            parts.append(f"validTo={not_after}")
+        subj_desc = f"subject CN={cn}" if cn else "self-signed"
+        return [_make("", "", "default_certificate", "info",
+            f"Factory-default TLS certificate on port {port}",
+            f"The device presents the stock self-signed certificate it shipped with "
+            f"( {subj_desc}, validity window {not_before or 'n/a'} -> {not_after or 'n/a'} ).",
+            "This is the default certificate burned into factory firmware: its CN is the "
+            "device serial and its validity starts at the factory clock baseline (~1970), "
+            "so 'expired' / 'weak key' alerts here are expected and not actionable.",
+            "After deployment, install a certificate from your internal CA (or a trusted "
+            "public CA) bound to the device's managed DNS name, and set the device clock "
+            "from NTP so future validity windows are real.",
+            port, {"script": "ssl-cert", "output": "ssl-cert: " + ", ".join(parts)})]
+
     # Evidence invariant: a finding's evidence output must never be empty,
     # even when the rule fired purely off structured XML elements.
     ev_out = text.strip()

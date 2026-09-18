@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Response
+﻿from fastapi import APIRouter, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete, Text, cast, func, or_
 from sqlalchemy.orm import selectinload
@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from typing import List, Optional
 import uuid
+import re
+import json
 
 def _host_ip_eq(host_ip: str):
     """Compare an INET column against a string IP by casting the string to inet."""
@@ -15,16 +17,25 @@ def _host_ip_eq(host_ip: str):
 from ..database import get_db, AsyncSessionLocal
 from ..models import User, Engagement, Scan, Host, Port, SNMPInfo, Finding, FindingAudit, AuditLog, AgentTask, TopologyEdge
 from ..schemas import (
-    ScanCreate, ReverifyIn, ScanOut, HostOut, HostDetail, HostPatch,
+    ScanCreate, ScanUpdate, ReverifyIn, ScanOut, HostOut, HostDetail, HostPatch,
     FindingOut, FindingPatch, FindingAuditOut, RiskRuleOut, RiskRulePatch,
     TopologyOut, DiffResult
 )
 from ..auth import get_current_user
 from ..scope_utils import validate_scan_targets, count_hosts_in_scope
-from ..services.scan_worker import run_scan, read_console_log, _dispatch_run
+from ..services.scan_worker import run_scan, read_console_log, _dispatch_run, SCAN_OUTPUT_DIR
+from ..services.nse_engine import iter_nse_entries
 from ..services import settings as settings_svc
 
 router = APIRouter(prefix="/api", tags=["scans"])
+
+# Extracts {portid, service name, version} from the saved fingerprint XML's
+# <port><state/><service .../></port> blocks. The leading <port> capture
+# (group 1) is a sentinel so group 2 is the port id; the service attributes
+# (group 3, order varies between name/version) are parsed separately below.
+port_service_re = re.compile(
+    r'(<port)[^>]*portid="(\d+)"[^>]*>.*?<service\b([^>]*)>'
+)
 
 
 async def _load_scan_for_user(db: AsyncSession, scan_id: uuid.UUID, user: User) -> Scan:
@@ -57,6 +68,24 @@ async def _require_engagement_access(db: AsyncSession, engagement_id: uuid.UUID,
         raise HTTPException(status_code=403, detail="No access to this engagement")
     return engagement
 
+
+async def _ensure_engagement_writable(db: AsyncSession, engagement_id: uuid.UUID, user: User) -> Engagement:
+    """Guard mutations against archived engagements.
+
+    Archived engagements are read-only for everyone except admins (who may
+    still delete or alter them while resolving data issues). Raises 409 when a
+    non-admin mutates a scan/host/finding in an archived engagement.
+    """
+    engagement = (await db.execute(select(Engagement).where(Engagement.id == engagement_id))).scalar_one_or_none()
+    if engagement is None:
+        raise HTTPException(status_code=404, detail="Engagement not found")
+    if engagement.status == "archived" and user.role != "admin":
+        raise HTTPException(
+            status_code=409,
+            detail="This engagement is archived and read-only; unarchive it before making changes",
+        )
+    return engagement
+
 @router.post("/engagements/{engagement_id}/scans", response_model=ScanOut, status_code=201)
 async def start_scan(
     engagement_id: uuid.UUID,
@@ -64,8 +93,8 @@ async def start_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    engagement = await _require_engagement_access(db, engagement_id, current_user)
-    
+    engagement = await _ensure_engagement_writable(db, engagement_id, current_user)
+
     try:
         validate_scan_targets(data.targets, engagement.authorized_scope)
     except ValueError as e:
@@ -87,6 +116,7 @@ async def start_scan(
     scan = Scan(
         engagement_id=engagement.id,
         targets=data.targets,
+        name=(data.name or "").strip() or None,
         profile=profile,
         port_range=port_range,
         protocol=protocol,
@@ -134,6 +164,7 @@ async def reverify_scan(
     there is a single authoritative report with no duplicates.
     """
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
 
     if scan.status in ("queued", "discovering", "scanning", "fingerprinting",
                        "analyzing", "agent_running", "paused"):
@@ -146,6 +177,7 @@ async def reverify_scan(
     sweep_ports = data.sweep_remaining_ports
     if sweep_ports is None:
         sweep_ports = await settings_svc.aget(db, "reverify.sweep_remaining_ports", True)
+    check_new_hosts = bool(data.check_new_hosts)
     min_gap = int(await settings_svc.aget(db, "reverify.min_interval_seconds", 0) or 0)
     now = datetime.now(timezone.utc)
     if scan.completed_at and min_gap > 0:
@@ -165,6 +197,7 @@ async def reverify_scan(
         detail={
             "recheck_down_hosts": recheck_down,
             "sweep_remaining_ports": sweep_ports,
+            "check_new_hosts": check_new_hosts,
             "port_range": data.port_range,
         }
     ))
@@ -191,8 +224,108 @@ async def reverify_scan(
         "port_range": data.port_range,
         "recheck_down_hosts": bool(recheck_down),
         "sweep_remaining_ports": bool(sweep_ports),
+        "check_new_hosts": check_new_hosts,
     }
+    # Hand the reverify options to a delegated scanner agent: it recomputes its
+    # per-scan context in claim_next_task from the scan row, but these options
+    # (check_new_hosts etc.) are not stored on the scan, so cache them for the
+    # lifetime of the queued job next to the task mapping key.
+    try:
+        from ..websocket import _redis_client as _rc
+        rc = _rc()
+        rc.set(f"scan:reverify:cfg:{scan.id}", json.dumps(reverify_cfg), ex=86400)
+        rc.close()
+    except Exception:
+        pass
     _dispatch_run(str(scan.id), reverify_cfg)
+    return scan
+
+@router.patch("/scans/{scan_id}", response_model=ScanOut)
+async def update_scan(
+    scan_id: uuid.UUID,
+    data: ScanUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Edit a scan's details.
+
+    name: editable anytime. targets/profile/port_range/protocol: restricted to
+    finished scans (changing them mid-run would not affect the running scan and
+    would desync the stored configuration from what actually executed).
+
+    Targets are re-validated against the engagement's authorized scope, and
+    hosts_total_in_scope is recomputed for the report.
+    """
+    scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
+    running = scan.status in ("queued", "discovering", "scanning", "fingerprinting",
+                              "analyzing", "agent_running", "paused", "reverifying")
+
+    changes = {}
+
+    if data.name is not None:
+        name = (data.name or "").strip() or None
+        if name != scan.name:
+            changes["name"] = (scan.name, name)
+            scan.name = name
+
+    if data.targets is not None:
+        if running:
+            raise HTTPException(status_code=409,
+                                detail="Scan is still running; wait for it to finish before changing its targets")
+        cleaned = data.targets
+        engagement = await _require_engagement_access(db, scan.engagement_id, current_user)
+        try:
+            validate_scan_targets(cleaned, engagement.authorized_scope)
+        except ValueError as e:
+            db.add(AuditLog(
+                user_id=current_user.id,
+                engagement_id=engagement.id,
+                scan_id=scan.id,
+                action="scan_update_rejected",
+                detail={"targets": cleaned, "error": str(e)}
+            ))
+            await db.commit()
+            raise HTTPException(status_code=422, detail=str(e))
+        if cleaned != scan.targets:
+            changes["targets"] = (list(scan.targets), cleaned)
+            scan.targets = cleaned
+            scan.hosts_total_in_scope = count_hosts_in_scope(cleaned)
+
+    if data.profile is not None and data.profile != scan.profile:
+        if running:
+            raise HTTPException(status_code=409,
+                                detail="Scan is still running; wait for it to finish before changing its profile")
+        changes["profile"] = (scan.profile, data.profile)
+        scan.profile = data.profile
+
+    if data.port_range is not None:
+        if running:
+            raise HTTPException(status_code=409,
+                                detail="Scan is still running; wait for it to finish before changing its port range")
+        port_range = "".join(data.port_range.split())
+        if port_range != scan.port_range:
+            changes["port_range"] = (scan.port_range, port_range)
+            scan.port_range = port_range
+
+    if data.protocol is not None and data.protocol != scan.protocol:
+        if running:
+            raise HTTPException(status_code=409,
+                                detail="Scan is still running; wait for it to finish before changing its protocol")
+        changes["protocol"] = (scan.protocol, data.protocol)
+        scan.protocol = data.protocol
+
+    if changes:
+        db.add(AuditLog(
+            user_id=current_user.id,
+            engagement_id=scan.engagement_id,
+            scan_id=scan.id,
+            action="scan_updated",
+            detail={"changes": {k: {"old": o, "new": n} for k, (o, n) in changes.items()}}
+        ))
+
+    await db.commit()
+    await db.refresh(scan)
     return scan
 
 @router.get("/scans/{scan_id}/logs", response_model=List[dict])
@@ -239,6 +372,7 @@ async def pause_scan(
     current_user: User = Depends(get_current_user)
 ):
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
     if scan.status in ("completed", "failed", "stopped"):
         raise HTTPException(status_code=400, detail="Scan already finished")
 
@@ -276,6 +410,7 @@ async def resume_scan(
     current_user: User = Depends(get_current_user)
 ):
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
     if scan.status != "paused":
         raise HTTPException(status_code=400, detail="Scan is not paused")
 
@@ -315,6 +450,7 @@ async def stop_scan(
     current_user: User = Depends(get_current_user)
 ):
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
     
     scan.status = "stopped"
     scan.completed_at = datetime.now(timezone.utc)
@@ -344,23 +480,11 @@ async def stop_scan(
     return scan
 
 
-@router.delete("/scans/{scan_id}", status_code=204)
-async def delete_scan(
-    scan_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """Permanently delete a scan and all of its data (hosts, ports, findings,
-    audit trail, agent tasks). An in-progress scan is cancelled first.
+async def _perform_delete_scan(db: AsyncSession, scan: Scan) -> None:
+    """Hard-delete a scan and all of its data; cancels running work first.
 
-    Admins and the scan's engagement creator may delete. This is a hard delete —
-    the scan and its report data are gone, so confirmation is expected on the
-    client.
+    Shared by the admin DELETE endpoint and the deletion-request approval flow.
     """
-    scan = await _load_scan_for_user(db, scan_id, current_user)
-
-    # Kill any queued/running work before removing the rows, so no worker or agent
-    # keeps writing into a scan that no longer exists.
     from ..services.scan_worker import cancel_scan
     cancel_scan(str(scan.id))
 
@@ -381,7 +505,7 @@ async def delete_scan(
     try:
         from ..websocket import _redis_client
         rc = _redis_client()
-        rc.delete(f"scan:task:{scan_id_uuid}", f"scan:paused:{scan_id_uuid}")
+        rc.delete(f"scan:task:{scan_id_uuid}", f"scan:paused:{scan_id_uuid}", f"scan:reverify:cfg:{scan_id_uuid}")
         rc.close()
     except Exception:
         pass
@@ -390,6 +514,28 @@ async def delete_scan(
     manager.broadcast_sync(str(scan_id_uuid), {
         "type": "scan_deleted", "scan_id": str(scan_id_uuid), "engagement_id": str(engagement_id),
     })
+
+
+@router.delete("/scans/{scan_id}", status_code=204)
+async def delete_scan(
+    scan_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """Permanently delete a scan and all of its data (hosts, ports, findings,
+    audit trail, agent tasks). An in-progress scan is cancelled first.
+
+    Only admins may delete directly; pentesters submit a deletion request that
+    an admin approves. This is a hard delete — the scan and its report data are
+    gone, so confirmation is expected on the client.
+    """
+    scan = await _load_scan_for_user(db, scan_id, current_user)
+
+    if current_user.role != "admin":
+        raise HTTPException(status_code=403,
+                            detail="Only admins can delete scans. Pentesters should submit a deletion request instead.")
+
+    await _perform_delete_scan(db, scan)
 
 # Canonical device_type queried from the UI/API -> all legacy spellings the DB
 # may still hold, so filters like device_type=ip_camera match rows stored as
@@ -476,6 +622,64 @@ async def get_host_detail(
         "sys_location": host.snmp.sys_location if host.snmp else None,
         "default_community_found": host.snmp.default_community_found if host.snmp else False
     } if host.snmp else None
+
+# Attach ALL per-port NSE script results (id + raw output) for every open
+    # port. These come from the raw nmap XML already saved on disk during the
+    # fingerprint phase (backend/scan_output/<scan_id>/fingerprint_<ip>.xml) â€”
+    # not from the DB â€” so existing/historical scans expose them too without a
+    # re-scan and without a schema migration.
+    try:
+        d = SCAN_OUTPUT_DIR / str(scan_id)
+        safe = (host_ip or "all").replace("/", "_").replace(":", "_")
+        xml_path = d / f"fingerprint_{safe}.xml"
+        if not xml_path.exists():
+            return host_data
+        xml_text = xml_path.read_text(encoding="utf-8", errors="replace")
+
+        # Per-port NSE script results (id + full output).
+        scripts_by_port: dict = {}
+        for entry in iter_nse_entries(xml_text):
+            port_key = entry.get("port")
+            if port_key is None:
+                continue  # host-level scripts are host-wide, not per-port
+            scripts_by_port.setdefault(port_key, []).append({
+                "id": entry.get("script") or entry.get("script_id") or "",
+                "output": entry.get("output") or "",
+            })
+
+        for p_out in host_data.ports:
+            p_out.scripts = scripts_by_port.get(p_out.port, [])
+
+        # Version/product fallback: if the DB row was recorded before version
+        # data was saved (empty/blank), re-read it straight from the saved
+        # fingerprint XML <service> element so it still appears. Guarded so a
+        # parse hiccup here can never drop the script results already attached.
+        try:
+            svc_by_port: dict = {}
+            for m in port_service_re.finditer(xml_text):
+                try:
+                    pn_ = int(m.group(2))
+                except (TypeError, ValueError):
+                    continue
+                svc = svc_by_port.setdefault(pn_, {})
+                attrs = m.group(3) or ""
+                mm = re.search(r'name="([^"]*)"', attrs)
+                if mm and not svc.get("service"):
+                    svc["service"] = mm.group(1)
+                mm = re.search(r'version="([^"]*)"', attrs)
+                if mm and not svc.get("version"):
+                    svc["version"] = mm.group(1)
+            for p_out in host_data.ports:
+                svc = svc_by_port.get(p_out.port) or {}
+                if not p_out.version:
+                    p_out.version = svc.get("version")
+                if not p_out.service:
+                    p_out.service = svc.get("service")
+        except Exception:
+            pass
+    except Exception:
+        # Never fail host detail because raw output is missing/unreadable.
+        pass
     return host_data
 
 @router.patch("/scans/{scan_id}/hosts/{host_ip}", response_model=HostOut)
@@ -487,6 +691,7 @@ async def patch_host(
     current_user: User = Depends(get_current_user)
 ):
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
     result = await db.execute(
         select(Host).where(
             Host.scan_id == scan_id,
@@ -566,7 +771,8 @@ async def patch_finding(
     finding = result.scalar_one_or_none()
     if not finding:
         raise HTTPException(status_code=404, detail="Finding not found")
-    await _load_scan_for_user(db, finding.scan_id, current_user)
+    scan = await _load_scan_for_user(db, finding.scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
 
     # Fields whose analyst changes go into the audit trail.
     audited_fields = {"status", "included_in_report", "severity", "cvss_score", "cvss_vector", "cwe"}
@@ -718,6 +924,7 @@ async def update_risk_rules(
 ):
     from ..services.risk_rules import merged_rules, to_json, store_overrides
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
     scan.risk_rules = store_overrides(scan.risk_rules, [r.model_dump() for r in rules])
     await db.commit()
     await db.refresh(scan)
@@ -732,6 +939,7 @@ async def reanalyze_scan(
     from starlette.concurrency import run_in_threadpool
     from ..services.scan_worker import run_risk_rules
     scan = await _load_scan_for_user(db, scan_id, current_user)
+    await _ensure_engagement_writable(db, scan.engagement_id, current_user)
     if scan.status not in ("completed", "error"):
         raise HTTPException(status_code=409, detail="Scan is still running")
 
