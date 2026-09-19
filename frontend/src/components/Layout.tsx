@@ -61,31 +61,12 @@ export default function Layout() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <header className="border-b border-gray-800 bg-gray-900">
-        <div className="flex items-center gap-4 px-4 py-2">
-          <NavLink to="/" end className="flex shrink-0 items-center gap-2 hover:opacity-90">
-            <img src={theme === 'dark' ? subnexLogoLight : subnexLogo} alt="SubNex" className="h-9 w-auto" />
-            <span className="hidden text-xs italic text-gray-500 xl:block">Assets Discovery</span>
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-3">
+          <NavLink to="/" end className="flex items-center gap-3 hover:opacity-90">
+            <img src={theme === 'dark' ? subnexLogoLight : subnexLogo} alt="SubNex" className="h-14 w-auto" />
+            <span className="text-sm italic text-gray-500">Where your assets hide, SubNex finds.</span>
           </NavLink>
-          <nav className="flex flex-wrap items-center gap-1">
-            <NavLink to="/" end className={navClass}>
-              Engagements
-            </NavLink>
-            <NavLink to="/agents" className={navClass}>
-              Agents
-            </NavLink>
-            <NavLink to="/integrations" className={navClass}>
-              Integrations
-            </NavLink>
-            <NavLink to="/settings" className={navClass}>
-              Settings
-            </NavLink>
-            {admin && (
-              <NavLink to="/admin" className={navClass}>
-                Administration
-              </NavLink>
-            )}
-          </nav>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => {
                 window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))
@@ -130,6 +111,25 @@ export default function Layout() {
             </button>
           </div>
         </div>
+        <nav className="flex flex-wrap items-center gap-1 border-t border-gray-800/70 bg-gray-900/40 px-4 py-2">
+          <NavLink to="/" end className={navClass}>
+            Engagements
+          </NavLink>
+          <NavLink to="/agents" className={navClass}>
+            Agents
+          </NavLink>
+          <NavLink to="/integrations" className={navClass}>
+            Integrations
+          </NavLink>
+          <NavLink to="/settings" className={navClass}>
+            Settings
+          </NavLink>
+          {admin && (
+            <NavLink to="/admin" className={navClass}>
+              Administration
+            </NavLink>
+          )}
+        </nav>
       </header>
 
       <main className="p-4">
