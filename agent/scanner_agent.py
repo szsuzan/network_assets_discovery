@@ -1441,8 +1441,39 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
     # The component range(s) to sweep: complement of what was already checked.
     sweep_spec = _leftover_ports_spec(_range_to_ports_set(already_ports))
 
+    # Live progress ladder: each ACTIVE re-verify phase owns an equal slice of
+    # the 2..98 band, so the server's max-guarded progress tracks the real
+    # re-verify flow (new-host check -> down re-check -> leftover sweep) instead
+    # of sitting still and jumping to 100 at the end.
+    _plan = []
+    if rv.get("check_new_hosts"):
+        _plan.append("new_hosts")
+    if down_ips:
+        _plan.append("down")
+    if sweep_spec and up_ips:
+        _plan.append("sweep")
+    _slice = 96.0 / max(1, len(_plan))
+    _pbands = {p: (2 + i * _slice, 2 + (i + 1) * _slice) for i, p in enumerate(_plan)}
+
+    def _rv_pct(phase: str, frac: float, lo_off: float = 0.0, hi_off: float = 1.0) -> int:
+        lo, hi = _pbands.get(phase, (2, 98))
+        a = lo_off + (hi_off - lo_off) * frac
+        return min(99, int(lo + (hi - lo) * min(1.0, max(0.0, a))))
+
+    def _rv_phase_end(phase: str) -> int:
+        lo, hi = _pbands.get(phase, (2, 98))
+        return int(hi)
+
+    def _post_rv_progress(pct: int):
+        try:
+            client.result(task_id, [], status="partial", notes="progress", progress=min(99, max(2, int(pct))))
+        except Exception:
+            pass
+
     client.log(task_id, f"=== Agent re-verify started (scan={scan_id}) ===")
     client.log(task_id, f"  down hosts to re-check: {len(down_ips)}, up hosts to sweep: {len(up_ips)}, leftover ports: {sweep_spec or 'none'}")
+    if _plan:
+        _post_rv_progress(2)
 
     # ---- Phase 0: check for NEW hosts (optional, ARP discovery) ----
     # Re-discovers the targets at L2 and registers hosts that were not part of
@@ -1457,6 +1488,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
         scan_type_0 = "-sT" if use_connect else "-sS"
         timing_0 = PROBE_TIMING.get(profile, "-T4")
         client.log(task_id, "Phase 0: host discovery -> NEW hosts not in the previous scan")
+        _post_rv_progress(_rv_pct("new_hosts", 0.04))
         new_live = {}
         for t in (task.get("targets") or []):
             if not _valid_target(t):
@@ -1485,6 +1517,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
                             "vendor": entry.get("vendor"), "state": "up"}
         if not new_live:
             client.log(task_id, "Phase 0: no new hosts found - inventory unchanged")
+            _post_rv_progress(_rv_phase_end("new_hosts"))
         else:
             client.log(task_id, f"Phase 0: {len(new_live)} new host(s) found: {', '.join(sorted(new_live))}", level="out")
             if not _await_go(client, task_id):
@@ -1515,13 +1548,18 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
                                        ",".join(found), use_connect, profile,
                                        discovery=(mode == "discovery")) or {"ip": ip, "ports": []}
 
+            _new_done = 0
+            _new_total = max(len(new_live), 1)
             for (ip, _meta), host in _map_hosts(_new_host_worker, [(a["ip"], a) for a in new_live.values()],
                                                 _p2_workers(), client, task_id, "new-host-scan"):
                 if host is None:
                     client.log(task_id, "Scan stopped by user", level="warn")
                     break
                 new_hosts_up.append(ip)
+                _new_done += 1
+                _post_rv_progress(_rv_pct("new_hosts", 0.05 + 0.95 * (_new_done / _new_total)))
                 client.log(task_id, f"  {ip}: {len(host.get('ports', []))} open port(s)")
+            _post_rv_progress(_rv_phase_end("new_hosts"))
 
     # ---- Phase A: re-check previously-down hosts via L2/ARP ----
     newly_up = []
@@ -1529,6 +1567,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
         if not _await_go(client, task_id):
             return
         client.log(task_id, f"$ nmap -sn {' '.join(down_ips)} (ARP re-check of down hosts)", level="cmd")
+        _post_rv_progress(_rv_pct("down", 0.04))
         args = ["nmap", "-sn", "-oX", "-", "--host-timeout", "60s", *down_ips]
         xml = run_nmap(args)
         alive = []
@@ -1536,6 +1575,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
             if h.get("state") == "up":
                 alive.append(h)
         client.log(task_id, f"  {len(alive)} previously-down host(s) now responding")
+        _post_rv_progress(_rv_pct("down", 0.35))
         scan_type_a = "-sT" if use_connect else "-sS"
         timing_a = PROBE_TIMING.get(profile, "-T4")
         client.log(task_id, f"  re-checking now-up host(s) (full pipeline), {_p2_workers()} parallel worker(s)")
@@ -1564,13 +1604,18 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
                                    ",".join(found), use_connect, profile,
                                    discovery=(mode == "discovery")) or {"ip": ip, "ports": []}
 
+        _down_done = 0
+        _down_total = max(len(alive), 1)
         for (ip, _meta), host in _map_hosts(_rv_down_worker, [(a["ip"], a) for a in alive],
                                             _p2_workers(), client, task_id, "re-verify-up"):
             if host is None:
                 client.log(task_id, "Scan stopped by user", level="warn")
                 break
             newly_up.append(ip)
+            _down_done += 1
+            _post_rv_progress(_rv_pct("down", 0.35 + 0.65 * (_down_done / _down_total)))
             client.log(task_id, f"  {ip}: {len(host.get('ports', []))} open port(s)")
+        _post_rv_progress(_rv_phase_end("down"))
 
     # ---- Phase B: sweep unscanned ports on the up hosts (parallel) ----
     if sweep_spec and up_ips:
@@ -1579,6 +1624,7 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
         scan_type_b = "-sT" if use_connect else "-sS"
         timing_b = PROBE_TIMING.get(profile, "-T4")
         client.log(task_id, f"Phase B: sweeping unscanned ports {sweep_spec} on {len(up_ips)} up host(s), {_p2_workers()} parallel worker(s)")
+        _post_rv_progress(_rv_pct("sweep", 0.05))
 
         def _rv_sweep_worker(ip_meta):
             ip, _meta = ip_meta
@@ -1607,11 +1653,8 @@ def execute_reverify(client: ApiClient, task: dict, use_connect: bool = False):
                 client.log(task_id, f"  {ip}: no hidden open ports in leftover range")
             else:
                 client.log(task_id, f"  {ip}: hidden open port(s) in leftover range: {','.join(map(str, found))}")
-            try:
-                client.result(task_id, [], status="partial", notes="progress",
-                              progress=min(99, int(40 + 60 * leftover_done / leftover_total)))
-            except Exception:
-                pass
+            _post_rv_progress(_rv_pct("sweep", 0.05 + 0.95 * (leftover_done / leftover_total)))
+        _post_rv_progress(_rv_phase_end("sweep"))
 
     # ---- Finalise ----
     try:

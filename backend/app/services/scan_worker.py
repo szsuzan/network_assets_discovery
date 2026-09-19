@@ -38,6 +38,55 @@ _last_progress_broadcast: dict[str, int] = {}
 _last_progress_lock = threading.Lock()
 
 
+def _set_progress(db, scan: Scan, pct: int):
+    """Fit progress into 2..99, persist it, and broadcast a scan_progress live
+    event (deduped) so the LiveScan progress bar tracks re-verify / scan phases
+    instead of only jumping at the terminal 100."""
+    try:
+        pct = max(2, min(99, int(pct)))
+    except Exception:
+        return
+    if pct == scan.progress_pct:
+        return
+    scan.progress_pct = pct
+    try:
+        db.commit()
+    except Exception:
+        pass
+    try:
+        with _last_progress_lock:
+            last = _last_progress_broadcast.get(str(scan.id))
+        if last != scan.progress_pct:
+            manager.broadcast_sync(str(scan.id), {
+                "type": "scan_progress",
+                "scan_id": str(scan.id),
+                "progress_pct": scan.progress_pct,
+                "hosts_discovered": scan.hosts_discovered,
+            })
+            with _last_progress_lock:
+                _last_progress_broadcast[str(scan.id)] = scan.progress_pct
+    except Exception:
+        pass
+
+
+def _emit_phase(scan: Scan, index, total, label: str):
+    """Broadcast a scan_phase event so the LiveScan "current phase" chip follows
+    re-verify passes as closely as it does the initial scan's Phase X/Y markers."""
+    try:
+        manager.broadcast_sync(str(scan.id), {
+            "type": "scan_phase",
+            "scan_id": str(scan.id),
+            "index": index,
+            "total": total,
+            "label": label,
+            # Uniqueness anchor for the frontend feedKey dedup (two phases in the
+            # same second must not collapse into one timeline row).
+            "ip": label,
+        })
+    except Exception:
+        pass
+
+
 def _console_log_file(scan_id) -> Path:
     """Persistent per-scan console log path. Used so the LiveScan console can
     replay the full history (including the initial scan's lines) even after a
@@ -692,6 +741,44 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         up_ips = {str(h.ip) for h in existing_hosts if h.status == "up"}
         down_rows = [h for h in existing_hosts if h.status != "up"]
 
+        # Progress plan: each ACTIVE re-verify phase gets an equal slice of the
+        # 2..98 ladder so the bar tracks exactly what this pass will do (and no
+        # longer sits at 0% through the long probe phases, only to jump to 100).
+        if override_range:
+            _sweep_spec = override_range
+        else:
+            try:
+                _sweep_spec = _leftover_ports(_range_to_ports(scan.port_range))
+            except Exception:
+                _sweep_spec = ""
+        _sweep_up = bool(_sweep_spec) and bool(up_ips)
+
+        plan = []
+        if check_new_hosts:
+            plan.append("new_hosts")
+        if recheck_down and down_rows:
+            plan.append("down")
+        if sweep_ports and (_sweep_up or down_rows or check_new_hosts):
+            plan.append("sweep")
+
+        _slice = 96.0 / max(1, len(plan))
+        _phase_pct = {p: (2 + i * _slice, 2 + (i + 1) * _slice) for i, p in enumerate(plan)}
+
+        def _pct(phase: str, frac: float, lo_off: float = 0.0, hi_off: float = 1.0) -> int:
+            lo, hi = _phase_pct[phase]
+            a = lo_off + (hi_off - lo_off) * frac
+            return int(lo + (hi - lo) * min(1.0, max(0.0, a)))
+
+        def _sub(phase: str, a: float, b: float) -> tuple:
+            """(lo, hi) pct band for sub-fraction [a, b] of a phase's slice."""
+            return _pct(phase, a), _pct(phase, b)
+
+        def _phase_start(p: str) -> int:
+            return int(_phase_pct[p][0])
+
+        def _phase_end(p: str) -> int:
+            return int(_phase_pct[p][1])
+
         # ---- Phase 0: host discovery for NEW hosts (optional) ----
         # Re-discovers the targets with ARP-equivalent probing and registers any
         # IPs that were NOT part of the previous scan. New hosts have no prior
@@ -700,12 +787,16 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         new_hosts_up = []
         if check_new_hosts:
             _wait_if_paused(scan)
+            _emit_phase(scan, 1, 3, "Re-verify: checking for NEW hosts")
             _emit_log(scan, "--- Checking for NEW hosts across targets ---")
             _raise_if_stopped(scan)
             existing_ips = {str(h.ip) for h in existing_hosts}
             candidate_ips = _expand_targets(scan.targets)
             fresh_ips = [ip for ip in candidate_ips if ip not in existing_ips]
-            alive = _probe_alive(fresh_ips) if fresh_ips else set()
+            _set_progress(db, scan, _pct("new_hosts", 0.05))
+            alive = _probe_alive(
+                fresh_ips, progress_cb=lambda d, t: _set_progress(db, scan, _pct("new_hosts", 0.05 + 0.10 * d / t))
+            ) if fresh_ips else set()
             alive |= _probe_udp_alive(fresh_ips) if fresh_ips else set()
 
             added = 0
@@ -731,6 +822,7 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                     manager.broadcast_sync(str(scan.id), {
                         "type": "host_discovered", "host_id": str(host.id), "ip": ip, "up": True,
                     })
+            _set_progress(db, scan, _pct("new_hosts", 0.16))
             db.commit()
             if new_hosts_up:
                 _emit_log(scan, f"  {len(new_hosts_up)} NEW host(s) found: {', '.join(sorted(str(h.ip) for h in new_hosts_up))}", level="out")
@@ -745,23 +837,32 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                 _emit_log(scan, f"--- Full port scan + fingerprint on {len(new_hosts_up)} NEW host(s) ---")
                 scan.status = "scanning"
                 db.commit()
-                port_scan_hosts(db, scan, new_hosts_up)
+                port_scan_hosts(db, scan, new_hosts_up, pbar=_sub("new_hosts", 0.16, 0.60))
                 _raise_if_stopped(scan)
                 scan.status = "fingerprinting"
                 db.commit()
                 _wait_if_paused(scan)
-                fingerprint_open_ports(db, scan, new_hosts_up)
-                fingerprint_hosts(db, scan, new_hosts_up)
+                _set_progress(db, scan, _pct("new_hosts", 0.60))
+                fingerprint_open_ports(db, scan, new_hosts_up, pbar=_sub("new_hosts", 0.60, 1.0))
+                fingerprint_hosts(db, scan, new_hosts_up, pbar=_sub("new_hosts", 0.60, 1.0))
                 db.commit()
+            _set_progress(db, scan, _phase_end("new_hosts"))
 
         # ---- Phase A: re-check hosts that were marked down ----
         newly_up = []
         if recheck_down and down_rows:
             _wait_if_paused(scan)
+            _emit_phase(scan, 2, 3, "Re-verify: re-checking down hosts")
             _emit_log(scan, f"--- Re-checking {len(down_rows)} host(s) previously marked down ---")
             _raise_if_stopped(scan)
             candidates = [str(h.ip) for h in down_rows]
-            alive = _probe_alive(candidates) if candidates else set()
+            if candidates:
+                _set_progress(db, scan, _pct("down", 0.05))
+            alive = _probe_alive(
+                candidates,
+                progress_cb=lambda d, t: _set_progress(db, scan, _pct("down", 0.05 + 0.30 * d / t)),
+            ) if candidates else set()
+            _set_progress(db, scan, _pct("down", 0.35))
             _emit_log(scan, f"  {len(alive)} previously-down host(s) now responding", level="out")
             for row in down_rows:
                 ip = str(row.ip)
@@ -781,13 +882,15 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                 _raise_if_stopped(scan)
                 _emit_log(scan, "--- Port scan + fingerprint on newly-up hosts ---")
                 _wait_if_paused(scan)
-                port_scan_hosts(db, scan, newly_up)
+                port_scan_hosts(db, scan, newly_up, pbar=_sub("down", 0.35, 0.70))
                 _raise_if_stopped(scan)
                 scan.status = "fingerprinting"
                 db.commit()
+                _set_progress(db, scan, _pct("down", 0.70))
                 _wait_if_paused(scan)
-                fingerprint_open_ports(db, scan, newly_up)
-                fingerprint_hosts(db, scan, newly_up)
+                fingerprint_open_ports(db, scan, newly_up, pbar=_sub("down", 0.70, 1.0))
+                fingerprint_hosts(db, scan, newly_up, pbar=_sub("down", 0.70, 1.0))
+            _set_progress(db, scan, _phase_end("down"))
 
         # ---- Phase B: residual sweep of unscanned ports on up hosts ----
         if sweep_ports:
@@ -803,15 +906,21 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
             up_hosts = db.execute(select(Host).where(
                 Host.scan_id == scan.id, Host.status == "up")).scalars().all()
             if sweep_spec and up_hosts:
+                _emit_phase(scan, 3, 3, "Re-verify: sweeping remaining ports")
                 _emit_log(scan, f"--- Residual port sweep {sweep_spec} on {len(up_hosts)} up host(s) ---")
                 saved_range = scan.port_range
                 scan.port_range = sweep_spec
+                if "sweep" in plan:
+                    _set_progress(db, scan, _pct("sweep", 0.05))
                 db.commit()
                 # Quick open-port discovery on the leftover range only (no
                 # fingerprint) - merge new open ports without duplication.
                 result_by_id, _os, _sos = _scan_port_foreach_host(
-                    db, scan, up_hosts, "ports", max_concurrency=8)
+                    db, scan, up_hosts, "ports", max_concurrency=8,
+                    pbar=_sub("sweep", 0.05, 0.70) if "sweep" in plan else None)
                 scan.port_range = saved_range
+                if "sweep" in plan:
+                    _set_progress(db, scan, _pct("sweep", 0.70))
                 db.commit()
 
                 new_open = []  # (host, ports) where ports are newly discovered
@@ -838,9 +947,11 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                     db.commit()
                     _wait_if_paused(scan)
                     _emit_log(scan, "--- Fingerprinting newly-found hidden ports ---")
-                    for host, fresh_ports in new_open:
+                    for i, (host, fresh_ports) in enumerate(new_open):
                         _raise_if_stopped(scan)
                         _wait_if_paused(scan)
+                        if "sweep" in plan:
+                            _set_progress(db, scan, _pct("sweep", 0.70 + 0.30 * (i / max(len(new_open), 1))))
                         port_list = ",".join(map(str, fresh_ports))
                         script_set = _nse_scripts_for_ports(fresh_ports)
                         fp_tmo = settings_svc.get_int("execution.fingerprint_host_timeout", 300)
@@ -867,6 +978,12 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                                 "host_up": True,
                             })
                         db.commit()
+                if "sweep" in plan:
+                    _set_progress(db, scan, _phase_end("sweep"))
+            elif "sweep" in plan:
+                # Sweep planned but nothing to do (e.g. no up hosts after the
+                # earlier phases) - step past its slot without stalling.
+                _set_progress(db, scan, _phase_end("sweep"))
 
         _raise_if_stopped(scan)
         _wait_if_paused(scan)
@@ -941,16 +1058,29 @@ def _tcp_probe(ip: str, timeout: float = 1.0) -> bool:
     return False
 
 
-def _probe_alive(candidates: list, timeout: float = None, max_workers: int = 64) -> set:
-    """Concurrently TCP-probe candidate IPs, returning only reachable ones."""
+def _probe_alive(candidates: list, timeout: float = None, max_workers: int = 64,
+                 progress_cb: callable = None) -> set:
+    """Concurrently TCP-probe candidate IPs, returning only reachable ones.
+
+    `progress_cb(done, total)` is invoked (on the calling thread) as each host's
+    probe finishes, so callers can surface a live progress percentage while a
+    long re-verify down-host / fresh-host sweep runs."""
     if timeout is None:
         timeout = settings_svc.get_float("execution.tcp_probe_timeout", 1.0)
     alive = set()
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futures = {ex.submit(_tcp_probe, ip, timeout): ip for ip in candidates}
+        total = max(len(futures), 1)
+        done = 0
         for fut in futures:
             if fut.result():
                 alive.add(futures[fut])
+            done += 1
+            if progress_cb:
+                try:
+                    progress_cb(done, total)
+                except Exception:
+                    pass
     return alive
 
 
@@ -1249,7 +1379,8 @@ def _delegate_to_agent(db, scan: Scan) -> bool:
 
 
 def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
-                            max_concurrency: int = None, probe: bool = True):
+                            max_concurrency: int = None, probe: bool = True,
+                            pbar: tuple = None):
     """Run Phase 2/3 nmap per host, concurrently, streaming live results.
 
     Returns (results, os_map) where results maps host_id -> [open_ports] and
@@ -1261,6 +1392,10 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
     fingerprinting, so the container does not duplicate that work and stall
     finalisation. Threads never touch the shared DB session; enrichment is
     applied by the caller after all threads complete.
+
+    `pbar=(lo, hi)` maps this phase's progress percentage onto [lo, hi] instead
+    of the default 20-70 (ports) / 70-90 (fingerprint) bands, so a re-verify
+    pass can drive its own monotonic ladder across all its phases.
     """
     if max_concurrency is None:
         max_concurrency = settings_svc.get_int("execution.phase2_concurrency", 10)
@@ -1365,11 +1500,14 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
             done_count += 1
             _emit_log(scan, f"  {str(h.ip)}: {len(ports)} open port(s) ({phase})", level="out")
             # live per-host result, plus a rolling phase progress (never
-            # regresses an already-higher value written by an earlier phase)
+            # regresses an already-higher value written by an earlier phase).
+            # A custom pbar band lets re-verify map onto its own ladder.
             if phase == "ports":
-                scan.progress_pct = max(scan.progress_pct, min(70, 20 + int(done_count / total * 50)))
+                lo, hi = (20, 70) if pbar is None else pbar
+                scan.progress_pct = max(scan.progress_pct, int(min(hi, lo + (hi - lo) * (done_count / total))))
             else:
-                scan.progress_pct = max(scan.progress_pct, min(90, 70 + int(done_count / total * 20)))
+                lo, hi = (70, 90) if pbar is None else pbar
+                scan.progress_pct = max(scan.progress_pct, int(min(hi, lo + (hi - lo) * (done_count / total))))
             try:
                 db.flush()
                 db.commit()
@@ -1397,13 +1535,16 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
     return results, os_map, script_os_map
 
 
-def port_scan_hosts(db, scan: Scan, hosts: list):
+def port_scan_hosts(db, scan: Scan, hosts: list, pbar: tuple = None):
     """Fast nmap connect scan (no -sV/-sC/-O) producing open ports per host.
 
     Runs only on hosts marked up/confirmed, concurrently across hosts, and
     records each open port WITHOUT service detail. Service detail is layered on
     later by fingerprint_open_ports. Live per-host results are broadcast as they
     complete so the UI updates incrementally instead of all at once.
+
+    `pbar=(lo, hi)` maps this phase's live progress onto a custom band (used by
+    re-verify to drive its own progress ladder).
     """
     confirmed = [h for h in hosts if h.status == "up"]
     if not confirmed:
@@ -1412,7 +1553,7 @@ def port_scan_hosts(db, scan: Scan, hosts: list):
 
     _emit_log(scan, f"--- Phase 2/3: Port scan (connect, no fingerprint) over {len(confirmed)} host(s) ---")
 
-    result_by_id, _os, _sos = _scan_port_foreach_host(db, scan, hosts, "ports")
+    result_by_id, _os, _sos = _scan_port_foreach_host(db, scan, hosts, "ports", pbar=pbar)
 
     for host in confirmed:
         ports = result_by_id.get(host.id, [])
@@ -1431,7 +1572,7 @@ def port_scan_hosts(db, scan: Scan, hosts: list):
     db.commit()
 
 
-def fingerprint_open_ports(db, scan: Scan, hosts: list, probe: bool = True):
+def fingerprint_open_ports(db, scan: Scan, hosts: list, probe: bool = True, pbar: tuple = None):
     """Deep -sV -sC -O fingerprinting ONLY on ports already found open.
 
     Constrains the heavy service scan to (<ip>,<port>) pairs that are actually
@@ -1441,10 +1582,13 @@ def fingerprint_open_ports(db, scan: Scan, hosts: list, probe: bool = True):
     `probe=False` (used when a scanner agent already fingerprinted service/
     version/OS): runs a packed NSE-evidence pass over known-open ports and never
     overwrites richer existing port data with empty probe results.
+
+    `pbar=(lo, hi)` maps this phase's live progress onto a custom band (used by
+    re-verify to drive its own progress ladder).
     """
     mode = "packed NSE pass" if not probe else "service fingerprinting + NSE"
     _emit_log(scan, f"--- Phase 3/3: {mode} over {len(hosts)} host(s) ---")
-    result_by_id, os_map, script_os_map = _scan_port_foreach_host(db, scan, hosts, "fingerprint", probe=probe)
+    result_by_id, os_map, script_os_map = _scan_port_foreach_host(db, scan, hosts, "fingerprint", probe=probe, pbar=pbar)
 
     for host in hosts:
         if host.status != "up":
@@ -1697,7 +1841,7 @@ def parse_os_from_scripts(xml_output: str):
                         best = (val[:200], conf)
     return best  # (os_str, confidence) or None
 
-def fingerprint_hosts(db, scan: Scan, hosts: list):
+def fingerprint_hosts(db, scan: Scan, hosts: list, pbar: tuple = None):
     for host in hosts:
         if host.status != "up":
             continue
@@ -1747,7 +1891,23 @@ def fingerprint_hosts(db, scan: Scan, hosts: list):
                 pass
 
         classify_device_type(host)
-        scan.progress_pct = min(90, 70 + int((hosts.index(host) + 1) / max(len(hosts), 1) * 20))
+        # Rolling progress: land in the pbar band (default 70-90) so a re-verify
+        # pass can drive fingerprint progress onto its own ladder.
+        lo, hi = (70, 90) if pbar is None else pbar
+        _pct = int(min(hi, lo + (hi - lo) * ((hosts.index(host) + 1) / max(len(hosts), 1))))
+        if _pct != scan.progress_pct:
+            scan.progress_pct = max(scan.progress_pct, _pct)
+            with _last_progress_lock:
+                last_pct = _last_progress_broadcast.get(str(scan.id))
+            if last_pct != scan.progress_pct:
+                manager.broadcast_sync(str(scan.id), {
+                    "type": "scan_progress",
+                    "scan_id": str(scan.id),
+                    "progress_pct": scan.progress_pct,
+                    "hosts_discovered": scan.hosts_discovered,
+                })
+                with _last_progress_lock:
+                    _last_progress_broadcast[str(scan.id)] = scan.progress_pct
         manager.broadcast_sync(str(scan.id), {
             "type": "host_updated",
             "host_id": str(host.id),

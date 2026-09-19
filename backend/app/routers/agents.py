@@ -846,6 +846,15 @@ async def agent_result(
         task.status = "in_progress"
         await db.commit()
         try:
+            # Mirror the in-container worker's scan_progress event so the LiveScan
+            # progress bar tracks agent-delegated (and agent re-verify) scans too,
+            # not only the cmd_log line.
+            await manager.broadcast(str(scan.id), {
+                "type": "scan_progress",
+                "scan_id": str(scan.id),
+                "progress_pct": scan.progress_pct,
+                "hosts_discovered": scan.hosts_discovered,
+            })
             await manager.broadcast(str(scan.id), {
                 "type": "cmd_log", "scan_id": str(scan.id), "level": "info",
                 "line": f"Agent progress: {scan.hosts_discovered} host(s) discovered, {scan.progress_pct}%",
