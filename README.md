@@ -201,7 +201,7 @@ docker compose up -d --build                           # start the stack
 docker compose ps                                      # postgres+redis (healthy), backend (Up)
 ```
 
-Schema creation, migrations (001 → 017) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
+Schema creation and the demo user happen **automatically** at backend startup from the single-file `001_init.sql` schema — no manual `psql`/`seed.py` steps.
 
 ### 6. First login and first scan
 
@@ -785,7 +785,7 @@ Device type is inferred **only from captured evidence** (MAC vendor, open ports,
 │   ├── scanner_agent.py            # distributable LAN L2 scanner (CLI)
 │   └── Dockerfile                  # containerized agent (Linux, host-net)
 ├── database/migrations/            # ordered .sql migrations (applied automatically)
-│   └── 001_init.sql … 013_cve_catalog.sql   # from 001 to 013 on backend startup
+│   └── 001_init.sql                # single-file full v1 schema, applied on backend startup
 ├── backend/
 │   ├── Dockerfile
 │   ├── requirements.txt

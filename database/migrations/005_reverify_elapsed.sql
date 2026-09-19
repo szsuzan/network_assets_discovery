@@ -1,1 +1,0 @@
-ALTER TABLE scans ADD COLUMN IF NOT EXISTS reverify_started_at timestamptz;

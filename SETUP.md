@@ -175,11 +175,11 @@ docker compose up -d --build                            # start the stack
 docker compose ps                                       # postgres+redis (healthy), backend (Up)
 ```
 
-**What happens automatically at first boot:** the backend applies every
-`database/migrations/*.sql` in order (currently `001_init.sql` … `013_cve_catalog.sql`)
-and records applied versions in `schema_version`; it also creates the demo admin
-user **only when the database has no users yet**. No manual `psql` / `seed.py`
-steps are needed.
+**What happens automatically at first boot:** the backend applies the single
+`database/migrations/001_init.sql` (the full v1 schema, squashed from the earlier
+001–018 chain) and records the version in `schema_version`; it also creates the
+demo admin user **only when the database has no users yet**. No manual `psql` /
+`seed.py` steps are needed.
 
 ---
 
