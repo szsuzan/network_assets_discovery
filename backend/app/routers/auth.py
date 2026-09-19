@@ -50,7 +50,7 @@ async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts; please wait and try again"
         )
-    identifier = (data.email or "").strip()
+    identifier = (data.email or "").strip().lower()
     if not identifier:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     if "@" in identifier:

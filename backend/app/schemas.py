@@ -44,8 +44,13 @@ class UserCreate(BaseModel):
     @classmethod
     def _email_valid(cls, v: str) -> str:
         v = v.strip()
-        if "@" not in v or "." not in v.rsplit("@", 1)[-1]:
-            raise ValueError("A valid email address is required")
+        if "@" in v:
+            # Full addresses must still look like addresses; bare usernames
+            # are allowed and get the default domain appended in users.py.
+            if "." not in v.rsplit("@", 1)[-1]:
+                raise ValueError("A valid email address is required")
+        elif not v:
+            raise ValueError("Username is required")
         return v.lower()
 
     @field_validator("password")
