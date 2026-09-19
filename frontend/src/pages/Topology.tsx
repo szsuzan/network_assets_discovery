@@ -324,9 +324,12 @@ const textWidthPx = (() => {
 // to just the last octet (".4", ".8", ".250"); zooming in gives screen room and
 // the full IP comes back. Vertical band: captions sit ≤ the label height below
 // each node circle, so only pairs sharing a screen row can collide.
-const hostCaptionCollisions = (nodes: any[], k: number) => {
+// All-or-nothing collapse: if ANY pair of host captions would touch on screen at
+// this zoom (same screen row, overlapped half-widths), EVERY host caption shows
+// only the last octet (".4", ".8", ".250"). Otherwise every caption shows the
+// full IP. One boolean — no per-node mix — so the diagram never looks partial.
+const hostCaptionsConflict = (nodes: any[], k: number) => {
   const hosts = nodes.filter((n) => n.kind === 'host' && n.x != null && n.y != null)
-  const short = new Set<string>()
   for (let i = 0; i < hosts.length; i++) {
     const a = hosts[i]
     const la = a.ip || a.id || a.name || ''
@@ -337,13 +340,10 @@ const hostCaptionCollisions = (nodes: any[], k: number) => {
       const wb = textWidthPx(lb, 14) / 2
       const dx = Math.abs((a.x - b.x) * k)
       const dy = Math.abs((a.y - b.y) * k)
-      if (dy <= 28 && dx < wa + wb + 6) {
-        short.add(a.id)
-        short.add(b.id)
-      }
+      if (dy <= 28 && dx < wa + wb + 6) return true
     }
   }
-  return short
+  return false
 }
 
 const hostShortCaption = (full: string) => {
@@ -374,7 +374,7 @@ export default function Topology() {
   const [viewport, setViewport] = useState<{ x: number; y: number; k: number } | null>(null)
   const dragStartRef = useRef<{ id: string; x: number; y: number; orig: Map<string, { dx: number; dy: number }> } | null>(null)
   const fitViewRef = useRef<() => void>(() => {})
-  const hostShortRef = useRef<Set<string>>(new Set())
+  const hostShortRef = useRef<boolean>(false)
 
   const { data: hostDetail } = useHostDetail(
     scanId || undefined,
@@ -641,8 +641,11 @@ export default function Topology() {
   // live screen positions at the CURRENT zoom (viewport.k) so that zooming in —
   // which gives screen room — restores the full IP and zooming out re-shortens.
   // Written into the ref so the per-frame canvas painter reads the freshest set.
+  // All-or-nothing: ANY host-pair conflict at the current zoom → EVERY host
+  // caption shows the last octet. No conflict → every caption shows the full IP.
+  // One boolean written into the ref so the per-frame painter reads it as-is.
   const hostCollisions = useMemo(
-    () => hostCaptionCollisions(visibleNodes, viewport?.k ?? 1),
+    () => hostCaptionsConflict(visibleNodes, viewport?.k ?? 1),
     [visibleNodes, viewport?.k],
   )
   useEffect(() => {
@@ -657,7 +660,7 @@ export default function Topology() {
     } else if (node.kind === 'zone') {
       drawZoneContainer(ctx, node, globalScale, dark)
     } else if (node.kind === 'host') {
-      drawHostNode(ctx, node, globalScale, SEV_RING[node.severity] || SEV_RING.info, dark, hostShortRef.current.has(node.id))
+      drawHostNode(ctx, node, globalScale, SEV_RING[node.severity] || SEV_RING.info, dark, hostShortRef.current)
     }
   }, [dark])
 
@@ -719,7 +722,11 @@ export default function Topology() {
         const rr = n.kind === 'zone' ? Math.max(30, n._zoneR || 60) : n.kind === 'internet' ? 55 : 16
         let hl = rr, hr = rr, ht = rr, hb = rr
         if (n.kind === 'host') {
-          const half = textWidthPx(n.ip || n.id || n.name || '', 14) / 2 / k
+          // Measure with the caption the painter will emit at this k — short
+          // when any two host captions conflict now, full otherwise — so the
+          // all-or-nothing collapse stays the same one zoom level later.
+          const shortNow = hostCaptionsConflict(nodes, k)
+          const half = textWidthPx(shortNow ? hostShortCaption(n.ip || n.id || n.name || '') : (n.ip || n.id || n.name || ''), 14) / 2 / k
           const below = 26 / k // 6px dot + 4px gap + 14px label leg + slack
           hl = Math.max(rr, half); hr = Math.max(rr, half); hb = Math.max(rr, below)
         } else if (n.kind === 'zone') {
