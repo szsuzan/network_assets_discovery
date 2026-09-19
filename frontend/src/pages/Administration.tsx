@@ -20,7 +20,7 @@ const inputCls =
 
 const ROLE_HELP: Record<string, string> = {
   admin: 'Full control: manage users, delete anything, approve deletion requests.',
-  pentester: 'Create and run engagements/scans; deletions require admin approval.',
+  scanner: 'Create and run engagements/scans; deletions require admin approval.',
   viewer: 'Read-only access to engagements, scans, hosts and findings.',
 }
 
@@ -36,7 +36,7 @@ export default function Administration() {
   const toast = useToast()
 
   const [showForm, setShowForm] = useState(false)
-  const [form, setForm] = useState({ email: '', password: '', role: 'pentester' })
+  const [form, setForm] = useState({ email: '', password: '', role: 'scanner' })
   const [formError, setFormError] = useState<string | null>(null)
 
   const [resetUser, setResetUser] = useState<string | null>(null)
@@ -59,7 +59,7 @@ export default function Administration() {
         password: form.password,
         role: form.role,
       })
-      setForm({ email: '', password: '', role: 'pentester' })
+      setForm({ email: '', password: '', role: 'scanner' })
       setShowForm(false)
       toast.success(`Created ${usernameOf(created.email)} — they must set a password on first login`)
     } catch (err) {
@@ -130,7 +130,7 @@ export default function Administration() {
         <h1 className="text-2xl font-bold text-white">Administration</h1>
         <p className="mt-1 max-w-3xl text-sm text-gray-400">
           Role-based access control — manage users and permissions, and review deletion requests
-          from pentesters for approval.
+          from scanners for approval.
         </p>
       </div>
 
@@ -300,7 +300,7 @@ export default function Administration() {
         <div className="border-b border-gray-800 px-5 py-3">
           <h2 className="text-sm font-semibold text-gray-200">Deletion approvals</h2>
           <p className="mt-0.5 text-xs text-gray-500">
-            Pentesters request data deletion here; approving permanently deletes it.
+            Scanners request data deletion here; approving permanently deletes it.
           </p>
         </div>
 

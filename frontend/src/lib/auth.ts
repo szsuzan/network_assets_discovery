@@ -1,5 +1,5 @@
 export const ROLE_ADMIN = 'admin'
-export const ROLE_PENTESTER = 'pentester'
+export const ROLE_SCANNER = 'scanner'
 export const ROLE_VIEWER = 'viewer'
 
 export function currentRole(): string | null {
@@ -14,9 +14,9 @@ export function isAdmin(role: string | null = currentRole()): boolean {
   return role === ROLE_ADMIN
 }
 
-/** Users who can create/edit engagements and run scans (admin + pentester). */
+/** Users who can create/edit engagements and run scans (admin + scanner). */
 export function canMutate(role: string | null = currentRole()): boolean {
-  return role === ROLE_ADMIN || role === ROLE_PENTESTER
+  return role === ROLE_ADMIN || role === ROLE_SCANNER
 }
 
 /** Only admins may hard-delete engagements/scans; everyone else must request it. */

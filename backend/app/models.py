@@ -9,7 +9,7 @@ class User(Base):
     id = Column(Uuid, primary_key=True, default=uuid.uuid4)
     email = Column(Text, unique=True, nullable=False)
     password_hash = Column(Text, nullable=False)
-    role = Column(Text, nullable=False, default="pentester")
+    role = Column(Text, nullable=False, default="scanner")
     active = Column(Boolean, nullable=False, default=True)
     must_change_password = Column(Boolean, nullable=False, default=False)
     jwt_version = Column(Integer, nullable=False, default=0)
@@ -18,7 +18,7 @@ class User(Base):
 class DeletionRequest(Base):
     """An admin-approval queue for deleting engagements or scans.
 
-    Admins delete directly; pentesters submit a request here instead. When an
+    Admins delete directly; scanners submit a request here instead. When an
     admin approves, the target is deleted and the request is marked resolved,
     keeping a durable audit trail of who asked and who approved.
     """

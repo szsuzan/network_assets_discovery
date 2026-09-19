@@ -32,12 +32,12 @@ class UserOut(BaseModel):
     class Config:
         from_attributes = True
 
-VALID_ROLES = {"admin", "pentester", "viewer"}
+VALID_ROLES = {"admin", "scanner", "viewer"}
 
 class UserCreate(BaseModel):
     email: str
     password: str
-    role: str = "pentester"
+    role: str = "scanner"
     active: bool = True
 
     @field_validator("email")

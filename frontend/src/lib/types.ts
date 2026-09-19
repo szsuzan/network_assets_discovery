@@ -21,7 +21,7 @@ export interface User {
   created_at: string
 }
 
-export const USER_ROLES = ['admin', 'pentester', 'viewer'] as const
+export const USER_ROLES = ['admin', 'scanner', 'viewer'] as const
 
 export interface DeletionRequest {
   id: string

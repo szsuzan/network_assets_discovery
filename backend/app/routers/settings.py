@@ -17,12 +17,12 @@ from ..services import settings as settings_svc
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
-MANAGER_ROLES = {"admin", "pentester"}
+MANAGER_ROLES = {"admin", "scanner"}
 
 
 async def _require_manager(user: User):
     if user.role not in MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Only admins/pentesters can change settings")
+        raise HTTPException(status_code=403, detail="Only admins/scanners can change settings")
 
 
 @router.get("", response_model=List[SettingOut])

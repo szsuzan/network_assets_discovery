@@ -41,14 +41,14 @@ port_service_re = re.compile(
 async def _load_scan_for_user(db: AsyncSession, scan_id: uuid.UUID, user: User) -> Scan:
     """Load a scan and enforce engagement ownership for non-admin users.
 
-    Admins (and the pentester role) can operate on any scan; viewers are
+    Admins (and the scanner role) can operate on any scan; viewers are
     read-only. Non-admin users may only mutate scans inside engagements they
     created.
     """
     scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    if user.role not in ("admin", "pentester"):
+    if user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     if user.role != "admin":
         engagement = (await db.execute(
@@ -62,10 +62,10 @@ async def _require_scan_read(db: AsyncSession, scan_id: uuid.UUID, user: User) -
     """Read access to a scan's data (hosts, findings, evidence, logs, export).
 
     Admins and viewers may read any scan (viewers are read-only by design and
-    have no per-engagement membership yet). Pentesters may only read scans
+    have no per-engagement membership yet). Scanners may only read scans
     inside engagements they created, mirroring the mutation scoping in
     ``_load_scan_for_user`` so cross-client data stays isolated between
-    pentesters.
+    scanners.
     """
     scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
     if not scan:
@@ -95,7 +95,7 @@ async def _require_engagement_access(db: AsyncSession, engagement_id: uuid.UUID,
     engagement = (await db.execute(select(Engagement).where(Engagement.id == engagement_id))).scalar_one_or_none()
     if not engagement:
         raise HTTPException(status_code=404, detail="Engagement not found")
-    if user.role not in ("admin", "pentester"):
+    if user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     if user.role != "admin" and engagement.created_by != user.id:
         raise HTTPException(status_code=403, detail="No access to this engagement")
@@ -554,7 +554,7 @@ async def delete_scan(
     """Permanently delete a scan and all of its data (hosts, ports, findings,
     audit trail, agent tasks). An in-progress scan is cancelled first.
 
-    Only admins may delete directly; pentesters submit a deletion request that
+    Only admins may delete directly; scanners submit a deletion request that
     an admin approves. This is a hard delete — the scan and its report data are
     gone, so confirmation is expected on the client.
     """
@@ -562,7 +562,7 @@ async def delete_scan(
 
     if current_user.role != "admin":
         raise HTTPException(status_code=403,
-                            detail="Only admins can delete scans. Pentesters should submit a deletion request instead.")
+                            detail="Only admins can delete scans. Scanners should submit a deletion request instead.")
 
     await _perform_delete_scan(db, scan)
 
@@ -1031,7 +1031,7 @@ async def websocket_endpoint(websocket: WebSocket, scan_id: str):
             scan_row = (await db.execute(
                 select(ScanModel).where(ScanModel.id == scan_uuid))).scalar_one_or_none()
             # Engagement-scoped read access, identical to _require_scan_read:
-            # admins/viewers may watch any scan, pentesters only their own.
+            # admins/viewers may watch any scan, scanners only their own.
             if scan_row is not None and (user.role in ("admin", "viewer")):
                 allowed = True
             elif scan_row is not None:

@@ -70,7 +70,7 @@ async def update_engagement(
 ):
     """Partially edit an engagement (name, dates, authorized scope).
 
-    Only the creator (pentester) or an admin may edit. Scope entries are
+    Only the creator (scanner) or an admin may edit. Scope entries are
     validated so typos such as ``192.168.1.0./24`` are caught here instead of
     silently rejecting scan targets later.
     """
@@ -78,7 +78,7 @@ async def update_engagement(
     engagement = result.scalar_one_or_none()
     if not engagement:
         raise HTTPException(status_code=404, detail="Engagement not found")
-    if current_user.role not in ("admin", "pentester"):
+    if current_user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
     if current_user.role != "admin" and engagement.created_by != current_user.id:
         raise HTTPException(status_code=403, detail="No access to this engagement")
@@ -148,7 +148,7 @@ async def list_engagements(
     current_user: User = Depends(get_current_user)
 ):
     query = select(Engagement)
-    if current_user.role == "pentester":
+    if current_user.role == "scanner":
         query = query.where(Engagement.created_by == current_user.id)
     result = await db.execute(query.order_by(Engagement.created_at.desc()))
     return result.scalars().all()
@@ -216,7 +216,7 @@ async def delete_engagement(
 ):
     if current_user.role != "admin":
         raise HTTPException(status_code=403,
-                            detail="Only admins can delete engagements. Pentesters should submit a deletion request instead.")
+                            detail="Only admins can delete engagements. Scanners should submit a deletion request instead.")
 
     result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
     engagement = result.scalar_one_or_none()

@@ -3,7 +3,7 @@
 Admins delete engagements/scans directly (DELETE endpoints). Everyone else with
 ownership submits a request here with a reason; an admin approves or rejects it.
 Approval performs the hard delete via the same helpers the admin endpoints use,
-so a pentester can only remove data with explicit admin sign-off.
+so a scanner can only remove data with explicit admin sign-off.
 """
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -59,7 +59,7 @@ def _confirm_users_engagement(db: AsyncSession, user: User, engagement: Engageme
 async def create_deletion_request(
     data: DeletionRequestCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "pentester")),
+    current_user: User = Depends(require_roles("admin", "scanner")),
 ):
     """Request deletion of an engagement or scan. Admins don't need this — their
     DELETE endpoints work directly."""
@@ -112,9 +112,9 @@ async def create_deletion_request(
 @router.get("", response_model=List[DeletionRequestOut])
 async def list_deletion_requests(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "pentester")),
+    current_user: User = Depends(require_roles("admin", "scanner")),
 ):
-    """Admins see the whole queue; pentesters see only requests they filed."""
+    """Admins see the whole queue; scanners see only requests they filed."""
     if current_user.role == "admin":
         result = await db.execute(
             select(DeletionRequest).order_by(DeletionRequest.created_at.desc()))
@@ -186,7 +186,7 @@ async def reject_deletion_request(
 async def cancel_deletion_request(
     request_id,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_roles("admin", "pentester")),
+    current_user: User = Depends(require_roles("admin", "scanner")),
 ):
     """The requester withdraws their own open request."""
     req = await _load_request(db, request_id)

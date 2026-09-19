@@ -100,9 +100,9 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ("admin", "pentester"):
+    if current_user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403,
-                            detail="Only admins/pentesters can create scanner agents")
+                            detail="Only admins/scanners can create scanner agents")
     existing = (await db.execute(select(Agent).where(Agent.name == data.name))).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="An agent with that name already exists")
@@ -131,9 +131,9 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ("admin", "pentester"):
+    if current_user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403,
-                            detail="Only admins/pentesters can list scanner agents")
+                            detail="Only admins/scanners can list scanner agents")
     agents = (await db.execute(select(Agent).order_by(Agent.created_at))).scalars().all()
     out = []
     for a in agents:
@@ -160,8 +160,8 @@ async def delete_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    if current_user.role not in ("admin", "pentester"):
-        raise HTTPException(status_code=403, detail="Only admins/pentesters can delete agents")
+    if current_user.role not in ("admin", "scanner"):
+        raise HTTPException(status_code=403, detail="Only admins/scanners can delete agents")
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -184,9 +184,9 @@ async def agent_health(
     way as the list view so the UI can show exactly why an agent looks broken
     (offline vs stale vs disabled) before offering one-click repair.
     """
-    if current_user.role not in ("admin", "pentester"):
+    if current_user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403,
-                            detail="Only admins/pentesters can view agent health")
+                            detail="Only admins/scanners can view agent health")
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -219,8 +219,8 @@ async def reset_agent_key(
     """Rotate an agent's API key: the old key stops working immediately and a
     fresh one is returned (shown once). Use this to 'repair' an agent whose key
     leaked, or to kick an existing install off the server."""
-    if current_user.role not in ("admin", "pentester"):
-        raise HTTPException(status_code=403, detail="Only admins/pentesters can reset agent keys")
+    if current_user.role not in ("admin", "scanner"):
+        raise HTTPException(status_code=403, detail="Only admins/scanners can reset agent keys")
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -339,8 +339,8 @@ async def request_agent_restart(
     it up on its next heartbeat, then exits (its supervisor relaunches it).
     Useful after deploying agent code updates or clearing a wedged process.
     """
-    if current_user.role not in ("admin", "pentester"):
-        raise HTTPException(status_code=403, detail="Only admins/pentesters can restart agents")
+    if current_user.role not in ("admin", "scanner"):
+        raise HTTPException(status_code=403, detail="Only admins/scanners can restart agents")
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -370,8 +370,8 @@ async def request_agent_update(
     /api/agents/script, replaces its own file atomically, then re-execs so the
     new code takes over under the same supervisor.
     """
-    if current_user.role not in ("admin", "pentester"):
-        raise HTTPException(status_code=403, detail="Only admins/pentesters can update agents")
+    if current_user.role not in ("admin", "scanner"):
+        raise HTTPException(status_code=403, detail="Only admins/scanners can update agents")
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")

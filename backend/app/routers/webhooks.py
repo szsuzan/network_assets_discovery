@@ -13,12 +13,12 @@ from ..services.webhook import validate_webhook_url
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
-MANAGER_ROLES = {"admin", "pentester"}
+MANAGER_ROLES = {"admin", "scanner"}
 
 
 async def _require_manager(user: User):
     if user.role not in MANAGER_ROLES:
-        raise HTTPException(status_code=403, detail="Only admins/pentesters can manage webhooks")
+        raise HTTPException(status_code=403, detail="Only admins/scanners can manage webhooks")
 
 
 @router.get("", response_model=List[WebhookOut])

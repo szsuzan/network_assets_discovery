@@ -5,7 +5,7 @@ import { StatCard, Toggle, PrimaryButton, ActionButton, Skeleton } from '../comp
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
-const MANAGER_ROLES = ['admin', 'pentester']
+const MANAGER_ROLES = ['admin', 'scanner']
 
 function groupName(s: Setting): string {
   return s.category_label
@@ -236,7 +236,7 @@ export default function Settings() {
 
       {!canEdit && (
         <div className="mb-4 rounded-md border border-amber-700/50 bg-amber-950/30 px-3 py-2 text-sm text-amber-300">
-          Read-only: only admins and pentesters can change settings.
+          Read-only: only admins and scanners can change settings.
         </div>
       )}
 

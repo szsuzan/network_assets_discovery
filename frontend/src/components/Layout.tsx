@@ -10,7 +10,7 @@ import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
 const ROLE_LABELS: Record<string, string> = {
   admin: 'Admin',
-  pentester: 'Pentester',
+  scanner: 'Scanner',
   viewer: 'Viewer',
 }
 

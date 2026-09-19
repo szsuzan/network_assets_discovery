@@ -615,7 +615,7 @@ Base URL: `http://localhost:8000` (Swagger at `/docs`). Endpoints marked 🔒 re
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/settings` | List all settings (defaults + current values) 🔒 |
-| `PUT` | `/api/settings` | Bulk-update settings (admin/pentester) 🔒 |
+| `PUT` | `/api/settings` | Bulk-update settings (admin/scanner) 🔒 |
 | `GET` | `/api/webhooks` | List webhooks 🔒 |
 | `POST` | `/api/webhooks` | Create webhook (optional `secret` for HMAC signing) 🔒 |
 | `PATCH` | `/api/webhooks/{id}` | Update webhook 🔒 |
