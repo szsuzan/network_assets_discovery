@@ -17,15 +17,7 @@
   <a href="#rest-api"><b>REST API</b></a>
 </p>
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Frontend-React%20%2B%20TypeScript-6366f1" alt="Frontend: React + TypeScript">
-  <img src="https://img.shields.io/badge/Backend-FastAPI-10b981" alt="Backend: FastAPI">
-  <img src="https://img.shields.io/badge/Scanning-Nmap%20%2B%20Scapy-ef4444" alt="Scanning: Nmap + Scapy">
-  <img src="https://img.shields.io/badge/Database-PostgreSQL-2563eb" alt="Database: PostgreSQL">
-  <img src="https://img.shields.io/badge/Jobs-Redis%20%2B%20Celery-dc2626" alt="Jobs: Redis + Celery">
-</p>
-
-SubNex is a network asset discovery platform for penetration testing engagements. It discovers live assets on an in-scope network, fingerprints each host, maps the network topology, surfaces risk-relevant findings, and produces a client-ready initial discovery report — with live-scan streaming and a full REST API.
+SubNex: self-hosted network asset discovery for penetration testing. Find live hosts, fingerprint them, map the topology, surface risk findings, and export a client-ready report.
 
 > **Out of scope for this entire system:** exploitation, credential brute-forcing, or any attack-execution capability. This is a *discovery, fingerprinting, and reporting* platform only.
 
