@@ -43,13 +43,13 @@ export default function Login() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="mb-1 block text-sm font-medium text-gray-300">Email</label>
+            <label className="mb-1 block text-sm font-medium text-gray-300">Email or username</label>
             <input
-              type="email"
+              type="text"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-white placeholder-gray-500 outline-none focus:border-blue-500"
-              placeholder="you@example.com"
+              placeholder="demo (or demo@pentest.local)"
               required
             />
           </div>

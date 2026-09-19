@@ -167,13 +167,13 @@ export default function Administration() {
           <form onSubmit={handleCreate} className="border-b border-gray-800 bg-gray-950/40 px-5 py-4">
             <div className="grid gap-4 md:grid-cols-3">
               <div>
-                <label className="mb-1 block text-xs text-gray-500">Email *</label>
+                <label className="mb-1 block text-xs text-gray-500">Email / username *</label>
                 <input
-                  type="email"
+                  type="text"
                   value={form.email}
                   onChange={(e) => setForm({ ...form, email: e.target.value })}
                   className={inputCls}
-                  placeholder="analyst@company.com"
+                  placeholder="analyst (or analyst@company.com)"
                   required
                 />
               </div>

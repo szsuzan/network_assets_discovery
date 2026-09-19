@@ -19,6 +19,7 @@ from ..models import User, AuditLog
 from ..passwords import hash_password
 from ..schemas import UserOut, UserCreate, UserUpdate, ResetPasswordRequest
 from ..auth import require_roles
+from .auth import normalize_email
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -45,13 +46,17 @@ async def create_user(
     current_user: User = Depends(require_roles("admin")),
 ):
     """Create an account. The user must change their password on first login;
-    the supplied password is salted + bcrypt-hashed before it touches the DB."""
-    existing = (await db.execute(select(User).where(User.email == data.email))).scalar_one_or_none()
+    the supplied password is salted + bcrypt-hashed before it touches the DB.
+    A bare username (no '@') gets the default domain appended."""
+    email = normalize_email(data.email)
+    if not email:
+        raise HTTPException(status_code=422, detail="Email is required")
+    existing = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="A user with this email already exists")
 
     user = User(
-        email=data.email,
+        email=email,
         password_hash=hash_password(data.password),
         role=data.role,
         active=data.active,
@@ -62,7 +67,7 @@ async def create_user(
     db.add(AuditLog(
         user_id=current_user.id,
         action="user_created",
-        detail={"email": data.email, "role": data.role},
+        detail={"email": email, "role": data.role},
     ))
     await db.commit()
     await db.refresh(user)

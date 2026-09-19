@@ -12,6 +12,19 @@ from ..auth import create_access_token, get_current_user_unchecked
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+# Accounts inside this platform live under one e-mail domain. Letting users log
+# in and admins create accounts with the bare username ("demo" instead of
+# "demo@pentest.local") matches the self-hosted LAN persona of the tool.
+DEFAULT_EMAIL_DOMAIN = "pentest.local"
+
+
+def normalize_email(value: str) -> str:
+    """Append the default domain when a bare username (no '@') is supplied."""
+    v = (value or "").strip()
+    if not v:
+        return v
+    return v if "@" in v else f"{v}@{DEFAULT_EMAIL_DOMAIN}"
+
 # Simple in-memory brute-force guard keyed by client IP: failed logins are
 # remembered for 15 minutes, and after 10 failed attempts from one IP further
 # logins from it are refused until the window slides. Docker NAT means several
@@ -37,8 +50,20 @@ async def login(data: LoginRequest, request: Request, db: AsyncSession = Depends
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts; please wait and try again"
         )
-    result = await db.execute(select(User).where(User.email == data.email))
-    user = result.scalar_one_or_none()
+    identifier = (data.email or "").strip()
+    if not identifier:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    if "@" in identifier:
+        result = await db.execute(select(User).where(User.email == identifier))
+        user = result.scalar_one_or_none()
+    else:
+        # Bare username: prefer accounts under the default domain, then any
+        # user whose username part matches (@other-domain accounts).
+        result = await db.execute(select(User).where(User.email == f"{identifier}@{DEFAULT_EMAIL_DOMAIN}"))
+        user = result.scalar_one_or_none()
+        if user is None:
+            result = await db.execute(select(User).where(User.email.ilike(f"{identifier}@%")))
+            user = result.scalars().first()
     if not user or not verify_password(data.password, user.password_hash):
         _login_failures[client_ip].append(time.time())
         raise HTTPException(
