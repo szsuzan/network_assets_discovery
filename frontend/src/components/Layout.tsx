@@ -63,30 +63,32 @@ export default function Layout() {
     <div className="min-h-screen bg-gray-950 text-gray-100">
       <header className="border-b border-gray-800 bg-gray-900">
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-3 px-4 py-3">
-          <NavLink to="/" end className="flex flex-col items-start hover:opacity-90">
-            <img src={theme === 'dark' ? subnexLogoLight : subnexLogo} alt="SubNex" className="h-20 w-auto" />
-            <span className="mt-1 text-sm italic text-gray-500">Where your assets hide, SubNex finds.</span>
-          </NavLink>
-          <div className="flex flex-wrap items-center gap-2">
-            <nav className="mr-2 flex flex-wrap items-center gap-1">
-              <NavLink to="/" end className={navClass}>
-                Engagements
+          <div className="flex flex-1 items-center">
+            <NavLink to="/" end className="flex flex-col items-start hover:opacity-90">
+              <img src={theme === 'dark' ? subnexLogoLight : subnexLogo} alt="SubNex" className="h-20 w-auto" />
+              <span className="mt-1 text-sm italic text-gray-500">Where your assets hide, SubNex finds.</span>
+            </NavLink>
+          </div>
+          <nav className="flex flex-wrap items-center justify-center gap-1">
+            <NavLink to="/" end className={navClass}>
+              Engagements
+            </NavLink>
+            <NavLink to="/agents" className={navClass}>
+              Agents
+            </NavLink>
+            <NavLink to="/integrations" className={navClass}>
+              Integrations
+            </NavLink>
+            <NavLink to="/settings" className={navClass}>
+              Settings
+            </NavLink>
+            {admin && (
+              <NavLink to="/admin" className={navClass}>
+                Administration
               </NavLink>
-              <NavLink to="/agents" className={navClass}>
-                Agents
-              </NavLink>
-              <NavLink to="/integrations" className={navClass}>
-                Integrations
-              </NavLink>
-              <NavLink to="/settings" className={navClass}>
-                Settings
-              </NavLink>
-              {admin && (
-                <NavLink to="/admin" className={navClass}>
-                  Administration
-                </NavLink>
-              )}
-            </nav>
+            )}
+          </nav>
+          <div className="flex flex-1 flex-wrap items-center justify-end gap-2">
             <button
               onClick={() => {
                 window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }))
