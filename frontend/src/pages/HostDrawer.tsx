@@ -1,9 +1,10 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import { useHostDetail, usePatchHost } from '../hooks/useApi'
 import { DeviceIcon, SeverityBadge } from '../components/SeverityBadge'
 import { DEVICE_TYPE_LABELS, normalizeDeviceType } from '../lib/types'
 import ScanNav from '../components/ScanNav'
+import Breadcrumbs from '../components/Breadcrumbs'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
@@ -65,9 +66,14 @@ export default function HostDrawer() {
 
   return (
     <div>
-      <Link to={`/engagements/${engagementId}/scans/${scanId}/inventory`} className="text-sm text-gray-400 hover:text-white">
-        ← Back to inventory
-      </Link>
+      <Breadcrumbs
+        items={[
+          { label: 'Engagements', to: '/' },
+          { label: 'Engagement', to: `/engagements/${engagementId}` },
+          { label: 'Asset inventory', to: `/engagements/${engagementId}/scans/${scanId}/inventory` },
+          { label: hostIp || 'Host' },
+        ]}
+      />
       <ScanNav engagementId={engagementId!} scanId={scanId!} />
 
       {isLoading || !host ? (

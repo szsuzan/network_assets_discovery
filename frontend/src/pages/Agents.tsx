@@ -10,7 +10,7 @@ import {
   type AgentHealth,
   type AgentInfo,
 } from '../hooks/useApi'
-import { StatCard, Chip, DotPill, ActionButton } from '../components/ui'
+import { StatCard, Chip, DotPill, ActionButton, Skeleton, SkeletonCard } from '../components/ui'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
@@ -63,7 +63,7 @@ function agentctlCmd(name: string, subnets: string, key: string | null, os: Os) 
 
 type CopyButtonStyle = 'minimal' | 'solid'
 
-function CopyButton({ value, tone = 'minimal' }: { value: string; tone?: CopyButtonStyle }) {
+function CopyButton({ value, tone = 'minimal', title }: { value: string; tone?: CopyButtonStyle; title?: string }) {
   const [copied, setCopied] = useState(false)
   const copy = async () => {
     try {
@@ -78,6 +78,7 @@ function CopyButton({ value, tone = 'minimal' }: { value: string; tone?: CopyBut
     return (
       <button
         onClick={copy}
+        title={title}
         className={
           'rounded-md px-3 py-1 text-xs font-medium transition-colors ' +
           (copied
@@ -92,6 +93,7 @@ function CopyButton({ value, tone = 'minimal' }: { value: string; tone?: CopyBut
   return (
     <button
       onClick={copy}
+      title={title}
       className="rounded px-1.5 py-0.5 text-[12px] text-gray-400 transition-colors hover:bg-gray-800 hover:text-gray-200"
     >
       {copied ? <span className="text-emerald-400">copied ✓</span> : 'copy'}
@@ -163,11 +165,16 @@ function CommandColumn({ title, blocks, keyed }: {
   blocks: { label: string; value: string }[]
   keyed?: (k: string) => string
 }) {
+  const allCommands = blocks.map((b) => `${b.label}\n  ${b.value}`).join('\n\n')
+  const allLabels = blocks.map((b) => b.label).join(' / ')
   return (
     <div className="rounded-lg border border-gray-800 bg-gray-900/60 p-3">
       <div className="mb-2 flex items-center gap-2">
         <span className="text-xs font-semibold text-gray-200">{title}</span>
         <span className="text-[12px] text-gray-500">on the LAN machine</span>
+        <span className="ml-auto">
+          <CopyButton value={allCommands} title={`Copy all ${allLabels} commands`} />
+        </span>
       </div>
       <div className="space-y-3">
         {blocks.map((b) => (
@@ -692,7 +699,24 @@ export default function Agents() {
     }
   }
 
-  if (isLoading) return <div className="py-16 text-center text-gray-400">Loading agents…</div>
+  if (isLoading) {
+    return (
+      <div className="mx-auto max-w-6xl">
+        <Skeleton className="h-7 w-56" />
+        <Skeleton className="mt-2 h-4 w-full max-w-2xl" />
+        <div className="mb-6 mt-6 grid grid-cols-3 gap-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-20" />
+          ))}
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          {Array.from({ length: 2 }).map((_, i) => (
+            <SkeletonCard key={i} lines={5} />
+          ))}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-6xl">

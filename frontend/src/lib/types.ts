@@ -196,6 +196,17 @@ export const FINDING_STATUS_LABELS: Record<string, string> = {
   false_positive: 'False Positive',
 }
 
+export const FINDING_STATUS_COLORS: Record<string, string> = {
+  open: 'bg-gray-800 text-gray-300',
+  triaged: 'bg-blue-900/50 text-blue-300',
+  confirmed: 'bg-orange-900/50 text-orange-300',
+  remediation_in_progress: 'bg-yellow-900/50 text-yellow-300',
+  retest: 'bg-purple-900/50 text-purple-300',
+  resolved: 'bg-emerald-900/50 text-emerald-300',
+  accepted_risk: 'bg-slate-700 text-slate-300',
+  false_positive: 'bg-slate-800 text-slate-400 line-through',
+}
+
 export const FINDING_TYPE_LABELS: Record<string, string> = {
   default_credentials: 'Default Credentials',
   eol_software: 'EOL Software',

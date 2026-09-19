@@ -4,6 +4,7 @@ import { useChangePassword } from '../hooks/useApi'
 import { useTheme } from '../lib/theme'
 import { errText } from '../lib/errors'
 import { Spinner } from '../components/ui'
+import { usePageTitle } from '../hooks/usePageTitle'
 import subnexLogo from '../assets/subnex-logo.svg'
 import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
@@ -15,6 +16,7 @@ export default function ChangePassword() {
   const navigate = useNavigate()
   const change = useChangePassword()
   const { theme } = useTheme()
+  usePageTitle('Change password')
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

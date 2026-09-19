@@ -4,6 +4,7 @@ import { useHosts, useFindings } from '../hooks/useApi'
 import { DeviceIcon, SeverityBadge } from '../components/SeverityBadge'
 import { DEVICE_TYPES, DEVICE_TYPE_LABELS, SEVERITY_ORDER, normalizeDeviceType, type Host, type Finding } from '../lib/types'
 import ScanNav from '../components/ScanNav'
+import Breadcrumbs from '../components/Breadcrumbs'
 
 export default function AssetInventory() {
   const { engagementId, scanId } = useParams()
@@ -51,9 +52,13 @@ export default function AssetInventory() {
 
   return (
     <div>
-      <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">
-        ← Back to engagement
-      </Link>
+      <Breadcrumbs
+        items={[
+          { label: 'Engagements', to: '/' },
+          { label: 'Engagement', to: `/engagements/${engagementId}` },
+          { label: 'Asset inventory' },
+        ]}
+      />
       <ScanNav engagementId={engagementId!} scanId={scanId!} />
 
       <div className="mb-6 flex items-center justify-between">

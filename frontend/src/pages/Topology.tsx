@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
+import { useParams } from 'react-router-dom'
 import ForceGraph2D from 'react-force-graph-2d'
 import { useTopology, useFindings, useHostDetail } from '../hooks/useApi'
 import ScanNav from '../components/ScanNav'
+import Breadcrumbs from '../components/Breadcrumbs'
 import { SEV_RING, EDGE_STYLE, EDGE_STYLE_LIGHT, deviceIcon, detectPivots, computeInternetFacing, type TopoNode } from '../lib/graphAnalysis'
 import { DEVICE_TYPE_LABELS, normalizeDeviceType } from '../lib/types'
 import { useTheme } from '../lib/theme'
@@ -867,7 +868,13 @@ export default function Topology() {
       className={`flex h-full ${isFullscreen ? (dark ? 'bg-[#0b1020]' : 'bg-gray-50') : ''}`}
     >
       <div className="flex flex-1 flex-col">
-        <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">← Back to engagement</Link>
+        <Breadcrumbs
+          items={[
+            { label: 'Engagements', to: '/' },
+            { label: 'Engagement', to: `/engagements/${engagementId}` },
+            { label: 'Topology' },
+          ]}
+        />
         <ScanNav engagementId={engagementId!} scanId={scanId!} />
 
         <div className="mt-3 flex items-center justify-between">

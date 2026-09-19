@@ -101,10 +101,11 @@ export function useChangePassword() {
   })
 }
 
-export function useEngagements() {
+export function useEngagements(enabled = true) {
   return useQuery({
     queryKey: ['engagements'],
     queryFn: () => api.get<Engagement[]>('/api/engagements').then((r) => r.data),
+    enabled,
   })
 }
 
@@ -456,11 +457,12 @@ export type AgentInfo = {
   created_at: string
 }
 
-export function useAgents() {
+export function useAgents(enabled = true) {
   return useQuery({
     queryKey: ['agents'],
     queryFn: () => api.get<AgentInfo[]>('/api/agents').then((r) => r.data),
     refetchInterval: 15000,
+    enabled,
   })
 }
 

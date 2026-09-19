@@ -176,6 +176,14 @@ html:not(.dark) .hover\:bg-red-500\/10:hover { background-color: rgba(185, 28, 2
  * These rules out-scope the :where() globals above (higher specificity) so
  * only the console-related overrides below apply.
  */
+/* Keyboard navigation — a clear, consistent ring on interactive elements.
+ * Tailwind's `outline-none` (2px transparent) is overridden by the higher
+ * specificity of :focus-visible pseudo-class on the element itself. */
+:is(button, a, select, textarea):focus-visible {
+  outline: 2px solid rgb(99 102 241 / 0.85);
+  outline-offset: 2px;
+}
+
 html:not(.dark) .bg-black { background-color: #e2e4e7; }
 html:not(.dark) .bg-black .text-white { color: #111827; }
 html:not(.dark) .bg-black .text-gray-300 { color: #374151; }

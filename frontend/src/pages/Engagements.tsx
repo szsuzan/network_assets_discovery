@@ -7,7 +7,8 @@ import {
   useUpdateEngagement,
   useCreateDeletionRequest,
 } from '../hooks/useApi'
-import { StatCard, Chip, DotPill, ActionButton, PrimaryButton } from '../components/ui'
+import { StatCard, Chip, DotPill, ActionButton, PrimaryButton, SkeletonCard } from '../components/ui'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { Engagement } from '../lib/types'
 import { isAdmin, canMutate, currentUserId } from '../lib/auth'
 import { useToast } from '../components/Toaster'
@@ -24,7 +25,7 @@ function EngagementAvatar({ name }: { name: string }) {
   )
 }
 
-function EngagementCard({ e, editing, editForm, onStartEdit, onCancelEdit, onEditChange, onSaveEdit, confirmDelete, onConfirmToggle, onDelete, canEdit, canArchive, canDelete, onToggleArchive }: {
+function EngagementCard({ e, editing, editForm, onStartEdit, onCancelEdit, onEditChange, onSaveEdit, onDeleteRequest, canEdit, canArchive, canDelete, onToggleArchive }: {
   e: Engagement
   editing: boolean
   editForm: { client_name: string; engagement_name: string; authorized_scope: string; start_date: string; end_date: string }
@@ -32,9 +33,7 @@ function EngagementCard({ e, editing, editForm, onStartEdit, onCancelEdit, onEdi
   onCancelEdit: () => void
   onEditChange: (patch: Partial<typeof editForm>) => void
   onSaveEdit: () => void
-  confirmDelete: boolean
-  onConfirmToggle: () => void
-  onDelete: () => void
+  onDeleteRequest: () => void
   canEdit: boolean
   canArchive: boolean
   canDelete: boolean
@@ -89,11 +88,8 @@ function EngagementCard({ e, editing, editForm, onStartEdit, onCancelEdit, onEdi
               </ActionButton>
             )}
             {canDelete && (
-              <ActionButton
-                onClick={confirmDelete ? onDelete : onConfirmToggle}
-                tone={confirmDelete ? 'confirm' : 'danger'}
-              >
-                {confirmDelete ? 'Confirm?' : 'Delete'}
+              <ActionButton onClick={onDeleteRequest} tone="danger">
+                Delete
               </ActionButton>
             )}
           </div>
@@ -158,13 +154,6 @@ function EngagementCard({ e, editing, editForm, onStartEdit, onCancelEdit, onEdi
           </div>
         </div>
       )}
-
-      {confirmDelete && (
-        <div className="border-t border-red-900/60 bg-red-950/30 px-4 py-2 text-xs text-red-300">
-          This permanently deletes the engagement and all its scans, hosts, findings and audit
-          trail. Click <span className="font-semibold text-red-200">Confirm?</span> again to proceed.
-        </div>
-      )}
     </div>
   )
 }
@@ -176,7 +165,7 @@ export default function Engagements() {
   const deleteEngagement = useDeleteEngagement()
   const updateEngagement = useUpdateEngagement()
   const createDeletionRequest = useCreateDeletionRequest()
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<Engagement | null>(null)
   const admin = isAdmin()
   const canEdit = canMutate()
   const myId = currentUserId()
@@ -261,7 +250,7 @@ export default function Engagements() {
   }
 
   const handleDelete = async (id: string) => {
-    setConfirmDelete(null)
+    setDeleteTarget(null)
     try {
       await deleteEngagement.mutateAsync(id)
       toast.success('Engagement deleted')
@@ -388,7 +377,7 @@ export default function Engagements() {
         <span className="text-xs font-medium uppercase tracking-wider text-gray-500">Client engagements</span>
         {engagements?.length ? (
           <span className="text-[12px] text-gray-500">
-            {admin ? 'admins delete directly (two-step confirm); archiving makes an engagement read-only'
+            {admin ? 'admins delete directly (confirm dialog); archiving makes an engagement read-only'
               : canEdit ? 'deletion requests are queued for admin approval'
               : 'read-only access'}
           </span>
@@ -396,7 +385,11 @@ export default function Engagements() {
       </div>
 
       {isLoading ? (
-        <div className="py-12 text-center text-gray-400">Loading engagements...</div>
+        <div className="space-y-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <SkeletonCard key={i} lines={3} />
+          ))}
+        </div>
       ) : engagements?.length ? (
         <div className="space-y-4">
           {engagements.map((e: Engagement) => (
@@ -409,16 +402,7 @@ export default function Engagements() {
               onCancelEdit={() => setEditingId(null)}
               onEditChange={(patch) => setEditForm((f) => ({ ...f, ...patch }))}
               onSaveEdit={() => handleUpdate(e.id)}
-              confirmDelete={confirmDelete === e.id}
-              onConfirmToggle={() => {
-                if (confirmDelete === e.id) {
-                  setConfirmDelete(null)
-                } else {
-                  setConfirmDelete(e.id)
-                  setTimeout(() => setConfirmDelete((c) => (c === e.id ? null : c)), 3000)
-                }
-              }}
-              onDelete={() => handleDelete(e.id)}
+              onDeleteRequest={() => setDeleteTarget(e)}
               canEdit={canEdit}
               canArchive={admin || e.created_by === myId}
               canDelete={admin}
@@ -455,6 +439,22 @@ export default function Engagements() {
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!deleteTarget}
+        title="Delete engagement permanently?"
+        confirmLabel="Delete engagement"
+        busy={deleteEngagement.isPending}
+        onConfirm={() => deleteTarget && handleDelete(deleteTarget.id)}
+        onCancel={() => setDeleteTarget(null)}
+        message={
+          <>
+            <span className="font-semibold text-gray-200">"{deleteTarget?.engagement_name}"</span> and
+            everything it contains will be permanently deleted — all scans, hosts, findings and
+            the audit trail. This cannot be undone.
+          </>
+        }
+      />
 
       {deleteRequestFor && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4">

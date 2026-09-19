@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useSettings, useUpdateSettings } from '../hooks/useApi'
 import type { Setting } from '../lib/types'
-import { StatCard, Toggle, PrimaryButton, ActionButton } from '../components/ui'
+import { StatCard, Toggle, PrimaryButton, ActionButton, Skeleton } from '../components/ui'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
@@ -198,7 +198,22 @@ export default function Settings() {
   }
 
   if (isLoading || !server.length) {
-    return <div className="py-10 text-center text-sm text-gray-500">Loading settings…</div>
+    return (
+      <div className="mx-auto max-w-6xl">
+        <Skeleton className="h-7 w-40" />
+        <Skeleton className="mt-2 h-4 w-full max-w-2xl" />
+        <div className="mb-6 mt-6 grid grid-cols-3 gap-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-20" />
+          ))}
+        </div>
+        <div className="space-y-4">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-28" />
+          ))}
+        </div>
+      </div>
+    )
   }
 
   return (

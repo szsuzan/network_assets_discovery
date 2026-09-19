@@ -105,6 +105,30 @@ export function PrimaryButton({ children, onClick, disabled, loading, className 
   )
 }
 
+/** Pulsing placeholder block for loading states. */
+export function Skeleton({ className = '', animate = true }: { className?: string; animate?: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={`rounded-md bg-gray-700/50 ${animate ? 'animate-pulse' : ''} ${className}`}
+    />
+  )
+}
+
+/** A card-shaped skeleton (used where pages render loading placeholders). */
+export function SkeletonCard({ lines = 3, className = '' }: { lines?: number; className?: string }) {
+  return (
+    <div className={`rounded-xl border border-gray-800 bg-gray-900 p-4 ${className}`}>
+      <Skeleton className="h-5 w-1/3" />
+      <div className="mt-3 space-y-2">
+        {Array.from({ length: lines }).map((_, i) => (
+          <Skeleton key={i} className={`h-3.5 ${i % 3 === 1 ? 'w-2/3' : 'w-full'}`} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function Toggle({ checked, onChange, disabled, label }: {
   checked: boolean
   onChange: (next: boolean) => void

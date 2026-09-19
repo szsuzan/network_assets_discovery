@@ -2,25 +2,17 @@ import { useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useHosts, useFindings, useScan } from '../hooks/useApi'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } from 'recharts'
-import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, deviceTypeColor, normalizeDeviceType, FINDING_TYPE_LABELS, FINDING_STATUS_LABELS } from '../lib/types'
+import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, deviceTypeColor, normalizeDeviceType, FINDING_TYPE_LABELS, FINDING_STATUS_LABELS, FINDING_STATUS_COLORS } from '../lib/types'
 import { SeverityBadge } from '../components/SeverityBadge'
 import ScanNav from '../components/ScanNav'
+import Breadcrumbs from '../components/Breadcrumbs'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
+const ACTIVE_STATUSES = ['queued', 'discovering', 'scanning', 'fingerprinting', 'analyzing', 'paused', 'agent_running', 'reverifying']
+
 const SEV_ORDER = ['critical', 'concerning', 'notable', 'info'] as const
 const SEV_WEIGHT = { critical: 10, concerning: 6, notable: 3, info: 1 } as const
-
-const STATUS_COLORS: Record<string, string> = {
-  open: 'bg-gray-800 text-gray-300',
-  triaged: 'bg-blue-900/50 text-blue-300',
-  confirmed: 'bg-orange-900/50 text-orange-300',
-  remediation_in_progress: 'bg-yellow-900/50 text-yellow-300',
-  retest: 'bg-purple-900/50 text-purple-300',
-  resolved: 'bg-emerald-900/50 text-emerald-300',
-  accepted_risk: 'bg-slate-700 text-slate-300',
-  false_positive: 'bg-slate-800 text-slate-400 line-through',
-}
 
 export default function Report() {
   const { engagementId, scanId } = useParams()
@@ -124,9 +116,13 @@ export default function Report() {
 
   return (
     <div>
-      <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">
-        ← Back to engagement
-      </Link>
+      <Breadcrumbs
+        items={[
+          { label: 'Engagements', to: '/' },
+          { label: 'Engagement', to: `/engagements/${engagementId}` },
+          { label: scan?.name || scan?.profile || 'Report' },
+        ]}
+      />
       <ScanNav engagementId={engagementId!} scanId={scanId!} />
 
       <div className="mb-6 flex items-center justify-between">
@@ -146,6 +142,19 @@ export default function Report() {
           ))}
         </div>
       </div>
+
+      {scan && ACTIVE_STATUSES.includes(scan.status) && (
+        <div className="mb-4 flex items-start gap-2.5 rounded-lg border border-amber-800/40 bg-amber-950/30 px-4 py-2.5 text-sm text-amber-200/90">
+          <svg viewBox="0 0 24 24" className="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 8v4M12 16h.01" />
+          </svg>
+          <span>
+            This scan is still in progress — the report and exports only cover what has been
+            discovered so far and will change as the scan continues.
+          </span>
+        </div>
+      )}
 
       <div className="space-y-6">
         {/* Executive summary */}
@@ -239,7 +248,7 @@ export default function Report() {
                       </td>
                       <td className="mono py-2 pr-3 text-gray-300">{f.port ?? '—'}</td>
                       <td className="py-2 pr-3">
-                        <span className={`rounded px-2 py-0.5 text-xs ${STATUS_COLORS[f.status] || STATUS_COLORS.open}`}>
+                        <span className={`rounded px-2 py-0.5 text-xs ${FINDING_STATUS_COLORS[f.status] || FINDING_STATUS_COLORS.open}`}>
                           {FINDING_STATUS_LABELS[f.status] || f.status}
                         </span>
                       </td>

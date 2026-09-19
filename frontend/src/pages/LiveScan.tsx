@@ -14,6 +14,7 @@ import {
 import { StatusBadge } from '../components/Badge'
 import { DeviceIcon, SeverityDot } from '../components/SeverityBadge'
 import ScanNav from '../components/ScanNav'
+import Breadcrumbs from '../components/Breadcrumbs'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
@@ -438,9 +439,13 @@ export default function LiveScan() {
 
   return (
     <div>
-      <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">
-        ← Back to engagement
-      </Link>
+      <Breadcrumbs
+        items={[
+          { label: 'Engagements', to: '/' },
+          { label: 'Engagement', to: `/engagements/${engagementId}` },
+          { label: scan?.name || scan?.profile || 'Live scan' },
+        ]}
+      />
       <ScanNav engagementId={engagementId!} scanId={scanId!} />
 
       <div className="mb-6 flex items-center justify-between">

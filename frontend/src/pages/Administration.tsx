@@ -8,7 +8,7 @@ import {
   useApproveDeletionRequest,
   useRejectDeletionRequest,
 } from '../hooks/useApi'
-import { Chip, DotPill, ActionButton, PrimaryButton } from '../components/ui'
+import { Chip, DotPill, ActionButton, PrimaryButton, Skeleton } from '../components/ui'
 import { USER_ROLES, DELETION_REQUEST_LABELS } from '../lib/types'
 import { currentUserId } from '../lib/auth'
 import { useToast } from '../components/Toaster'
@@ -204,7 +204,13 @@ export default function Administration() {
         )}
 
         {usersLoading ? (
-          <div className="px-5 py-8 text-center text-sm text-gray-400">Loading users...</div>
+          <div className="px-5 py-8">
+            <div className="space-y-3">
+              {Array.from({ length: 5 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left text-sm">
@@ -298,7 +304,13 @@ export default function Administration() {
         </div>
 
         {requestsLoading ? (
-          <div className="px-5 py-8 text-center text-sm text-gray-400">Loading requests...</div>
+          <div className="px-5 py-8">
+            <div className="space-y-3">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-14 w-full" />
+              ))}
+            </div>
+          </div>
         ) : pending.length === 0 && resolved.length === 0 ? (
           <div className="px-5 py-10 text-center text-sm text-gray-500">
             No deletion requests yet.

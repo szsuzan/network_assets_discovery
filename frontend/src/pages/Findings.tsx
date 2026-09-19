@@ -6,6 +6,7 @@ import {
   DEVICE_TYPE_LABELS,
   FINDING_STATUSES,
   FINDING_STATUS_LABELS,
+  FINDING_STATUS_COLORS,
   FINDING_TYPE_LABELS,
   normalizeDeviceType,
   SEVERITY_ORDER,
@@ -13,20 +14,10 @@ import {
   type FindingAuditEntry,
 } from '../lib/types'
 import ScanNav from '../components/ScanNav'
+import Breadcrumbs from '../components/Breadcrumbs'
 import RiskRulesPanel from '../components/RiskRulesPanel'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
-
-const STATUS_COLORS: Record<string, string> = {
-  open: 'bg-gray-800 text-gray-300',
-  triaged: 'bg-blue-900/50 text-blue-300',
-  confirmed: 'bg-orange-900/50 text-orange-300',
-  remediation_in_progress: 'bg-yellow-900/50 text-yellow-300',
-  retest: 'bg-purple-900/50 text-purple-300',
-  resolved: 'bg-emerald-900/50 text-emerald-300',
-  accepted_risk: 'bg-slate-700 text-slate-300',
-  false_positive: 'bg-slate-800 text-slate-400 line-through',
-}
 
 function hostKey(f: Finding): string {
   if (f.host_hostname) return f.host_hostname
@@ -69,7 +60,7 @@ function AuditHistory({ scanId, findingId }: { scanId: string; findingId: string
 }
 
 function statusBadge(f: Finding) {
-  const cls = STATUS_COLORS[f.status] || STATUS_COLORS.open
+  const cls = FINDING_STATUS_COLORS[f.status] || FINDING_STATUS_COLORS.open
   return (
     <span className={`rounded px-2 py-0.5 text-xs ${cls}`}>
       {FINDING_STATUS_LABELS[f.status] || f.status}
@@ -139,9 +130,13 @@ export default function Findings() {
 
   return (
     <div>
-      <Link to={`/engagements/${engagementId}`} className="text-sm text-gray-400 hover:text-white">
-        ← Back to engagement
-      </Link>
+      <Breadcrumbs
+        items={[
+          { label: 'Engagements', to: '/' },
+          { label: 'Engagement', to: `/engagements/${engagementId}` },
+          { label: 'Findings' },
+        ]}
+      />
       <ScanNav engagementId={engagementId!} scanId={scanId!} />
 
       <div className="mb-6 flex items-center justify-between">

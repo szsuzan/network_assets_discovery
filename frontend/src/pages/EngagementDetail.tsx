@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Link, useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate } from 'react-router-dom'
 import {
   useEngagement,
   useEngagementScans,
@@ -16,10 +16,13 @@ import {
   useSettings,
 } from '../hooks/useApi'
 import { StatusBadge } from '../components/Badge'
+import Breadcrumbs from '../components/Breadcrumbs'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import type { Scan } from '../lib/types'
 import { isAdmin, canMutate, currentUserId } from '../lib/auth'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
+import { fmtDateTime } from '../lib/format'
 
 const ACTIVE_STATUSES = ['queued', 'discovering', 'scanning', 'fingerprinting', 'analyzing', 'paused', 'agent_running', 'reverifying']
 
@@ -184,42 +187,14 @@ export default function EngagementDetail() {
   const renderScanDelete = (s: Scan) => {
     if (readOnly) return null
     if (admin) {
-      if (confirmDeleteScan !== s.id) {
-        return (
-          <button
-            onClick={() => setConfirmDeleteScan(s.id)}
-            className="rounded border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
-            title="Permanently delete this scan and all its hosts, findings, and audit trail"
-          >
-            Delete
-          </button>
-        )
-      }
       return (
-        <span className="inline-flex items-center gap-1.5">
-          <button
-            onClick={async () => {
-              try {
-                await deleteScan.mutateAsync(s.id)
-                toast.success('Scan deleted')
-              } catch (err) {
-                toast.error(errText(err, 'Failed to delete scan'))
-              } finally {
-                setConfirmDeleteScan(null)
-              }
-            }}
-            disabled={deleteScan.isPending}
-            className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
-          >
-            Confirm
-          </button>
-          <button
-            onClick={() => setConfirmDeleteScan(null)}
-            className="rounded bg-gray-700 px-2 py-1 text-xs font-medium text-white hover:bg-gray-600"
-          >
-            Cancel
-          </button>
-        </span>
+        <button
+          onClick={() => setConfirmDeleteScan(s.id)}
+          className="rounded border border-red-800 px-2 py-1 text-xs text-red-400 hover:bg-red-950"
+          title="Permanently delete this scan and all its hosts, findings, and audit trail"
+        >
+          Delete
+        </button>
       )
     }
     return (
@@ -302,7 +277,12 @@ export default function EngagementDetail() {
 
   return (
     <div>
-      <Link to="/" className="text-sm text-gray-400 hover:text-white">← Back to engagements</Link>
+      <Breadcrumbs
+        items={[
+          { label: 'Engagements', to: '/' },
+          { label: engagement?.engagement_name || 'Engagement' },
+        ]}
+      />
 
       {isArchived && (
         <div className="mt-3 flex items-center gap-2 rounded-lg border border-gray-700 bg-gray-800/60 px-4 py-2.5 text-sm text-gray-300">
@@ -615,7 +595,7 @@ export default function EngagementDetail() {
                       <span className="text-xs text-gray-400">{s.progress_pct}%</span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-gray-400">{s.started_at ? new Date(s.started_at).toLocaleString() : '—'}</td>
+                  <td className="px-4 py-3 text-gray-400">{fmtDateTime(s.started_at)}</td>
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     {readOnly ? (
                       <span className="text-xs text-gray-500">read-only</span>
@@ -934,6 +914,36 @@ export default function EngagementDetail() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={!!confirmDeleteScan}
+        title="Delete scan permanently?"
+        confirmLabel="Delete scan"
+        busy={deleteScan.isPending}
+        onConfirm={async () => {
+          const scan = scans?.find((s) => s.id === confirmDeleteScan)
+          if (!scan) return
+          try {
+            await deleteScan.mutateAsync(scan.id)
+            toast.success('Scan deleted')
+          } catch (err) {
+            toast.error(errText(err, 'Failed to delete scan'))
+          } finally {
+            setConfirmDeleteScan(null)
+          }
+        }}
+        onCancel={() => setConfirmDeleteScan(null)}
+        message={
+          <>
+            <span className="font-semibold text-gray-200">
+              "{scans?.find((s) => s.id === confirmDeleteScan)?.name ||
+                scans?.find((s) => s.id === confirmDeleteScan)?.profile?.replace('_', ' ')}"
+            </span>{' '}
+            and everything it contains will be permanently deleted — all hosts, findings and the
+            audit trail. This cannot be undone.
+          </>
+        }
+      />
 
       {deleteReqScan && (
         <div
