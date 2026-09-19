@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useTheme } from '../lib/theme'
 import { isAdmin, clearAuth } from '../lib/auth'
+import { usernameOf } from '../lib/format'
 import { useMe } from '../hooks/useApi'
 import CommandPalette from './CommandPalette'
 import subnexLogo from '../assets/subnex-logo.svg'
@@ -83,7 +84,7 @@ export default function Layout() {
             </button>
             {me && (
               <div className="flex items-center gap-2 rounded-lg border border-gray-800 bg-gray-800/40 py-1 pl-2 pr-1.5">
-                <span className="hidden max-w-[140px] truncate text-xs text-gray-400 lg:block">{me.email}</span>
+                <span className="hidden max-w-[140px] truncate text-xs text-gray-400 lg:block">{usernameOf(me.email)}</span>
                 <span className="rounded-md bg-indigo-600/30 px-2 py-0.5 text-[11px] font-medium text-indigo-200">
                   {ROLE_LABELS[me.role] || me.role}
                 </span>

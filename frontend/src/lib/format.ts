@@ -16,6 +16,13 @@ export function fmtDate(iso: string | null | undefined): string {
   return fmtDateTime(iso, { time: false })
 }
 
+/** Strip the "@domain" suffix so "admin@pentest.local" displays as "admin". */
+export function usernameOf(value: string | null | undefined): string {
+  if (!value) return ''
+  const at = value.indexOf('@')
+  return at > 0 ? value.slice(0, at) : value
+}
+
 /** Compact, human-friendly relative time: "just now", "5m ago", "3h ago". */
 export function relTime(iso: string | null | undefined, now: number = Date.now()): string {
   if (!iso) return 'never'

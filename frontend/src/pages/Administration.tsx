@@ -11,6 +11,7 @@ import {
 import { Chip, DotPill, ActionButton, PrimaryButton, Skeleton } from '../components/ui'
 import { USER_ROLES, DELETION_REQUEST_LABELS } from '../lib/types'
 import { currentUserId } from '../lib/auth'
+import { usernameOf } from '../lib/format'
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
@@ -60,7 +61,7 @@ export default function Administration() {
       })
       setForm({ email: '', password: '', role: 'pentester' })
       setShowForm(false)
-      toast.success(`Created ${created.email} — they must set a password on first login`)
+      toast.success(`Created ${usernameOf(created.email)} — they must set a password on first login`)
     } catch (err) {
       setFormError(errText(err, 'Failed to create user'))
     }
@@ -150,13 +151,13 @@ export default function Administration() {
           <form onSubmit={handleCreate} className="border-b border-gray-800 bg-gray-950/40 px-5 py-4">
             <div className="grid gap-4 md:grid-cols-3">
               <div>
-                <label className="mb-1 block text-xs text-gray-500">Email / username *</label>
+                <label className="mb-1 block text-xs text-gray-500">Username *</label>
                 <input
                   type="text"
                   value={form.email}
                   onChange={(e) => setForm({ ...form, email: e.target.value })}
                   className={inputCls}
-                  placeholder="analyst (or analyst@company.com)"
+                  placeholder="analyst"
                   required
                 />
               </div>
@@ -229,7 +230,7 @@ export default function Administration() {
                   return (
                     <tr key={u.id} className="border-b border-gray-800/60 last:border-0">
                       <td className="px-5 py-2.5">
-                        <span className="font-medium text-gray-200">{u.email}</span>
+                        <span className="font-medium text-gray-200">{usernameOf(u.email)}</span>
                         {isSelf && <Chip tone="indigo">you</Chip>}
                         {u.must_change_password && (
                           <span className="ml-1 text-[11px] text-amber-400">must change password</span>
@@ -336,7 +337,7 @@ export default function Administration() {
                     {r.reason && <p className="mt-1 text-xs text-gray-400">Reason: {r.reason}</p>}
                     <p className="mt-1 text-[11px] text-gray-500">
                       Requested {new Date(r.created_at).toLocaleString()} by{' '}
-                      <span className="text-gray-300">{r.requested_by_email || 'unknown'}</span>
+                      <span className="text-gray-300">{usernameOf(r.requested_by_email) || 'unknown'}</span>
                     </p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -376,7 +377,7 @@ export default function Administration() {
                   <span className="text-gray-300">{r.target_label}</span>
                   <span className="text-xs text-gray-500">
                     {r.status === 'approved' ? 'deleted' : 'kept'} · requested by{' '}
-                    {r.requested_by_email || 'unknown'} · {new Date(r.created_at).toLocaleString()}
+                    {usernameOf(r.requested_by_email) || 'unknown'} · {new Date(r.created_at).toLocaleString()}
                   </span>
                 </div>
                 {r.resolver_comment && (
