@@ -4,7 +4,7 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'scanner',
+    role TEXT NOT NULL DEFAULT 'pentester',
     created_at TIMESTAMPTZ DEFAULT now()
 );
 

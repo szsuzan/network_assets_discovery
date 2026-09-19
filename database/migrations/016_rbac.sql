@@ -1,7 +1,7 @@
 -- RBAC hardening:
 --   * users.active flag -> admins can disable an account without deleting it
 --     (disabled accounts can no longer log in or use a bearer token).
---   * deletion_requests -> admin-approval queue used by scanners who want an
+--   * deletion_requests -> admin-approval queue used by pentesters who want an
 --     engagement or scan removed.
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE;

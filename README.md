@@ -135,7 +135,7 @@ cp .env.example .env      # Windows:  Copy-Item .env.example .env
 # macOS/Linux:  ./start-all.sh
 ```
 
-Then log in at <http://localhost:8000> as `demo@pentest.local` / `password123`.
+Then log in at <http://localhost:8000> as `demo` / `password123` (the bare username works; the full address is `demo@pentest.local`).
 
 ---
 
@@ -201,11 +201,11 @@ docker compose up -d --build                           # start the stack
 docker compose ps                                      # postgres+redis (healthy), backend (Up)
 ```
 
-Schema creation, migrations (001 → 013) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
+Schema creation, migrations (001 → 017) and the demo user happen **automatically** at backend startup — no manual `psql`/`seed.py` steps.
 
 ### 6. First login and first scan
 
-- Open <http://localhost:8000> and log in with the bootstrap account `demo@pentest.local` / `password123`. The first login forces you to set your own password before the app unlocks.
+- Open <http://localhost:8000> and log in with the bootstrap account `demo` / `password123`. The first login forces you to set your own password before the app unlocks.
 - **Engagements → New Engagement** → add your network to **Authorized scope** (e.g. `192.168.1.0/24`).
 - **Engagement Detail → Start Scan** → target an IP/CIDR inside that scope, pick a `profile`, and watch the live scan.
 - Results appear under **Inventory**, **Topology**, **Findings**; generate a client report under **Report/Export**.
@@ -277,8 +277,10 @@ The stack ships with a **demo admin user** that is created automatically on a fr
 
 | Field | Value |
 |-------|-------|
-| Email | `demo@pentest.local` |
+| Username | `demo` (full account address: `demo@pentest.local`) |
 | Password | `password123` (bootstrap only) |
+
+Most login forms accept either the **bare username** (`demo`) or the full address (`demo@pentest.local`); usernames are the preferred, user-facing identifier and are used everywhere in the UI.
 
 A password change is **enforced on the first login**: every authenticated API/WebSocket call is refused with `403 Password change required` (the frontend auto-redirects to the change-password screen) until you set a personal password. The bootstrap password above only works for that first login.
 
