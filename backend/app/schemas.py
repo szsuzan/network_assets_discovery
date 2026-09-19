@@ -467,8 +467,12 @@ class AuditLogOut(BaseModel):
         from_attributes = True
 
 class ChangedFindings(BaseModel):
-    new: List[dict]
-    resolved: List[dict]
+    # Findings are diffed as opaque "type:host_id:port" string keys (see
+    # scans.py diff_scans / get_scan_findings). They are identifiers, not
+    # documents, so they ship as List[str] — a `List[dict]` here used to make
+    # Pydantic reject every string and turn EVERY diff into an HTTP 500.
+    new: List[str]
+    resolved: List[str]
 
 class DiffResult(BaseModel):
     new_hosts: List[dict]

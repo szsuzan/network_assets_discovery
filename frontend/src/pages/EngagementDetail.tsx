@@ -768,14 +768,31 @@ export default function EngagementDetail() {
               className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
             >
               <option value="">Select second scan</option>
-              {scans?.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name || s.profile} — {s.started_at ? new Date(s.started_at).toLocaleDateString() : ''}
-                </option>
-              ))}
+              {scans
+                ?.filter((s) => s.id !== diffScanA) // never compare a scan with itself
+                .map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name || s.profile} — {s.started_at ? new Date(s.started_at).toLocaleDateString() : ''}
+                  </option>
+                ))}
             </select>
           </div>
 
+          {diffScanA && diffScanB && diffScanA === diffScanB && (
+            <p className="mt-3 text-xs text-yellow-400">
+              Pick a different second scan — a scan compared with itself always shows "nothing
+              new, gone, or changed".
+            </p>
+          )}
+
+          {diff.isLoading && (
+            <p className="mt-3 text-xs text-gray-500">Comparing scans…</p>
+          )}
+          {diff.error && (
+            <p className="mt-3 text-xs text-red-400">
+              Could not compare scans: {(diff.error as any)?.message ?? String(diff.error)}
+            </p>
+          )}
           {diff.data && (
             <div className="mt-4 space-y-3 text-sm">
               <div className="flex gap-2">
