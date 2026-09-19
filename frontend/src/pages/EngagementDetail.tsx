@@ -248,6 +248,7 @@ export default function EngagementDetail() {
   const [diffScanA, setDiffScanA] = useState('')
   const [diffScanB, setDiffScanB] = useState('')
   const diff = useScanDiff(diffScanA || undefined, diffScanB || undefined)
+  const [expandedPortHosts, setExpandedPortHosts] = useState<Set<string>>(new Set())
 
   const [startError, setStartError] = useState<string | null>(null)
 
@@ -808,26 +809,48 @@ export default function EngagementDetail() {
               ))}
               {diff.data.changed_ports.length > 0 && (
                 <>
-                  <div className="pt-1 text-xs text-gray-400">Port changes:</div>
-                  {diff.data.changed_ports.slice(0, 5).map((c: any) => {
+                  <div className="pt-1 text-xs text-gray-400">Port changes — click a host to expand:</div>
+                  {diff.data.changed_ports.slice(0, 8).map((c: any) => {
                     const before: string[] = Array.isArray(c.before) ? c.before.map(String) : []
                     const after: string[] = Array.isArray(c.after) ? c.after.map(String) : []
                     const removed = before.filter((x) => !after.includes(x))
                     const added = after.filter((x) => !before.includes(x))
+                    const open = expandedPortHosts.has(String(c.ip))
                     return (
-                      <div key={c.ip} className="mono">
-                        <span className="text-yellow-300/90">~ {c.ip}</span>
-                        {removed.length > 0 && (
-                          <span className="text-red-400">  −{removed.join(', ')}</span>
+                      <button
+                        type="button"
+                        key={c.ip}
+                        onClick={() => {
+                          const next = new Set(expandedPortHosts)
+                          if (next.has(String(c.ip))) next.delete(String(c.ip))
+                          else next.add(String(c.ip))
+                          setExpandedPortHosts(next)
+                        }}
+                        className="block w-full rounded px-1 text-left hover:bg-gray-800"
+                      >
+                        <span className="mono text-yellow-300/90">
+                          {open ? '▾' : '▸'} ~ {c.ip}
+                        </span>
+                        <span className="ml-2 text-xs text-gray-500">
+                          {removed.length > 0 && <span className="text-red-400">−{removed.length} </span>}
+                          {added.length > 0 && <span className="text-emerald-400">+{added.length}</span>}
+                          {removed.length === 0 && added.length === 0 && '–'}
+                        </span>
+                        {open && (
+                          <div className="mt-1 pl-4">
+                            {removed.length > 0 && (
+                              <div className="mono text-red-400">− {removed.join(', ')}</div>
+                            )}
+                            {added.length > 0 && (
+                              <div className="mono text-emerald-400">+ {added.join(', ')}</div>
+                            )}
+                          </div>
                         )}
-                        {added.length > 0 && (
-                          <span className="text-emerald-400">  +{added.join(', ')}</span>
-                        )}
-                      </div>
+                      </button>
                     )
                   })}
-                  {diff.data.changed_ports.length > 5 && (
-                    <div className="text-xs text-gray-500">… and {diff.data.changed_ports.length - 5} more hosts</div>
+                  {diff.data.changed_ports.length > 8 && (
+                    <div className="text-xs text-gray-500">… and {diff.data.changed_ports.length - 8} more hosts</div>
                   )}
                 </>
               )}
