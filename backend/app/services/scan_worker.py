@@ -628,6 +628,33 @@ def _merge_host_ports(db, scan: Scan, ip: str, ports: list):
     return host
 
 
+def _open_ports_sse_items(db, host) -> list:
+    """Serialise a host's current open Port rows into the exact per-port SSE
+    payload items the live fingerprint-phase `host_updated` event carries
+    (port / protocol / state / service / version / banner / cpes).
+
+    Re-verify scans merge hidden ports in place, so their live "Open Ports"
+    tally (frontend keys each host's tally on `msg.ports.length`) must reflect
+    the FULL merged set per host, not just the newly-discovered subset. This
+    mirrors the normal fingerprint pass so the counter keeps climbing.
+    """
+    rows = db.execute(
+        select(Port).where(Port.host_id == host.id, Port.state == "open")
+    ).scalars().all()
+    return [
+        {
+            "port": p.port,
+            "protocol": p.protocol,
+            "state": p.state,
+            "service": p.service,
+            "version": p.version,
+            "banner": p.banner,
+            "cpes": list(p.cpes or []),
+        }
+        for p in rows
+    ]
+
+
 def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
     """Execute a re-verify pass on an already-completed Scan (same row).
 
@@ -822,9 +849,23 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
                                f"--host-timeout {fp_tmo}s -p {port_list} {host.ip} -oX -")
                         out = _run_streamed(scan, cmd, fp_tmo + 60)
                         parsed = parse_rustscan_output(out)
-                        merged = _merge_host_ports(db, scan, str(host.ip), parsed)
-                        if merged:
-                            classify_device_type(merged)
+                        host = _merge_host_ports(db, scan, str(host.ip), parsed)
+                        if host:
+                            classify_device_type(host)
+                            # Mirrors the canonical fingerprint-phase
+                            # `host_updated` broadcast so the LIVE "Open Ports"
+                            # tally (LiveScan keys per-IP on msg.ports.length)
+                            # also rises for ports hidden in the original scan.
+                            full_ports = _open_ports_sse_items(db, host)
+                            manager.broadcast_sync(str(scan.id), {
+                                "type": "host_updated",
+                                "host_id": str(host.id),
+                                "ip": str(host.ip),
+                                "ports": full_ports,
+                                "os_guess": host.os_guess,
+                                "phase": "fingerprint",
+                                "host_up": True,
+                            })
                         db.commit()
 
         _raise_if_stopped(scan)
@@ -841,6 +882,16 @@ def _run_reverify_scan(db, scan: Scan, cfg: dict = None):
         scan.completed_at = datetime.now(timezone.utc)
         scan.verified_at = datetime.now(timezone.utc)
         scan.progress_pct = 100
+        # Recompute the persisted Open-Ports stat from the merged DB rows, the
+        # same way the router GET recomputes it on read (scans.py) — reverify
+        # can otherwise leave `scan.open_ports_count` frozen at the pre-merge
+        # value, so a refresh / re-read of the stat card still shows the old
+        # tally even after hidden ports were merged live.
+        open_count = db.execute(
+            select(func.count()).select_from(Port).join(Host, Host.id == Port.host_id)
+            .where(Host.scan_id == scan.id, Port.state == "open")
+        )
+        scan.open_ports_count = open_count.scalar_one() or 0
         _snapshot_pass(db, scan)
         db.commit()
         _emit_log(scan, f"=== Re-verify complete: {scan.hosts_discovered} hosts, report updated (no duplicates) ===")

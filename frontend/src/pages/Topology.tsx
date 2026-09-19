@@ -73,7 +73,13 @@ function computeStaticLayout(nodes: HostNode[], links: { source: any; target: an
     const hosts = nodes
       .filter((n) => n.kind === 'host' && zoneByHost.get(n.id) === zone.id)
       .sort((a, b) => ipKey(a.id).localeCompare(ipKey(b.id)))
-    const ringR = hosts.length ? Math.max(45, (hosts.length * gap) / (2 * Math.PI)) : 45
+    // Ring radius grows with host count so neighbours stay exactly `gap` apart
+    // (their 16u hit-areas never overlap). With only a handful of live IPs the
+    // OLD floor of 45 made the whole subnet unnecessarily big even though the
+    // ring circumference far exceeded `gap*count`. Dropping the floor to 32
+    // keeps subnets with few alive hosts compact (ring + dotted border shrink
+    // together) while larger bands still scale by count as before.
+    const ringR = hosts.length ? Math.max(32, (hosts.length * gap) / (2 * Math.PI)) : 32
     return { zone, hosts, ringR }
   })
 
@@ -138,9 +144,31 @@ function computeStaticLayout(nodes: HostNode[], links: { source: any; target: an
     b.zone._zoneR = b.ringR + zonePad
     placedIds.add(b.zone.id)
 
-    const startAngle = -Math.PI / 2
+    // Rotate the ring so the band's GATEWAY host (the one the `internet ->
+    // host` gateway link pins on) sits at ring angle π — the LEFTMOST point,
+    // horizontally level with the zone centre AND the internet node on the
+    // top band row (internet.y = rows[0].y). The gateway edge then leaves the
+    // ring as a perfectly horizontal, straight line instead of a diagonal.
+    // When the gateway is the first IP (.1) the ring starts there; when it is
+    // the last IP (.254) the ring ends there — either way it aligns at 0°.
+    let gwIdx = 0
+    const gwLink = links.find(
+      (l) => l.type === 'gateway' &&
+        (typeof l.target === 'object' ? (l.target as any)?.id : l.target) !== 'internet'
+    )
+    const gwTarget = gwLink
+      ? (typeof gwLink.target === 'string' ? gwLink.target : (gwLink.target as any)?.id)
+      : null
+    const gwHostIdx = gwTarget
+      ? b.hosts.findIndex((hh) => hh.id === gwTarget)
+      : -1
+    gwIdx = Math.max(0, gwHostIdx === -1 ? 0 : gwHostIdx)
+    if (b.hosts.length > 1) {
+      gwIdx = gwIdx % b.hosts.length
+    }
+    const rotStart = Math.PI - (gwIdx / Math.max(1, b.hosts.length)) * Math.PI * 2
     b.hosts.forEach((h, hi) => {
-      const angle = startAngle + (hi / Math.max(1, b.hosts.length)) * Math.PI * 2
+      const angle = rotStart + (hi / Math.max(1, b.hosts.length)) * Math.PI * 2
       const hx = zx + b.ringR * Math.cos(angle)
       const hy = zy + b.ringR * Math.sin(angle)
       h.x = hx
@@ -158,7 +186,11 @@ function computeStaticLayout(nodes: HostNode[], links: { source: any; target: an
     .filter((n) => n.kind === 'host' && !placedIds.has(n.id))
     .sort((a, b) => ipKey(a.id).localeCompare(ipKey(b.id)))
   if (leftover.length) {
-    const ringR = leftover.length ? Math.max(45, (leftover.length * gap) / (2 * Math.PI)) : 45
+    const ringR = leftover.length ? Math.max(32, (leftover.length * gap) / (2 * Math.PI)) : 32
+    //
+    // Floor lowered from 45 → 32: a subnet with only a few LIVE IPs should
+    // render as a small tidy circle (its ring + dotted border shrink together),
+    // not a big empty rack sized for a /24 that meanwhile reads sparse.
     const cx = centerX
     const cy = floorY + 110 + ringR
     const startAngle = -Math.PI / 2
@@ -201,11 +233,16 @@ function drawInternetCloud(ctx: CanvasRenderingContext2D, node: any, scale: numb
   // Rounded node panel sized to the actual text so "Internet" always sits
   // fully inside the rectangle (icon on the left, label on the right), with a
   // clear gap between the cloud logo and the text.
-  ctx.font = `${11 / scale}px monospace`
+
+  // Font fits the requested 14px text while the rounded node panel hugs the
+  // text exactly (icon left + label right with a small gap), so the node is
+  // as tight as the label instead of a wide empty box.
+  ctx.font = `${14 / scale}px monospace`
   ctx.textAlign = 'left'
   ctx.textBaseline = 'middle'
   const textW = ctx.measureText('Internet').width
-  const w = textW + 52 * u
+  const tmpW = 34 * u
+  const w = textW + tmpW
   const h = 22 * u
   const r = 6 * u
   ctx.beginPath()
@@ -221,10 +258,12 @@ function drawInternetCloud(ctx: CanvasRenderingContext2D, node: any, scale: numb
   ctx.lineWidth = 1.2 / scale
   ctx.stroke()
 
-  // Cloud icon (left)
-  const cx = -w / 2 + 14 * u
+  // Cloud icon (left). 7u cloud centered at -w/2+10u — its right edge
+  // (-w/2+18.4u) stays well clear of the label which starts at -w/2+26u, so
+  // the enlarged ~14px logo never touches the "Internet" text.
+  const cx = -w / 2 + 10 * u
   const cy = 0
-  const cr = 5 * u
+  const cr = 7 * u
   ctx.beginPath()
   ctx.arc(cx - cr * 0.9, cy, cr * 0.8, Math.PI * 0.5, Math.PI * 1.6)
   ctx.arc(cx - cr * 0.2, cy - cr * 0.7, cr * 0.8, Math.PI * 0.95, Math.PI * 0.35)
