@@ -806,6 +806,31 @@ export default function EngagementDetail() {
               {diff.data.missing_hosts.slice(0, 3).map((h: any) => (
                 <div key={h.ip} className="mono text-red-400">− {h.ip} {h.hostname || ''}</div>
               ))}
+              {diff.data.changed_ports.length > 0 && (
+                <>
+                  <div className="pt-1 text-xs text-gray-400">Port changes:</div>
+                  {diff.data.changed_ports.slice(0, 5).map((c: any) => {
+                    const before: string[] = Array.isArray(c.before) ? c.before.map(String) : []
+                    const after: string[] = Array.isArray(c.after) ? c.after.map(String) : []
+                    const removed = before.filter((x) => !after.includes(x))
+                    const added = after.filter((x) => !before.includes(x))
+                    return (
+                      <div key={c.ip} className="mono">
+                        <span className="text-yellow-300/90">~ {c.ip}</span>
+                        {removed.length > 0 && (
+                          <span className="text-red-400">  −{removed.join(', ')}</span>
+                        )}
+                        {added.length > 0 && (
+                          <span className="text-emerald-400">  +{added.join(', ')}</span>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {diff.data.changed_ports.length > 5 && (
+                    <div className="text-xs text-gray-500">… and {diff.data.changed_ports.length - 5} more hosts</div>
+                  )}
+                </>
+              )}
             </div>
           )}
         </div>
