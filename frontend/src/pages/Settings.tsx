@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { useSettings, useUpdateSettings } from '../hooks/useApi'
 import type { Setting } from '../lib/types'
 import { StatCard, Toggle, PrimaryButton, ActionButton } from '../components/ui'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const MANAGER_ROLES = ['admin', 'pentester']
 
@@ -127,11 +129,11 @@ function SettingRow({ s, value, jsonDraft, canEdit, onValue, onJsonDraft }: {
 export default function Settings() {
   const { data, isLoading } = useSettings()
   const save = useUpdateSettings()
+  const toast = useToast()
 
   const [server, setServer] = useState<Setting[]>([])
   const [draft, setDraft] = useState<Record<string, any>>({})
   const [jsonDraft, setJsonDraft] = useState<Record<string, string>>({})
-  const [savedMsg, setSavedMsg] = useState<string | null>(null)
 
   const role = localStorage.getItem('role') || ''
   const canEdit = MANAGER_ROLES.includes(role)
@@ -190,10 +192,8 @@ export default function Settings() {
       payload[k] = s.type === 'json' ? JSON.parse(jsonDraft[k] || '{}') : draft[k]
     }
     save.mutate(payload, {
-      onSuccess: () => {
-        setSavedMsg('Settings saved')
-        window.setTimeout(() => setSavedMsg(null), 3000)
-      },
+      onSuccess: () => toast.success('Settings saved'),
+      onError: (err) => toast.error(errText(err, 'Failed to save settings')),
     })
   }
 
@@ -256,7 +256,6 @@ export default function Settings() {
               : `${changed.length} unsaved change${changed.length === 1 ? '' : 's'}`
             : 'No changes'}
         </span>
-        {savedMsg && <span className="text-sm text-emerald-400">{savedMsg}</span>}
         <div className="ml-auto flex items-center gap-2">
           <ActionButton onClick={reset} disabled={!canEdit || changed.length === 0 || save.isPending}>
             Discard

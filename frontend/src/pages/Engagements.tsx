@@ -10,6 +10,8 @@ import {
 import { StatCard, Chip, DotPill, ActionButton, PrimaryButton } from '../components/ui'
 import type { Engagement } from '../lib/types'
 import { isAdmin, canMutate, currentUserId } from '../lib/auth'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const inputCls =
   'w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-indigo-500'
@@ -22,11 +24,10 @@ function EngagementAvatar({ name }: { name: string }) {
   )
 }
 
-function EngagementCard({ e, editing, editForm, editError, onStartEdit, onCancelEdit, onEditChange, onSaveEdit, confirmDelete, onConfirmToggle, onDelete, canEdit, canArchive, canDelete, onToggleArchive }: {
+function EngagementCard({ e, editing, editForm, onStartEdit, onCancelEdit, onEditChange, onSaveEdit, confirmDelete, onConfirmToggle, onDelete, canEdit, canArchive, canDelete, onToggleArchive }: {
   e: Engagement
   editing: boolean
   editForm: { client_name: string; engagement_name: string; authorized_scope: string; start_date: string; end_date: string }
-  editError: string | null
   onStartEdit: () => void
   onCancelEdit: () => void
   onEditChange: (patch: Partial<typeof editForm>) => void
@@ -151,11 +152,8 @@ function EngagementCard({ e, editing, editForm, editError, onStartEdit, onCancel
               />
             </div>
           </div>
-          {editError && (
-            <p className="mt-3 whitespace-pre-line text-sm text-red-400">{editError}</p>
-          )}
           <div className="mt-4 flex items-center gap-2">
-            <PrimaryButton onClick={onSaveEdit}>Save Changes</PrimaryButton>
+            <PrimaryButton onClick={onSaveEdit} loading={false}>Save Changes</PrimaryButton>
             <ActionButton onClick={onCancelEdit} tone="ghost">Cancel</ActionButton>
           </div>
         </div>
@@ -172,6 +170,7 @@ function EngagementCard({ e, editing, editForm, editError, onStartEdit, onCancel
 }
 
 export default function Engagements() {
+  const toast = useToast()
   const { data: engagements, isLoading } = useEngagements()
   const createEngagement = useCreateEngagement()
   const deleteEngagement = useDeleteEngagement()
@@ -189,7 +188,6 @@ export default function Engagements() {
     start_date: '',
     end_date: '',
   })
-  const [createError, setCreateError] = useState<string | null>(null)
 
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({
@@ -199,11 +197,9 @@ export default function Engagements() {
     start_date: '',
     end_date: '',
   })
-  const [editError, setEditError] = useState<string | null>(null)
 
   const [deleteRequestFor, setDeleteRequestFor] = useState<Engagement | null>(null)
   const [deleteReason, setDeleteReason] = useState('')
-  const [deleteReqError, setDeleteReqError] = useState<string | null>(null)
 
   const startEdit = (e: Engagement) => {
     setEditForm({
@@ -213,12 +209,10 @@ export default function Engagements() {
       start_date: e.start_date || '',
       end_date: e.end_date || '',
     })
-    setEditError(null)
     setEditingId(e.id)
   }
 
   const handleUpdate = async (id: string) => {
-    setEditError(null)
     const scope = editForm.authorized_scope.split(',').map((s) => s.trim()).filter(Boolean)
     try {
       await updateEngagement.mutateAsync({
@@ -230,25 +224,26 @@ export default function Engagements() {
         end_date: editForm.end_date || null,
       })
       setEditingId(null)
+      toast.success('Engagement updated')
     } catch (err: any) {
-      setEditError(err?.response?.data?.detail?.toString?.() || 'Failed to update engagement')
+      toast.error(errText(err, 'Failed to update engagement'))
     }
   }
 
   const handleToggleArchive = async (e: Engagement) => {
-    setEditError(null)
+    const archive = e.status === 'archived' ? false : true
     try {
       await updateEngagement.mutateAsync({ id: e.id, status: e.status === 'archived' ? 'active' : 'archived' })
       setEditingId(null)
+      toast.success(archive ? 'Engagement archived' : 'Engagement restored')
     } catch (err: any) {
-      setEditError(err?.response?.data?.detail?.toString?.() || 'Could not change archive state')
+      toast.error(errText(err, archive ? 'Could not archive engagement' : 'Could not restore engagement'))
     }
   }
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
     const scope = form.authorized_scope.split(',').map((s) => s.trim()).filter(Boolean)
-    setCreateError(null)
     try {
       await createEngagement.mutateAsync({
         client_name: form.client_name,
@@ -259,19 +254,24 @@ export default function Engagements() {
       })
       setShowForm(false)
       setForm({ client_name: '', engagement_name: '', authorized_scope: '', start_date: '', end_date: '' })
+      toast.success('Engagement created')
     } catch (err: any) {
-      setCreateError(err?.response?.data?.detail?.toString?.() || 'Failed to create engagement')
+      toast.error(errText(err, 'Failed to create engagement'))
     }
   }
 
   const handleDelete = async (id: string) => {
     setConfirmDelete(null)
-    await deleteEngagement.mutateAsync(id)
+    try {
+      await deleteEngagement.mutateAsync(id)
+      toast.success('Engagement deleted')
+    } catch (err: any) {
+      toast.error(errText(err, 'Could not delete engagement'))
+    }
   }
 
   const submitDeleteRequest = async () => {
     if (!deleteRequestFor) return
-    setDeleteReqError(null)
     try {
       await createDeletionRequest.mutateAsync({
         target_type: 'engagement',
@@ -280,8 +280,9 @@ export default function Engagements() {
       })
       setDeleteRequestFor(null)
       setDeleteReason('')
+      toast.success('Deletion request submitted for admin approval')
     } catch (err: any) {
-      setDeleteReqError(err?.response?.data?.detail?.toString?.() || 'Could not submit deletion request')
+      toast.error(errText(err, 'Could not submit deletion request'))
     }
   }
 
@@ -379,11 +380,6 @@ export default function Engagements() {
               </button>
               <span className="text-xs text-gray-500">the engagement can be edited later</span>
             </div>
-            {createError && (
-              <div className="mt-3 whitespace-pre-line rounded-md border border-red-800/60 bg-red-950/30 px-3 py-2 text-sm text-red-400">
-                {createError}
-              </div>
-            )}
           </div>
         </form>
       )}
@@ -409,7 +405,6 @@ export default function Engagements() {
               e={e}
               editing={editingId === e.id}
               editForm={editForm}
-              editError={editingId === e.id ? editError : null}
               onStartEdit={() => startEdit(e)}
               onCancelEdit={() => setEditingId(null)}
               onEditChange={(patch) => setEditForm((f) => ({ ...f, ...patch }))}
@@ -477,11 +472,8 @@ export default function Engagements() {
               placeholder="Why should this engagement be removed?"
               className={inputCls}
             />
-            {deleteReqError && (
-              <p className="mt-2 text-sm text-red-400">{deleteReqError}</p>
-            )}
             <div className="mt-4 flex items-center justify-end gap-2">
-              <ActionButton tone="ghost" onClick={() => { setDeleteRequestFor(null); setDeleteReason(''); setDeleteReqError(null) }}>
+              <ActionButton tone="ghost" onClick={() => { setDeleteRequestFor(null); setDeleteReason('') }}>
                 Cancel
               </ActionButton>
               <PrimaryButton onClick={submitDeleteRequest} disabled={createDeletionRequest.isPending}>

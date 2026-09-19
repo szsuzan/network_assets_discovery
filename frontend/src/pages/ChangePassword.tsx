@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useChangePassword } from '../hooks/useApi'
 import { useTheme } from '../lib/theme'
+import { errText } from '../lib/errors'
+import { Spinner } from '../components/ui'
 import subnexLogo from '../assets/subnex-logo.svg'
 import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
@@ -41,7 +43,7 @@ export default function ChangePassword() {
         navigate('/login')
         return
       }
-      setError(err.response?.data?.detail || 'Could not change password')
+      setError(errText(err, 'Could not change password'))
     }
   }
 
@@ -98,8 +100,9 @@ export default function ChangePassword() {
           <button
             type="submit"
             disabled={change.isPending}
-            className="w-full rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            className="inline-flex w-full items-center justify-center gap-2 rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
+            {change.isPending && <Spinner className="h-4 w-4" />}
             {change.isPending ? 'Updating...' : 'Update password'}
           </button>
         </form>

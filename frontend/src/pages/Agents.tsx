@@ -11,6 +11,8 @@ import {
   type AgentInfo,
 } from '../hooks/useApi'
 import { StatCard, Chip, DotPill, ActionButton } from '../components/ui'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 type Os = 'windows' | 'unix'
 
@@ -401,6 +403,7 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
   const health = useAgentHealth()
   const restart = useRestartAgent()
   const updateAgent = useUpdateAgent()
+  const toast = useToast()
   const [setupOpen, setSetupOpen] = useState(false)
   const [healthInfo, setHealthInfo] = useState<AgentHealth | null>(null)
   const [healthError, setHealthError] = useState<string | null>(null)
@@ -437,29 +440,37 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
     try {
       const r = await resetKey.mutateAsync(agent.id)
       setRotatedKey(r.api_key)
-    } catch (e: any) {
-      setHealthError(`key rotation failed: ${e?.response?.data?.detail || 'unexpected error'}`)
+      toast.success('Agent key rotated')
+    } catch (e) {
+      toast.error(errText(e, 'Key rotation failed'))
     }
   }
 
   const requestRestart = async () => {
-    setHealthError(null)
     try {
       await restart.mutateAsync(agent.id)
       setRestartRequested(true)
-    } catch (e: any) {
-      setHealthError(`restart request failed: ${e?.response?.data?.detail || 'unexpected error'}`)
+      toast.info('Restart requested — agent will self-restart on its next heartbeat')
+    } catch (e) {
+      toast.error(errText(e, 'Restart request failed'))
     }
   }
 
   const requestUpdate = async () => {
-    setHealthError(null)
     try {
       await updateAgent.mutateAsync(agent.id)
       setUpdateRequested(true)
-    } catch (e: any) {
-      setHealthError(`update request failed: ${e?.response?.data?.detail || 'unexpected error'}`)
+      toast.info('Update requested — agent will pull and re-launch the new build')
+    } catch (e) {
+      toast.error(errText(e, 'Update request failed'))
     }
+  }
+
+  const removeAgent = () => {
+    del.mutate(agent.id, {
+      onSuccess: () => toast.success(`Agent "${agent.name}" removed`),
+      onError: (e) => toast.error(errText(e, 'Failed to remove agent')),
+    })
   }
 
   return (
@@ -498,7 +509,7 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
           onRestart={requestRestart}
           onUpdate={requestUpdate}
           onReset={rotate}
-          onDelete={() => del.mutate(agent.id)}
+          onDelete={removeAgent}
           busy={health.isPending}
           setupOpen={setupOpen}
         />
@@ -649,6 +660,7 @@ function FirstRunBanner({ name, subnets, apiKey, onClose }: {
 export default function Agents() {
   const { data: agents, isLoading } = useAgents()
   const create = useCreateAgent()
+  const toast = useToast()
   const now = useNow(15000)
   const [os, setOs] = useState<Os>('windows')
   const [formOpen, setFormOpen] = useState(false)
@@ -663,16 +675,21 @@ export default function Agents() {
 
   const submit = async () => {
     if (!name.trim()) return
-    const res = await create.mutateAsync({
-      name: name.trim(),
-      subnets: subnets.split(',').map((s) => s.trim()).filter(Boolean),
-      notes,
-    })
-    setNewAgent({ name: res.name, subnets, apiKey: res.api_key })
-    setName('')
-    setSubnets('')
-    setNotes('')
-    setFormOpen(false)
+    try {
+      const res = await create.mutateAsync({
+        name: name.trim(),
+        subnets: subnets.split(',').map((s) => s.trim()).filter(Boolean),
+        notes,
+      })
+      setNewAgent({ name: res.name, subnets, apiKey: res.api_key })
+      toast.success(`Agent "${res.name}" created — copy the API key now`)
+      setName('')
+      setSubnets('')
+      setNotes('')
+      setFormOpen(false)
+    } catch (e) {
+      toast.error(errText(e, 'Failed to create agent'))
+    }
   }
 
   if (isLoading) return <div className="py-16 text-center text-gray-400">Loading agents…</div>

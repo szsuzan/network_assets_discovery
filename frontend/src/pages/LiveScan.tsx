@@ -14,6 +14,8 @@ import {
 import { StatusBadge } from '../components/Badge'
 import { DeviceIcon, SeverityDot } from '../components/SeverityBadge'
 import ScanNav from '../components/ScanNav'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 interface WSMessage {
   type: string
@@ -128,6 +130,7 @@ export default function LiveScan() {
   const stopScan = useStopScan()
   const pauseScan = usePauseScan()
   const resumeScan = useResumeScan()
+  const toast = useToast()
 
   const wsUrl = useMemo(() => {
     const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws'
@@ -385,17 +388,34 @@ export default function LiveScan() {
 
   const handleStop = async () => {
     if (scanId) {
-      await stopScan.mutateAsync(scanId)
-      navigate(0)
+      try {
+        await stopScan.mutateAsync(scanId)
+        toast.success('Scan stopped')
+        navigate(0)
+      } catch (err) {
+        toast.error(errText(err, 'Could not stop scan'))
+      }
     }
   }
 
   const handlePause = async () => {
-    if (scanId) await pauseScan.mutateAsync(scanId)
+    if (!scanId) return
+    try {
+      await pauseScan.mutateAsync(scanId)
+      toast.success('Scan paused')
+    } catch (err) {
+      toast.error(errText(err, 'Could not pause scan'))
+    }
   }
 
   const handleResume = async () => {
-    if (scanId) await resumeScan.mutateAsync(scanId)
+    if (!scanId) return
+    try {
+      await resumeScan.mutateAsync(scanId)
+      toast.success('Scan resumed')
+    } catch (err) {
+      toast.error(errText(err, 'Could not resume scan'))
+    }
   }
 
   const formatElapsed = (s: number) => {

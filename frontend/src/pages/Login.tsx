@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useLogin } from '../hooks/useApi'
 import { useTheme } from '../lib/theme'
+import { errText } from '../lib/errors'
+import { Spinner } from '../components/ui'
 import subnexLogo from '../assets/subnex-logo.svg'
 import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
@@ -29,7 +31,7 @@ export default function Login() {
         navigate('/')
       }
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Login failed')
+      setError(errText(err, 'Login failed'))
     }
   }
 
@@ -80,8 +82,9 @@ export default function Login() {
           <button
             type="submit"
             disabled={login.isPending}
-            className="w-full rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            className="inline-flex w-full items-center justify-center gap-2 rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           >
+            {login.isPending && <Spinner className="h-4 w-4" />}
             {login.isPending ? 'Signing in...' : 'Sign in'}
           </button>
         </form>

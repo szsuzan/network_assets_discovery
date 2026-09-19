@@ -14,6 +14,8 @@ import {
 } from '../lib/types'
 import ScanNav from '../components/ScanNav'
 import RiskRulesPanel from '../components/RiskRulesPanel'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const STATUS_COLORS: Record<string, string> = {
   open: 'bg-gray-800 text-gray-300',
@@ -79,24 +81,31 @@ export default function Findings() {
   const { engagementId, scanId } = useParams()
   const { data: findings } = useFindings(scanId)
   const patchFinding = usePatchFinding()
+  const toast = useToast()
 
   const [groupBy, setGroupBy] = useState<'severity' | 'type' | 'host'>('severity')
   const [notesDraft, setNotesDraft] = useState<Record<string, string>>({})
   const [historyOpen, setHistoryOpen] = useState<Record<string, boolean>>({})
   const [rulesOpen, setRulesOpen] = useState(false)
 
-  const patch = (f: Finding, data: Partial<Finding>) => {
-    patchFinding.mutate({ id: f.id, data })
+  const patch = (f: Finding, data: Partial<Finding>, successMsg?: string) => {
+    patchFinding.mutate(
+      { id: f.id, data },
+      {
+        onSuccess: () => successMsg && toast.success(successMsg),
+        onError: (err) => toast.error(errText(err, 'Failed to update finding')),
+      },
+    )
   }
 
   const toggleIncluded = (f: Finding) => {
-    patch(f, { included_in_report: !f.included_in_report })
+    patch(f, { included_in_report: !f.included_in_report }, f.included_in_report ? 'Removed from report' : 'Included in report')
   }
 
   const saveNotes = (f: Finding) => {
     const draft = notesDraft[f.id]
     if (draft === undefined) return
-    patch(f, { notes: draft.length ? draft : null })
+    patch(f, { notes: draft.length ? draft : null }, 'Notes saved')
   }
 
   const grouped = useMemo(() => {
@@ -262,7 +271,7 @@ export default function Findings() {
                         <label className="mb-1 block text-[12px] uppercase tracking-wide text-gray-500">Status</label>
                         <select
                           value={f.status}
-                          onChange={(e) => patch(f, { status: e.target.value })}
+                          onChange={(e) => patch(f, { status: e.target.value }, `Status set to ${FINDING_STATUS_LABELS[e.target.value] || e.target.value}`)}
                           className="w-full rounded border border-gray-700 bg-gray-950 px-2 py-1.5 text-sm text-white outline-none focus:border-blue-500"
                         >
                           {FINDING_STATUSES.map((s) => <option key={s} value={s}>{FINDING_STATUS_LABELS[s]}</option>)}

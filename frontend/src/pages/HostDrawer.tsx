@@ -4,15 +4,17 @@ import { useHostDetail, usePatchHost } from '../hooks/useApi'
 import { DeviceIcon, SeverityBadge } from '../components/SeverityBadge'
 import { DEVICE_TYPE_LABELS, normalizeDeviceType } from '../lib/types'
 import ScanNav from '../components/ScanNav'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 export default function HostDrawer() {
   const { engagementId, scanId, hostIp } = useParams()
   const { data: host, isLoading } = useHostDetail(scanId, hostIp)
   const patchHost = usePatchHost(scanId!, hostIp!)
+  const toast = useToast()
 
   const [notes, setNotes] = useState('')
   const [tagInput, setTagInput] = useState('')
-  const [saved, setSaved] = useState(false)
   const [expandedPorts, setExpandedPorts] = useState<Set<string>>(new Set())
 
   const togglePort = (portId: string) => {
@@ -32,20 +34,33 @@ export default function HostDrawer() {
   }, [host])
 
   const saveNotes = async () => {
-    await patchHost.mutateAsync({ notes })
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    try {
+      await patchHost.mutateAsync({ notes })
+      toast.success('Host notes saved')
+    } catch (err) {
+      toast.error(errText(err, 'Could not save notes'))
+    }
   }
 
   const addTag = async () => {
     if (!tagInput.trim()) return
     const current = host?.tags || []
-    await patchHost.mutateAsync({ tags: [...current, tagInput.trim()] })
-    setTagInput('')
+    try {
+      await patchHost.mutateAsync({ tags: [...current, tagInput.trim()] })
+      setTagInput('')
+      toast.success(`Tag "${tagInput.trim()}" added`)
+    } catch (err) {
+      toast.error(errText(err, 'Could not add tag'))
+    }
   }
 
   const removeTag = async (tag: string) => {
-    await patchHost.mutateAsync({ tags: (host?.tags || []).filter((t) => t !== tag) })
+    try {
+      await patchHost.mutateAsync({ tags: (host?.tags || []).filter((t) => t !== tag) })
+      toast.success(`Tag "${tag}" removed`)
+    } catch (err) {
+      toast.error(errText(err, 'Could not remove tag'))
+    }
   }
 
   return (
@@ -114,16 +129,17 @@ export default function HostDrawer() {
               <h3 className="mb-2 text-sm font-medium text-gray-400">Notes</h3>
               <textarea
                 value={notes}
-                onChange={(e) => { setNotes(e.target.value); setSaved(false) }}
+                onChange={(e) => setNotes(e.target.value)}
                 placeholder="Add pentest notes for this host..."
                 rows={4}
                 className="w-full rounded border border-gray-700 bg-gray-800 p-2 text-sm text-white outline-none focus:border-blue-500"
               />
               <button
                 onClick={saveNotes}
-                className="mt-2 rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700"
+                disabled={patchHost.isPending}
+                className="mt-2 rounded bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
               >
-                {saved ? '✓ Saved' : 'Save Notes'}
+                Save Notes
               </button>
             </div>
           </div>

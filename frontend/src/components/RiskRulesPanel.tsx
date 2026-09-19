@@ -5,6 +5,8 @@ import {
   useReanalyze,
   type RiskRule,
 } from '../hooks/useApi'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const SEVERITIES = ['critical', 'concerning', 'notable', 'info']
 
@@ -12,6 +14,7 @@ export default function RiskRulesPanel({ scanId, onClose }: { scanId: string; on
   const { data: rules } = useRiskRules(scanId)
   const update = useUpdateRiskRules(scanId)
   const reanalyze = useReanalyze(scanId)
+  const toast = useToast()
   const [draft, setDraft] = useState<Record<string, { enabled: boolean; severity: string | null }>>({})
 
   const list = (rules || []).map((r) => {
@@ -30,18 +33,37 @@ export default function RiskRulesPanel({ scanId, onClose }: { scanId: string; on
   const save = () => {
     update.mutate(
       list.map((r) => ({ key: r.key, enabled: r.enabled, severity: r.severity })),
-      { onSuccess: () => setDraft({}) }
+      {
+        onSuccess: () => {
+          setDraft({})
+          toast.success('Risk rules saved')
+        },
+        onError: (err) => toast.error(errText(err, 'Failed to save rules')),
+      }
     )
   }
 
   const applyAndClose = () => {
-    if (dirty) {
+    const run = () =>
       update.mutate(
         list.map((r) => ({ key: r.key, enabled: r.enabled, severity: r.severity })),
-        { onSuccess: () => reanalyze.mutate() }
+        {
+          onSuccess: () => {
+            reanalyze.mutate(undefined, {
+              onSuccess: () => toast.success('Rules saved — re-analysis started'),
+              onError: (err) => toast.error(errText(err, 'Rules saved, but re-analysis failed')),
+            })
+          },
+          onError: (err) => toast.error(errText(err, 'Failed to save rules')),
+        }
       )
+    if (dirty) {
+      run()
     } else {
-      reanalyze.mutate()
+      reanalyze.mutate(undefined, {
+        onSuccess: () => toast.success('Re-analysis started'),
+        onError: (err) => toast.error(errText(err, 'Could not start re-analysis')),
+      })
     }
   }
 

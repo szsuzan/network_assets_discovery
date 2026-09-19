@@ -11,6 +11,8 @@ import {
 import { Chip, DotPill, ActionButton, PrimaryButton } from '../components/ui'
 import { USER_ROLES, DELETION_REQUEST_LABELS } from '../lib/types'
 import { currentUserId } from '../lib/auth'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const inputCls =
   'w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-indigo-500'
@@ -30,25 +32,22 @@ export default function Administration() {
   const approveRequest = useApproveDeletionRequest()
   const rejectRequest = useRejectDeletionRequest()
   const selfId = currentUserId()
+  const toast = useToast()
 
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ email: '', password: '', role: 'pentester' })
   const [formError, setFormError] = useState<string | null>(null)
-  const [formOk, setFormOk] = useState<string | null>(null)
 
   const [resetUser, setResetUser] = useState<string | null>(null)
   const [resetPw, setResetPw] = useState('')
   const [resetError, setResetError] = useState<string | null>(null)
-  const [resetOk, setResetOk] = useState<string | null>(null)
 
   const [rejectTarget, setRejectTarget] = useState<string | null>(null)
   const [rejectReason, setRejectReason] = useState('')
-  const [actionError, setActionError] = useState<string | null>(null)
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
     setFormError(null)
-    setFormOk(null)
     if (form.password.length < 10) {
       setFormError('Password must be at least 10 characters')
       return
@@ -61,33 +60,32 @@ export default function Administration() {
       })
       setForm({ email: '', password: '', role: 'pentester' })
       setShowForm(false)
-      setFormOk(`Created ${created.email} — they must set a password on first login.`)
-    } catch (err: any) {
-      setFormError(err?.response?.data?.detail?.toString?.() || 'Failed to create user')
+      toast.success(`Created ${created.email} — they must set a password on first login`)
+    } catch (err) {
+      setFormError(errText(err, 'Failed to create user'))
     }
   }
 
   const handleRoleChange = async (id: string, role: string) => {
-    setActionError(null)
     try {
       await updateUser.mutateAsync({ id, data: { role } })
-    } catch (err: any) {
-      setActionError(err?.response?.data?.detail?.toString?.() || 'Could not change role')
+      toast.success(`Role changed to ${role}`)
+    } catch (err) {
+      toast.error(errText(err, 'Could not change role'))
     }
   }
 
   const handleActiveToggle = async (id: string, active: boolean) => {
-    setActionError(null)
     try {
       await updateUser.mutateAsync({ id, data: { active } })
-    } catch (err: any) {
-      setActionError(err?.response?.data?.detail?.toString?.() || 'Could not update account')
+      toast.success(active ? 'Account enabled' : 'Account disabled')
+    } catch (err) {
+      toast.error(errText(err, 'Could not update account'))
     }
   }
 
   const handleReset = async (id: string) => {
     setResetError(null)
-    setResetOk(null)
     if (resetPw.length < 10) {
       setResetError('Password must be at least 10 characters')
       return
@@ -96,18 +94,18 @@ export default function Administration() {
       await resetPassword.mutateAsync({ id, password: resetPw })
       setResetPw('')
       setResetUser(null)
-      setResetOk('Password reset — the user must change it on next login and all old sessions were signed out.')
-    } catch (err: any) {
-      setResetError(err?.response?.data?.detail?.toString?.() || 'Failed to reset password')
+      toast.success('Password reset — the user must change it on next login; old sessions signed out')
+    } catch (err) {
+      setResetError(errText(err, 'Failed to reset password'))
     }
   }
 
   const handleApprove = async (id: string) => {
-    setActionError(null)
     try {
       await approveRequest.mutateAsync(id)
-    } catch (err: any) {
-      setActionError(err?.response?.data?.detail?.toString?.() || 'Could not approve request')
+      toast.success('Deletion request approved and executed')
+    } catch (err) {
+      toast.error(errText(err, 'Could not approve request'))
     }
   }
 
@@ -116,8 +114,9 @@ export default function Administration() {
       await rejectRequest.mutateAsync({ id, reason: rejectReason || undefined })
       setRejectTarget(null)
       setRejectReason('')
-    } catch (err: any) {
-      setActionError(err?.response?.data?.detail?.toString?.() || 'Could not reject request')
+      toast.success('Deletion request rejected')
+    } catch (err) {
+      toast.error(errText(err, 'Could not reject request'))
     }
   }
 
@@ -133,22 +132,6 @@ export default function Administration() {
           from pentesters for approval.
         </p>
       </div>
-
-      {actionError && (
-        <div className="mb-4 rounded-md border border-red-800/60 bg-red-950/30 px-3 py-2 text-sm text-red-400">
-          {actionError}
-        </div>
-      )}
-      {formOk && (
-        <div className="mb-4 rounded-md border border-emerald-800/60 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-400">
-          {formOk}
-        </div>
-      )}
-      {resetOk && (
-        <div className="mb-4 rounded-md border border-emerald-800/60 bg-emerald-950/30 px-3 py-2 text-sm text-emerald-400">
-          {resetOk}
-        </div>
-      )}
 
       <section className="mb-8 overflow-hidden rounded-xl border border-gray-800 bg-gray-900">
         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-800 px-5 py-3">
@@ -289,7 +272,7 @@ export default function Administration() {
                             <ActionButton tone="ghost" onClick={() => { setResetUser(null); setResetPw(''); setResetError(null) }}>Cancel</ActionButton>
                           </div>
                         ) : (
-                          <ActionButton tone="ghost" onClick={() => { setResetUser(u.id); setResetError(null); setResetOk(null) }}>
+                          <ActionButton tone="ghost" onClick={() => { setResetUser(u.id); setResetError(null) }}>
                             Reset…
                           </ActionButton>
                         )}

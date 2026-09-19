@@ -18,6 +18,8 @@ import {
 import { StatusBadge } from '../components/Badge'
 import type { Scan } from '../lib/types'
 import { isAdmin, canMutate, currentUserId } from '../lib/auth'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const ACTIVE_STATUSES = ['queued', 'discovering', 'scanning', 'fingerprinting', 'analyzing', 'paused', 'agent_running', 'reverifying']
 
@@ -42,6 +44,7 @@ export default function EngagementDetail() {
   const pauseScan = usePauseScan()
   const resumeScan = useResumeScan()
   const reverifyScan = useReverifyScan()
+  const toast = useToast()
   const navigate = useNavigate()
   const { data: engagement } = useEngagement(engagementId)
   const { data: scans } = useEngagementScans(engagementId)
@@ -57,7 +60,6 @@ export default function EngagementDetail() {
   const [confirmDeleteScan, setConfirmDeleteScan] = useState<string | null>(null)
   const [deleteReqScan, setDeleteReqScan] = useState<Scan | null>(null)
   const [deleteScanReason, setDeleteScanReason] = useState('')
-  const [deleteScanReqError, setDeleteScanReqError] = useState<string | null>(null)
   const [revertTarget, setRevertTarget] = useState<Scan | null>(null)
   const updateScan = useUpdateScan()
   const [editScanId, setEditScanId] = useState<string | null>(null)
@@ -68,8 +70,6 @@ export default function EngagementDetail() {
     port_range: '1-10000',
     protocol: 'tcp',
   })
-  const [editScanError, setEditScanError] = useState<string | null>(null)
-
   const openScanEdit = (s: Scan) => {
     setEditScanId(s.id)
     setEditScanForm({
@@ -79,11 +79,9 @@ export default function EngagementDetail() {
       port_range: s.port_range,
       protocol: s.protocol,
     })
-    setEditScanError(null)
   }
 
   const saveScanEdit = async (s: Scan) => {
-    setEditScanError(null)
     const finished = !ACTIVE_STATUSES.includes(s.status)
     const data: Record<string, any> = { name: editScanForm.name.trim() }
     if (finished) {
@@ -95,8 +93,9 @@ export default function EngagementDetail() {
     try {
       await updateScan.mutateAsync({ scanId: s.id, data })
       setEditScanId(null)
-    } catch (err: any) {
-      setEditScanError(err?.response?.data?.detail || 'Failed to update scan')
+      toast.success('Scan updated')
+    } catch (err) {
+      toast.error(errText(err, 'Failed to update scan'))
     }
   }
 
@@ -122,8 +121,6 @@ export default function EngagementDetail() {
     start_date: '',
     end_date: '',
   })
-  const [editError, setEditError] = useState<string | null>(null)
-
   const startEdit = () => {
     if (!engagement) return
     setEditForm({
@@ -133,13 +130,11 @@ export default function EngagementDetail() {
       start_date: engagement.start_date || '',
       end_date: engagement.end_date || '',
     })
-    setEditError(null)
     setEditing(true)
   }
 
   const handleUpdate = async (e: React.FormEvent) => {
     e.preventDefault()
-    setEditError(null)
     const scope = editForm.authorized_scope.split(/[\s,]+/).filter(Boolean)
     try {
       await updateEngagement.mutateAsync({
@@ -151,27 +146,27 @@ export default function EngagementDetail() {
         end_date: editForm.end_date || null,
       })
       setEditing(false)
-    } catch (err: any) {
-      setEditError(err?.response?.data?.detail || 'Failed to update engagement')
+      toast.success('Engagement updated')
+    } catch (err) {
+      toast.error(errText(err, 'Failed to update engagement'))
     }
   }
 
   const handleToggleArchive = async () => {
-    setEditError(null)
     try {
       await updateEngagement.mutateAsync({
         id: engagementId!,
         status: isArchived ? 'active' : 'archived',
       })
       setEditing(false)
-    } catch (err: any) {
-      setEditError(err?.response?.data?.detail || 'Could not change archive state')
+      toast.success(isArchived ? 'Engagement restored' : 'Engagement archived')
+    } catch (err) {
+      toast.error(errText(err, 'Could not change archive state'))
     }
   }
 
   const submitScanDeleteRequest = async () => {
     if (!deleteReqScan) return
-    setDeleteScanReqError(null)
     try {
       await createDeletionRequest.mutateAsync({
         target_type: 'scan',
@@ -180,8 +175,9 @@ export default function EngagementDetail() {
       })
       setDeleteReqScan(null)
       setDeleteScanReason('')
-    } catch (err: any) {
-      setDeleteScanReqError(err?.response?.data?.detail || 'Could not submit deletion request')
+      toast.success('Deletion request submitted for admin review')
+    } catch (err) {
+      toast.error(errText(err, 'Could not submit deletion request'))
     }
   }
 
@@ -203,8 +199,14 @@ export default function EngagementDetail() {
         <span className="inline-flex items-center gap-1.5">
           <button
             onClick={async () => {
-              await deleteScan.mutateAsync(s.id)
-              setConfirmDeleteScan(null)
+              try {
+                await deleteScan.mutateAsync(s.id)
+                toast.success('Scan deleted')
+              } catch (err) {
+                toast.error(errText(err, 'Failed to delete scan'))
+              } finally {
+                setConfirmDeleteScan(null)
+              }
             }}
             disabled={deleteScan.isPending}
             className="rounded bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
@@ -250,14 +252,11 @@ export default function EngagementDetail() {
   const diff = useScanDiff(diffScanA || undefined, diffScanB || undefined)
   const [expandedPortHosts, setExpandedPortHosts] = useState<Set<string>>(new Set())
 
-  const [startError, setStartError] = useState<string | null>(null)
-
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!form.scope_confirmed) return
     const targets = form.targets.split(/[\s,]+/).filter(Boolean)
     if (targets.length === 0) return
-    setStartError(null)
     try {
       const scan = await startScan.mutateAsync({
         name: form.name.trim() || undefined,
@@ -267,9 +266,37 @@ export default function EngagementDetail() {
         protocol: form.protocol,
         mode: form.mode,
       })
+      toast.success('Scan started')
       navigate(`/engagements/${engagementId}/scans/${scan.id}/live`)
-    } catch (err: any) {
-      setStartError(err?.response?.data?.detail || 'Failed to start scan')
+    } catch (err) {
+      toast.error(errText(err, 'Failed to start scan'))
+    }
+  }
+
+  const handlePause = async (id: string) => {
+    try {
+      await pauseScan.mutateAsync(id)
+      toast.success('Scan paused')
+    } catch (err) {
+      toast.error(errText(err, 'Could not pause scan'))
+    }
+  }
+
+  const handleResume = async (id: string) => {
+    try {
+      await resumeScan.mutateAsync(id)
+      toast.success('Scan resumed')
+    } catch (err) {
+      toast.error(errText(err, 'Could not resume scan'))
+    }
+  }
+
+  const handleStop = async (id: string) => {
+    try {
+      await stopScan.mutateAsync(id)
+      toast.success('Scan stopped')
+    } catch (err) {
+      toast.error(errText(err, 'Could not stop scan'))
     }
   }
 
@@ -389,9 +416,6 @@ export default function EngagementDetail() {
               </div>
             </div>
           </div>
-          {editError && (
-            <p className="mt-3 whitespace-pre-line text-sm text-red-400">{editError}</p>
-          )}
           <button
             type="submit"
             disabled={updateEngagement.isPending}
@@ -539,11 +563,6 @@ export default function EngagementDetail() {
           >
             {startScan.isPending ? 'Starting...' : 'Start Scan'}
           </button>
-          {startError && (
-            <div className="mt-3 whitespace-pre-line rounded border border-red-800 bg-red-950/50 px-3 py-2 text-sm text-red-400">
-              {startError}
-            </div>
-          )}
           {!form.targets.trim() && (
             <p className="mt-2 text-xs text-amber-400">Enter at least one target (IP or CIDR) to start a scan.</p>
           )}
@@ -611,21 +630,21 @@ export default function EngagementDetail() {
                         </button>
                         {s.status === 'paused' ? (
                           <button
-                            onClick={() => resumeScan.mutate(s.id)}
+                            onClick={() => handleResume(s.id)}
                             className="rounded border border-blue-600 px-2 py-1 text-xs text-blue-400 hover:bg-blue-600/20"
                           >
                             Resume
                           </button>
                         ) : (
                           <button
-                            onClick={() => pauseScan.mutate(s.id)}
+                            onClick={() => handlePause(s.id)}
                             className="rounded border border-amber-600 px-2 py-1 text-xs text-amber-400 hover:bg-amber-600/20"
                           >
                             Pause
                           </button>
                         )}
                         <button
-                          onClick={() => stopScan.mutate(s.id)}
+                          onClick={() => handleStop(s.id)}
                           className="rounded border border-red-600 px-2 py-1 text-xs text-red-400 hover:bg-red-600/20"
                         >
                           Stop
@@ -717,9 +736,6 @@ export default function EngagementDetail() {
                             </div>
                           )}
                         </div>
-                        {editScanError && (
-                          <p className="mt-2 whitespace-pre-line text-xs text-red-400">{editScanError}</p>
-                        )}
                         <div className="mt-3 flex items-center gap-2">
                           <button
                             onClick={() => saveScanEdit(s)}
@@ -882,8 +898,11 @@ export default function EngagementDetail() {
                   reverifyScan.mutate(
                     { scanId: revertTarget.id, check_new_hosts: false },
                     {
-                      onSuccess: (scan) =>
-                        navigate(`/engagements/${engagementId}/scans/${scan.id}/live`),
+                      onSuccess: (scan) => {
+                        toast.success('Re-verify started')
+                        navigate(`/engagements/${engagementId}/scans/${scan.id}/live`)
+                      },
+                      onError: (err) => toast.error(errText(err, 'Could not start re-verify')),
                       onSettled: () => setRevertTarget(null),
                     }
                   )
@@ -898,8 +917,11 @@ export default function EngagementDetail() {
                   reverifyScan.mutate(
                     { scanId: revertTarget.id, check_new_hosts: true },
                     {
-                      onSuccess: (scan) =>
-                        navigate(`/engagements/${engagementId}/scans/${scan.id}/live`),
+                      onSuccess: (scan) => {
+                        toast.success('Re-verify started')
+                        navigate(`/engagements/${engagementId}/scans/${scan.id}/live`)
+                      },
+                      onError: (err) => toast.error(errText(err, 'Could not start re-verify')),
                       onSettled: () => setRevertTarget(null),
                     }
                   )
@@ -935,12 +957,9 @@ export default function EngagementDetail() {
               placeholder="Why should this scan be removed?"
               className="w-full rounded border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
             />
-            {deleteScanReqError && (
-              <p className="mt-2 text-sm text-red-400">{deleteScanReqError}</p>
-            )}
             <div className="mt-4 flex items-center justify-end gap-2">
               <button
-                onClick={() => { setDeleteReqScan(null); setDeleteScanReason(''); setDeleteScanReqError(null) }}
+                onClick={() => { setDeleteReqScan(null); setDeleteScanReason('') }}
                 className="rounded bg-gray-700 px-4 py-2 text-sm font-medium text-white hover:bg-gray-600"
               >
                 Cancel

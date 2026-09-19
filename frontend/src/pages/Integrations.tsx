@@ -8,6 +8,8 @@ import {
   type Webhook,
 } from '../hooks/useApi'
 import { StatCard, Chip, DotPill, ActionButton, PrimaryButton } from '../components/ui'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const EVENTS = [
   { key: 'finding_created', label: 'Finding created' },
@@ -154,6 +156,7 @@ export default function Integrations() {
   const update = useUpdateWebhook()
   const remove = useDeleteWebhook()
   const test = useTestWebhook()
+  const toast = useToast()
 
   const [showForm, setShowForm] = useState(false)
   const [form, setForm] = useState({ name: '', url: '', secret: '', events: EVENTS.map((e) => e.key) })
@@ -165,7 +168,9 @@ export default function Integrations() {
         onSuccess: () => {
           setShowForm(false)
           setForm({ name: '', url: '', secret: '', events: EVENTS.map((e) => e.key) })
+          toast.success('Webhook created')
         },
+        onError: (err) => toast.error(errText(err, 'Failed to create webhook')),
       },
     )
   }
@@ -285,9 +290,27 @@ export default function Integrations() {
               key={wh.id}
               wh={wh}
               testPending={test.isPending}
-              onTest={() => test.mutate(wh.id)}
-              onToggleEnabled={() => update.mutate({ id: wh.id, data: { enabled: !wh.enabled } })}
-              onDelete={() => remove.mutate(wh.id)}
+              onTest={() =>
+                test.mutate(wh.id, {
+                  onSuccess: () => toast.success(`Test delivery to "${wh.name}" succeeded`),
+                  onError: (err) => toast.error(errText(err, `Test delivery to "${wh.name}" failed`)),
+                })
+              }
+              onToggleEnabled={() =>
+                update.mutate(
+                  { id: wh.id, data: { enabled: !wh.enabled } },
+                  {
+                    onSuccess: () => toast.success(`Webhook ${wh.enabled ? 'disabled' : 'enabled'}`),
+                    onError: (err) => toast.error(errText(err, 'Failed to update webhook')),
+                  },
+                )
+              }
+              onDelete={() =>
+                remove.mutate(wh.id, {
+                  onSuccess: () => toast.success(`Webhook "${wh.name}" deleted`),
+                  onError: (err) => toast.error(errText(err, 'Failed to delete webhook')),
+                })
+              }
             />
           ))}
         </div>

@@ -5,6 +5,8 @@ import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveCo
 import { SEVERITY_COLORS, DEVICE_TYPE_LABELS, deviceTypeColor, normalizeDeviceType, FINDING_TYPE_LABELS, FINDING_STATUS_LABELS } from '../lib/types'
 import { SeverityBadge } from '../components/SeverityBadge'
 import ScanNav from '../components/ScanNav'
+import { useToast } from '../components/Toaster'
+import { errText } from '../lib/errors'
 
 const SEV_ORDER = ['critical', 'concerning', 'notable', 'info'] as const
 const SEV_WEIGHT = { critical: 10, concerning: 6, notable: 3, info: 1 } as const
@@ -25,6 +27,7 @@ export default function Report() {
   const { data: scan } = useScan(scanId)
   const { data: hosts } = useHosts(scanId)
   const { data: findings } = useFindings(scanId)
+  const toast = useToast()
   const [exporting, setExporting] = useState('')
 
   const deviceBreakdown = useMemo(() => {
@@ -84,19 +87,33 @@ export default function Report() {
 
   const handleExport = async (format: string) => {
     setExporting(format)
-    const token = localStorage.getItem('token')
-    const base = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
-    const res = await fetch(`${base}/api/scans/${scanId}/export?format=${format}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    })
-    const blob = await res.blob()
-    const url = window.URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `scan-${scanId}.${format}`
-    a.click()
-    window.URL.revokeObjectURL(url)
-    setExporting('')
+    try {
+      const token = localStorage.getItem('token')
+      const base = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '')
+      const res = await fetch(`${base}/api/scans/${scanId}/export?format=${format}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      if (!res.ok) {
+        let msg = `Export failed (HTTP ${res.status})`
+        try {
+          const body = await res.json()
+          msg = errText({ response: { data: body } }, msg)
+        } catch { /* non-JSON error body */ }
+        throw new Error(msg)
+      }
+      const blob = await res.blob()
+      const url = window.URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `scan-${scanId}.${format}`
+      a.click()
+      window.URL.revokeObjectURL(url)
+      toast.success(`Exported scan as ${format.toUpperCase()}`)
+    } catch (err) {
+      toast.error(errText(err, 'Export failed'))
+    } finally {
+      setExporting('')
+    }
   }
 
   const updateNextStep = (i: number, value: string) => {
