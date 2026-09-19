@@ -65,6 +65,10 @@ def _write_disk_key(key: str) -> None:
         os.makedirs(dirpath, exist_ok=True)
         with open(_key_file(), "w", encoding="utf-8") as fh:
             fh.write(key.strip())
+        try:
+            os.chmod(_key_file(), 0o600)
+        except (AttributeError, OSError):
+            pass  # Windows has no POSIX mode bits
     except Exception as e:
         print(f"[agent] could not persist API key to {_key_file()}: {e}")
     else:
@@ -156,6 +160,22 @@ class ApiClient:
         self.name = name
         self.timeout = timeout
         self.agent_id = "?"
+        self._warn_insecure_transport()
+
+    def _warn_insecure_transport(self) -> None:
+        """The API key, scan results and the self-update script all travel over
+        this connection — flag plain http to anything but loopback loudly."""
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(self.server)
+            if parsed.scheme == "http":
+                host = parsed.hostname or "?"
+                if host not in ("localhost", "127.0.0.1", "::1"):
+                    print("[agent] WARNING: talking to the server over CLEARTEXT http://"
+                          f"{host}. The API key and scan data are sent unencrypted; "
+                          "use https:// if the server supports TLS.")
+        except Exception:
+            pass
 
     def _request(self, method: str, path: str, payload=None):
         url = f"{self.server}{path}"

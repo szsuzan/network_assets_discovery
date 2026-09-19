@@ -58,6 +58,39 @@ async def _load_scan_for_user(db: AsyncSession, scan_id: uuid.UUID, user: User) 
     return scan
 
 
+async def _require_scan_read(db: AsyncSession, scan_id: uuid.UUID, user: User) -> Scan:
+    """Read access to a scan's data (hosts, findings, evidence, logs, export).
+
+    Admins and viewers may read any scan (viewers are read-only by design and
+    have no per-engagement membership yet). Pentesters may only read scans
+    inside engagements they created, mirroring the mutation scoping in
+    ``_load_scan_for_user`` so cross-client data stays isolated between
+    pentesters.
+    """
+    scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
+    if not scan:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    if user.role in ("admin", "viewer"):
+        return scan
+    engagement = (await db.execute(
+        select(Engagement).where(Engagement.id == scan.engagement_id))).scalar_one_or_none()
+    if engagement is not None and engagement.created_by == user.id:
+        return scan
+    raise HTTPException(status_code=403, detail="No access to this scan")
+
+
+async def _require_engagement_read(db: AsyncSession, engagement_id: uuid.UUID, user: User) -> Engagement:
+    """Read a single engagement subject to the same role policy as scans."""
+    engagement = (await db.execute(select(Engagement).where(Engagement.id == engagement_id))).scalar_one_or_none()
+    if not engagement:
+        raise HTTPException(status_code=404, detail="Engagement not found")
+    if user.role in ("admin", "viewer"):
+        return engagement
+    if engagement.created_by == user.id:
+        return engagement
+    raise HTTPException(status_code=403, detail="No access to this engagement")
+
+
 async def _require_engagement_access(db: AsyncSession, engagement_id: uuid.UUID, user: User) -> Engagement:
     engagement = (await db.execute(select(Engagement).where(Engagement.id == engagement_id))).scalar_one_or_none()
     if not engagement:
@@ -334,9 +367,7 @@ async def scan_logs(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=404, detail="Scan not found")
+    await _require_scan_read(db, scan_id, current_user)
     return read_console_log(scan_id)
 
 @router.get("/scans/{scan_id}/activity", response_model=List[dict])
@@ -345,6 +376,7 @@ async def scan_activity(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    await _require_scan_read(db, scan_id, current_user)
     from ..services.activity import read_activity
     return read_activity(str(scan_id))
 
@@ -354,10 +386,7 @@ async def get_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _require_scan_read(db, scan_id, current_user)
     open_count = await db.execute(
         select(func.count()).select_from(Port).join(Host, Host.id == Port.host_id)
         .where(Host.scan_id == scan.id, Port.state == "open")
@@ -566,6 +595,7 @@ async def list_hosts(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_scan_read(db, scan_id, current_user)
     from sqlalchemy import func
     query = select(Host).where(Host.scan_id == scan_id)
     
@@ -602,6 +632,7 @@ async def get_host_detail(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_scan_read(db, scan_id, current_user)
     result = await db.execute(
         select(Host)
         .options(selectinload(Host.ports), selectinload(Host.snmp))
@@ -630,7 +661,7 @@ async def get_host_detail(
     # re-scan and without a schema migration.
     try:
         d = SCAN_OUTPUT_DIR / str(scan_id)
-        safe = (host_ip or "all").replace("/", "_").replace(":", "_")
+        safe = re.sub(r"[^0-9A-Za-z._-]", "_", host_ip or "all")
         xml_path = d / f"fingerprint_{safe}.xml"
         if not xml_path.exists():
             return host_data
@@ -725,7 +756,7 @@ async def get_topology(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
+    scan = await _require_scan_read(db, scan_id, current_user)
     hosts_result = await db.execute(select(Host).where(Host.scan_id == scan_id, Host.status == "up"))
     hosts = hosts_result.scalars().all()
     find_host_findings = await db.execute(select(Finding).where(Finding.scan_id == scan_id))
@@ -743,6 +774,7 @@ async def list_findings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_scan_read(db, scan_id, current_user)
     query = select(Finding, Host).join(Host, Finding.host_id == Host.id, isouter=True).where(Finding.scan_id == scan_id)
     if severity:
         query = query.where(Finding.severity == severity)
@@ -835,6 +867,7 @@ async def finding_audit(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_scan_read(db, scan_id, current_user)
     result = await db.execute(
         select(FindingAudit)
         .where(FindingAudit.finding_id == finding_id)
@@ -849,6 +882,8 @@ async def diff_scans(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_scan_read(db, scan_id, current_user)
+    await _require_scan_read(db, other_scan_id, current_user)
     base_result = await db.execute(select(Host).where(Host.scan_id == scan_id))
     other_result = await db.execute(select(Host).where(Host.scan_id == other_scan_id))
     
@@ -908,9 +943,9 @@ async def list_risk_rules(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_scan_read(db, scan_id, current_user)
     from ..services.risk_rules import merged_rules, to_json
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
+    scan = (await db.execute(select(Scan).where(Scan.id == scan_id))).scalar_one_or_none()
     if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
     return to_json(merged_rules(scan.risk_rules))
@@ -985,10 +1020,26 @@ async def websocket_endpoint(websocket: WebSocket, scan_id: str):
     allowed = False
     async with AsyncSessionLocal() as db:
         user = (await db.execute(select(UserModel).where(UserModel.id == user_id))).scalar_one_or_none()
-        if user is not None and not getattr(user, "must_change_password", False):
+        # Enforce the same token-revocation and account checks the REST layer
+        # applies (auth._decode_user_from_bearer): a password change or admin
+        # disable bumps jwt_version, and disabled accounts must not stream live
+        # scan data.
+        ver_current = payload.get("ver", 0)
+        if (user is not None and getattr(user, "active", True)
+                and not getattr(user, "must_change_password", False)
+                and ver_current == getattr(user, "jwt_version", 0)):
             scan_row = (await db.execute(
                 select(ScanModel).where(ScanModel.id == scan_uuid))).scalar_one_or_none()
-            allowed = scan_row is not None
+            # Engagement-scoped read access, identical to _require_scan_read:
+            # admins/viewers may watch any scan, pentesters only their own.
+            if scan_row is not None and (user.role in ("admin", "viewer")):
+                allowed = True
+            elif scan_row is not None:
+                eng_row = (await db.execute(
+                    select(Engagement).where(Engagement.id == scan_row.engagement_id)
+                )).scalar_one_or_none()
+                if eng_row is not None and eng_row.created_by == user.id:
+                    allowed = True
 
     if not allowed:
         await websocket.close(code=4401)

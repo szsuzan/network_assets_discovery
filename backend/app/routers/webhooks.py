@@ -26,6 +26,7 @@ async def list_webhooks(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    await _require_manager(current_user)
     result = await db.execute(select(Webhook).order_by(Webhook.created_at.asc()))
     return result.scalars().all()
 

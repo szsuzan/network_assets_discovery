@@ -4,6 +4,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from .routers import auth, engagements, scans, export, agents, webhooks, settings, users, deletion_requests
 
 app = FastAPI(
@@ -19,6 +20,43 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add defence-in-depth response headers to every API response.
+
+    The CSP is deliberately strict but SPA-safe: the built UI ships only an
+    external hashed module script (no inline scripts), so `script-src 'self'`
+    cannot break it while still containing any stored/injected payload.
+    """
+
+    _HEADERS = {
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "strict-origin-when-cross-origin",
+        "Content-Security-Policy": (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "connect-src 'self' ws: wss:; "
+            "object-src 'none'; "
+            "frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'"
+        ),
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    }
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        for name, value in self._HEADERS.items():
+            if name not in response.headers:
+                response.headers[name] = value
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth.router)
 app.include_router(engagements.router)

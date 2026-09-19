@@ -30,6 +30,10 @@ async def list_settings(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # The settings snapshot contains operational values (SNMP community,
+    # agent keys related toggles, nmap profiles) — keep it manager-only so
+    # read-only viewers can't dump deployment configuration.
+    await _require_manager(current_user)
     return await settings_svc.asnapshot(db)
 
 

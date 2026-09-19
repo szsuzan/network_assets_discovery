@@ -10,6 +10,7 @@ import uuid
 from ..database import get_db
 from ..models import User, Scan, Host, Port, Finding, SNMPInfo, Engagement
 from ..auth import get_current_user
+from ..routers.scans import _require_scan_read
 
 router = APIRouter(prefix="/api/scans", tags=["exports"])
 
@@ -20,10 +21,7 @@ async def export_scan(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Scan).where(Scan.id == scan_id))
-    scan = result.scalar_one_or_none()
-    if not scan:
-        raise HTTPException(status_code=404, detail="Scan not found")
+    scan = await _require_scan_read(db, scan_id, current_user)
     
     hosts_result = await db.execute(select(Host).where(Host.scan_id == scan_id))
     hosts = [h for h in hosts_result.scalars().all() if h.status == "up"]

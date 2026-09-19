@@ -12,7 +12,7 @@ import json
 import logging
 import socket
 from datetime import datetime, timezone
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 
@@ -29,12 +29,36 @@ EVENT_SCAN_COMPLETED = "scan_completed"
 EVENT_HOST_DISCOVERED = "host_discovered"
 
 
+class _ValidatingRedirectHandler(HTTPRedirectHandler):
+    """Reject any redirect hop that would smuggle the request onto a
+    private/loopback address (SSRF via redirect chains)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: N802
+        target = newurl
+        location = headers.get("Location")
+        if location:
+            from urllib.parse import urljoin
+            target = urljoin(req.full_url, location)
+        try:
+            validate_webhook_url(target)
+        except ValueError as e:
+            self.parent.error = getattr(self.parent, "error", None)
+            raise URLError(f"redirect {code} to {target} blocked: {e}") from None
+        return super().redirect_request(req, fp, code, msg, headers, target)
+
+
+def _webhook_opener():
+    return build_opener(_ValidatingRedirectHandler())
+
+
 def validate_webhook_url(url: str) -> str:
     """Reject webhook URLs that could be used for SSRF.
 
     Only http/https schemes are accepted, and the host must resolve to a public
-    (non-private, non-loopback, non-link-local, non-multicast) address. Loopback
-    is explicitly allowed so a local test receiver keeps working.
+    (non-private, non-loopback, non-link-local, non-multicast) address on every
+    resolved IP. Loopback/localhost is deliberately rejected too, so webhooks
+    cannot be pointed at services running on the SubNex host itself. Redirect
+    targets are re-validated at delivery time (_ValidatingRedirectHandler).
     """
     parsed = urlsplit(url)
     if parsed.scheme not in ("http", "https"):
@@ -43,9 +67,8 @@ def validate_webhook_url(url: str) -> str:
     if not host:
         raise ValueError("Webhook URL must include a host")
     try:
-        if host.lower() == "localhost":
-            return url
-        infos = socket.getaddrinfo(host, parsed.port or 80, type=socket.SOCK_STREAM)
+        infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80),
+                                   type=socket.SOCK_STREAM)
     except (socket.gaierror, OSError):
         raise ValueError("Webhook URL host could not be resolved") from None
     for info in infos:
@@ -180,7 +203,7 @@ def _deliver(webhook: Webhook, event: str, payload: dict) -> int:
     if webhook.secret:
         sig = "sha256=" + hmac.new(webhook.secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         req.add_header("X-Asset-Discovery-Signature", sig)
-    with urlopen(req, timeout=5) as resp:  # noqa: S310 (config-provided internal webhooks)
+    with _webhook_opener().open(req, timeout=5) as resp:  # noqa: S310 (config-provided webhooks, redirects re-validated)
         return resp.status
 
 

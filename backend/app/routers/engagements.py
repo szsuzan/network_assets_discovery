@@ -147,7 +147,10 @@ async def list_engagements(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Engagement).order_by(Engagement.created_at.desc()))
+    query = select(Engagement)
+    if current_user.role == "pentester":
+        query = query.where(Engagement.created_by == current_user.id)
+    result = await db.execute(query.order_by(Engagement.created_at.desc()))
     return result.scalars().all()
 
 @router.get("/{engagement_id}", response_model=EngagementOut)
@@ -156,10 +159,8 @@ async def get_engagement(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    result = await db.execute(select(Engagement).where(Engagement.id == engagement_id))
-    engagement = result.scalar_one_or_none()
-    if not engagement:
-        raise HTTPException(status_code=404, detail="Engagement not found")
+    from ..routers.scans import _require_engagement_read
+    engagement = await _require_engagement_read(db, engagement_id, current_user)
     return engagement
 
 @router.get("/{engagement_id}/scans", response_model=List[ScanOut])
@@ -168,6 +169,8 @@ async def get_engagement_scans(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    from ..routers.scans import _require_engagement_read
+    await _require_engagement_read(db, engagement_id, current_user)
     result = await db.execute(
         select(Scan).where(Scan.engagement_id == engagement_id).order_by(Scan.created_at.desc())
     )

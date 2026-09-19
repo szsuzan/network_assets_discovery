@@ -100,6 +100,9 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403,
+                            detail="Only admins/pentesters can create scanner agents")
     existing = (await db.execute(select(Agent).where(Agent.name == data.name))).scalar_one_or_none()
     if existing:
         raise HTTPException(status_code=409, detail="An agent with that name already exists")
@@ -128,6 +131,9 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403,
+                            detail="Only admins/pentesters can list scanner agents")
     agents = (await db.execute(select(Agent).order_by(Agent.created_at))).scalars().all()
     out = []
     for a in agents:
@@ -178,6 +184,9 @@ async def agent_health(
     way as the list view so the UI can show exactly why an agent looks broken
     (offline vs stale vs disabled) before offering one-click repair.
     """
+    if current_user.role not in ("admin", "pentester"):
+        raise HTTPException(status_code=403,
+                            detail="Only admins/pentesters can view agent health")
     agent = (await db.execute(select(Agent).where(Agent.id == agent_id))).scalar_one_or_none()
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")

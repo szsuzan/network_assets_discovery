@@ -311,7 +311,11 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
             status = getattr(f, "status", "open")
             status_chip = ""
             if status and status != "open":
-                status_chip = f'<span class="badge" style="background:{FINDING_STATUS_COLOR.get(status, "#6B7280")}">{FINDING_STATUS_LABEL.get(status, status)}</span>'
+                # Unknown statuses are stored findings tidbits patched into the
+                # DB; escape the arbitrary text before it reaches the HTML so a
+                # crafted value can't inject markup into the PDF.
+                status_label = FINDING_STATUS_LABEL.get(status, _esc(str(status)))
+                status_chip = f'<span class="badge" style="background:{FINDING_STATUS_COLOR.get(status, "#6B7280")}">{status_label}</span>'
             cve_chips = "".join(
                 f'<span class="chip">{_esc(cve)}</span>' for cve in (f.cve_refs or [])
             )
@@ -340,7 +344,7 @@ def _build_html(scan, hosts, findings, ports_lookup, engagement=None) -> str:
             finding_blocks.append(f"""
             <div class="finding">
               <div class="finding-head">
-                <span class="badge" style="background:{color}">{SEVERITY_LABEL.get(f.severity, f.severity)}</span>
+                <span class="badge" style="background:{color}">{_esc(SEVERITY_LABEL.get(f.severity, str(f.severity)))}</span>
                 {status_chip}
                 {port_chip}
                 <strong>{_esc(f.title)}</strong>

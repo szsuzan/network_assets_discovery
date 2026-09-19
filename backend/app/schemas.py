@@ -390,6 +390,11 @@ class FindingOut(BaseModel):
     class Config:
         from_attributes = True
 
+FINDING_STATUSES = {
+    "open", "triaged", "confirmed", "remediation_in_progress",
+    "retest", "resolved", "accepted_risk", "false_positive",
+}
+
 class FindingPatch(BaseModel):
     included_in_report: Optional[bool] = None
     recommendation: Optional[str] = None
@@ -399,6 +404,13 @@ class FindingPatch(BaseModel):
     cvss_score: Optional[float] = None
     cwe: Optional[str] = None
     notes: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def _status_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in FINDING_STATUSES:
+            raise ValueError(f"status must be one of {sorted(FINDING_STATUSES)}")
+        return v
 
 class FindingAuditOut(BaseModel):
     id: uuid.UUID

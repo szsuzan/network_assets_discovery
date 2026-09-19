@@ -381,6 +381,12 @@ def _nse_scripts_for_ports(open_ports) -> str:
     def _add(text):
         for s in (text or "").split(","):
             s = s.strip()
+            # NSE ids must be plain identifiers; reject anything containing
+            # spaces or shell/meta characters so a crafted script id from the
+            # Settings catalog can never smuggle extra nmap options.
+            if not re.fullmatch(r"[A-Za-z0-9._-]+", s):
+                logger.warning("Ignoring malformed NSE script id %r", s)
+                continue
             if not heavy_ok and s in _HEAVY_NSE:
                 continue
             if s and s not in seen:
