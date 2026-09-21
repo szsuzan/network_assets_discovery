@@ -84,6 +84,8 @@ async def _startup():
     await seed_users()
     from .websocket import manager
     manager.start_relay()
+    from .services.scan_watchdog import start_watchdog
+    start_watchdog(app)
 
 
 @app.get("/")

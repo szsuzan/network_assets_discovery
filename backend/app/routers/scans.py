@@ -440,36 +440,78 @@ async def resume_scan(
 ):
     scan = await _load_scan_for_user(db, scan_id, current_user)
     await _ensure_engagement_writable(db, scan.engagement_id, current_user)
-    if scan.status != "paused":
-        raise HTTPException(status_code=400, detail="Scan is not paused")
 
-    # Restore an active state; the worker republishes the exact phase status as
-    # it proceeds.
-    scan.status = "scanning"
-    db.add(AuditLog(
-        user_id=current_user.id,
-        engagement_id=scan.engagement_id,
-        scan_id=scan.id,
-        action="scan_resumed",
-        detail={}
-    ))
-    await db.commit()
+    # Paused: the worker/agent suspension is lifted and the scan continues
+    # from exactly where it suspended.
+    if scan.status == "paused":
+        # Restore an active state; the worker republishes the exact phase status as
+        # it proceeds.
+        scan.status = "scanning"
+        db.add(AuditLog(
+            user_id=current_user.id,
+            engagement_id=scan.engagement_id,
+            scan_id=scan.id,
+            action="scan_resumed",
+            detail={}
+        ))
+        await db.commit()
 
-    from ..websocket import _redis_client, manager
-    try:
-        rc = _redis_client()
-        rc.delete(f"scan:paused:{scan.id}")
-        rc.close()
-    except Exception:
-        pass
-    manager.broadcast_sync(str(scan.id), {
-        "type": "cmd_log", "scan_id": str(scan.id), "level": "info",
-        "line": "=== Scan RESUMED ===",
-    })
-    manager.broadcast_sync(str(scan.id), {"type": "scan_resumed", "scan_id": str(scan.id)})
+        from ..websocket import _redis_client, manager
+        try:
+            rc = _redis_client()
+            rc.delete(f"scan:paused:{scan.id}")
+            rc.close()
+        except Exception:
+            pass
+        manager.broadcast_sync(str(scan.id), {
+            "type": "cmd_log", "scan_id": str(scan.id), "level": "info",
+            "line": "=== Scan RESUMED ===",
+        })
+        manager.broadcast_sync(str(scan.id), {"type": "scan_resumed", "scan_id": str(scan.id)})
 
-    await db.refresh(scan)
-    return scan
+        await db.refresh(scan)
+        return scan
+
+    # Failed/stopped after host collection: re-run ONLY the finalisation step
+    # (packed NSE pass + risk rules + topology) over the already-persisted
+    # hosts/ports, so the expensive discovery/fingerprint passes are not
+    # repeated. Findings upsert by (scan, host, type, port), so a partially
+    # completed earlier pass is refreshed rather than duplicated.
+    if scan.status in ("failed", "stopped"):
+        import threading
+        prior = scan.status
+        up_count = (await db.execute(
+            select(func.count()).select_from(Host).where(
+                Host.scan_id == scan.id, Host.status == "up")
+        )).scalar_one() or 0
+        if up_count == 0:
+            raise HTTPException(status_code=400,
+                detail="No collected hosts to finalise; start a new scan instead")
+        scan.status = "analyzing"
+        scan.completed_at = None
+        scan.progress_pct = 90
+        db.add(AuditLog(
+            user_id=current_user.id,
+            engagement_id=scan.engagement_id,
+            scan_id=scan.id,
+            action="scan_resumed",
+            detail={"from": prior, "hosts_up": up_count}
+        ))
+        await db.commit()
+
+        from ..websocket import manager
+        manager.broadcast_sync(str(scan.id), {
+            "type": "cmd_log", "scan_id": str(scan.id), "level": "info",
+            "line": f"=== Scan RESUMED: re-running finalisation over {up_count} collected host(s) ===",
+        })
+        manager.broadcast_sync(str(scan.id), {"type": "scan_resumed", "scan_id": str(scan.id)})
+        from .agents import _run_post_analysis
+        threading.Thread(target=_run_post_analysis, args=(str(scan.id), True), daemon=True).start()
+
+        await db.refresh(scan)
+        return scan
+
+    raise HTTPException(status_code=400, detail="Scan is neither paused nor failed")
 
 
 @router.post("/scans/{scan_id}/stop", response_model=ScanOut)

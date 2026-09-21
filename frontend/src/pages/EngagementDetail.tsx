@@ -640,6 +640,15 @@ export default function EngagementDetail() {
                         >
                           Edit
                         </button>
+                        {(s.status === 'failed' || s.status === 'stopped') && (
+                          <button
+                            onClick={() => handleResume(s.id)}
+                            className="rounded border border-blue-600 px-2 py-1 text-xs text-blue-400 hover:bg-blue-600/20"
+                            title="Resume: re-run finalisation (NSE + risk rules) over the hosts already collected"
+                          >
+                            Resume
+                          </button>
+                        )}
                         <button
                           onClick={() => setRevertTarget(s)}
                           className="rounded border border-fuchsia-600 px-2 py-1 text-xs text-fuchsia-400 hover:bg-fuchsia-600/20"

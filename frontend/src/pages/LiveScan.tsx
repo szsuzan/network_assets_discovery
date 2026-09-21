@@ -459,20 +459,28 @@ export default function LiveScan() {
             </span>
           </div>
         </div>
-        {isActive && (
+        {(isActive || scan?.status === 'failed' || scan?.status === 'stopped') && (
           <div className="flex items-center gap-2">
-            {scan?.status === 'paused' ? (
+            {scan?.status === 'failed' || scan?.status === 'stopped' ? (
               <button onClick={handleResume} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
-                Resume
+                Resume (re-run finalisation over collected hosts)
               </button>
             ) : (
-              <button onClick={handlePause} className="rounded bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700">
-                Pause
-              </button>
+              <>
+                {scan?.status === 'paused' ? (
+                  <button onClick={handleResume} className="rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
+                    Resume
+                  </button>
+                ) : (
+                  <button onClick={handlePause} className="rounded bg-amber-600 px-4 py-2 text-sm font-medium text-white hover:bg-amber-700">
+                    Pause
+                  </button>
+                )}
+                <button onClick={handleStop} className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
+                  Stop Scan
+                </button>
+              </>
             )}
-            <button onClick={handleStop} className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700">
-              Stop Scan
-            </button>
           </div>
         )}
       </div>

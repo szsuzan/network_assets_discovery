@@ -684,8 +684,12 @@ def _run_post_analysis(scan_id: str, completed: bool, error: str = ""):
             "type": "cmd_log", "scan_id": scan_id, "level": "info",
             "line": "=== Scan completed via agent ===" if completed else f"=== Scan FAILED via agent: {error} ===",
         })
-    except Exception:
+    except Exception as exc:
+        # Finalisation must never leave a scan zombie-stuck in a running state.
+        # Surface the failure (audit + console + WS) and mark the scan failed.
         traceback.print_exc()
+        from ..services.scan_worker import mark_scan_failed
+        mark_scan_failed(scan_id, f"agent finalisation failed: {exc}")
 
 
 @router.post("/tasks/{task_id}/result")

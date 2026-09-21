@@ -1,5 +1,6 @@
 import ipaddress
 import json
+import logging
 import re
 import shlex
 import shutil
@@ -20,6 +21,8 @@ from . import settings as settings_svc
 from ..models import Scan, Host, Port, SNMPInfo, Finding, AuditLog, TopologyEdge, Agent, AgentTask
 from ..websocket import manager
 from ..celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 
 # Raw nmap XML per scan/phase is stashed under backend/scan_output/<scan_id>/ so
@@ -1265,6 +1268,51 @@ def _emit_log(scan, line: str, level: str = "info"):
         pass
 
 
+def mark_scan_failed(scan_id, reason: str):
+    """Idempotently force-mark a scan 'failed', never disturbing a final state.
+
+    Scanner agents run the heavy phases and hand back to the API process for
+    finalisation (NSE pass, risk rules, topology) in an unmanaged background
+    thread. If that thread wedges or raises, nothing would ever move the scan
+    out of a running state ('analyzing'...) and it would hang for hours at a
+    stale progress % with no way to re-run it. This helper flips such a scan to
+    'failed' and surfaces the reason via audit, console log, activity feed and
+    WebSocket, so the UI/reporting always reflect the truth once work stopped.
+    """
+    try:
+        sid = str(scan_id)
+        with SessionLocal() as sdb:
+            scan = sdb.get(Scan, uuid.UUID(sid))
+            if not scan or scan.status in ("completed", "failed", "stopped"):
+                return
+            scan.status = "failed"
+            scan.completed_at = datetime.now(timezone.utc)
+            sdb.add(AuditLog(
+                engagement_id=scan.engagement_id,
+                scan_id=scan.id,
+                action="scan_failed",
+                detail={"reason": reason[:800]},
+            ))
+            sdb.commit()
+            append_console_log(sid, f"=== Scan FAILED: {reason} ===", level="err")
+            try:
+                from .activity import append_activity
+                append_activity(sid, {
+                    "type": "scan_phase", "index": None, "total": None,
+                    "label": f"scan failed: {reason[:200]}",
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+            manager.broadcast_sync(sid, {
+                "type": "scan_failed", "scan_id": sid,
+                "error": reason, "progress_pct": scan.progress_pct,
+                "hosts_discovered": scan.hosts_discovered,
+            })
+    except Exception:
+        pass
+
+
 def _run_streamed(scan, cmd: str, timeout: int = 60) -> str:
     """Run a command while streaming its live stderr output to the console.
 
@@ -1493,8 +1541,18 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
             scripts_os = parse_os_from_scripts(out)
         return host.id, ports, os_guess, os_conf, scripts_os
 
-    with ThreadPoolExecutor(max_workers=min(max_concurrency, len(work))) as pool:
-        for hid, ports, os_guess, os_conf, scripts_os in pool.map(_one, list(work.values())):
+    # A wedged worker must not be able to stall finalisation forever, but a
+    # slow-but-working host is normal: hosts may each take up to their per-host
+    # subprocess budget and results are consumed in submission order, so the
+    # per-result budget is the phase's true worst-case wall clock (each worker
+    # processes ~len(work)/max_workers hosts sequentially). This only fires on
+    # an actually-hung executor, not on a merely slow one.
+    host_budget = max((t for _, _, t in work.values()), default=60)
+    workers = min(max_concurrency, len(work))
+    result_budget = int((len(work) + workers - 1) // workers * host_budget) + 60
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
+        for hid, ports, os_guess, os_conf, scripts_os in pool.map(_one, list(work.values()), timeout=result_budget):
             h = next((hh for hh in confirmed if hh.id == hid), None)
             if not h:
                 continue
@@ -1538,6 +1596,13 @@ def _scan_port_foreach_host(db, scan: Scan, hosts: list, phase: str,
                 })
                 with _last_progress_lock:
                     _last_progress_broadcast[str(scan.id)] = scan.progress_pct
+    except TimeoutError:
+        msg = f"finalisation stalled (no result within {result_budget}s); aborting phase"
+        _emit_log(scan, f"  {msg}", level="err")
+        raise RuntimeError(msg) from None
+    finally:
+        # never join a wedged worker; daemon threads are reclaimed on exit
+        pool.shutdown(wait=False)
     return results, os_map, script_os_map
 
 

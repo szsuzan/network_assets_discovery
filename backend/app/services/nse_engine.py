@@ -236,7 +236,7 @@ def _rule_ssl_cert(entry, port) -> list:
             f"( {subj_desc}, validity window {not_before or 'n/a'} -> {not_after or 'n/a'} ).",
             "This is the default certificate burned into factory firmware: its CN is the "
             "device serial and its validity starts at the factory clock baseline (~1970), "
-            "so 'expired' / 'weak key' alerts here are expected and not actionable.",
+            "so 'expired' / 'weak key' alerts here are expected and not actionable. "
             "After deployment, install a certificate from your internal CA (or a trusted "
             "public CA) bound to the device's managed DNS name, and set the device clock "
             "from NTP so future validity windows are real.",
@@ -802,7 +802,9 @@ def nse_findings_for_host(scan_id, host, label, xml_text) -> dict:
     deduped = []
     for f in out:
         port = f["port"]
-        key = (f["type"], f["evidence"].get("script"), port)
+        ev = f.get("evidence")
+        ev_script = ev.get("script") if isinstance(ev, dict) else None
+        key = (f["type"], ev_script, port)
         if key in seen:
             continue
         seen.add(key)
