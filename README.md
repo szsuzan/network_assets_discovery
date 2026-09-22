@@ -69,12 +69,24 @@ SubNex: self-hosted network asset discovery for penetration testing. Find live h
     <td align="center"><img src="assets/screenshots/Scan Details.png" alt="Scan details" width="100%"><br><sub>Scan details — host, port, and finding breakdown</sub></td>
   </tr>
   <tr>
+    <td align="center"><img src="assets/screenshots/Assets Discovered Detail.png" alt="Assets discovered detail" width="100%"><br><sub>Assets discovered — detail view</sub></td>
+    <td align="center"><img src="assets/screenshots/IP Detail View.png" alt="IP detail" width="100%"><br><sub>IP detail view — host ports &amp; findings</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/Findings.png" alt="Findings" width="100%"><br><sub>Findings — severity-sorted risk summary</sub></td>
+    <td align="center"><img src="assets/screenshots/Topology View.png" alt="Network topology" width="100%"><br><sub>Network topology — live force-directed graph</sub></td>
+  </tr>
+  <tr>
     <td align="center"><img src="assets/screenshots/Administration Settings.png" alt="Administration settings" width="100%"><br><sub>Administration settings</sub></td>
     <td align="center"><img src="assets/screenshots/Settings.png" alt="Settings" width="100%"><br><sub>Settings</sub></td>
   </tr>
   <tr>
     <td align="center"><img src="assets/screenshots/Webhook Integration.png" alt="Webhook integration" width="100%"><br><sub>Webhook integration — event notifications</sub></td>
     <td align="center"><img src="assets/screenshots/Agent Panel.png" alt="Scanner agents" width="100%"><br><sub>Scanner agents — LAN L2 workers</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/Reports Detail.png" alt="Client report" width="100%"><br><sub>Client report — charts &amp; executive summary</sub></td>
+    <td align="center">&nbsp;</td>
   </tr>
   <tr>
     <td align="center" colspan="2"><img src="assets/screenshots/Scan Report in PDF.png" alt="PDF client report" width="70%"><br><sub>PDF client report — WeasyPrint rendered (exportable from the Report page)</sub></td>
