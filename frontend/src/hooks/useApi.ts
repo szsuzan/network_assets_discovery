@@ -96,7 +96,7 @@ export function useCancelDeletionRequest() {
 
 export function useChangePassword() {
   return useMutation({
-    mutationFn: (data: { current_password: string; new_password: string }) =>
+    mutationFn: (data: { current_password: string; new_password: string; new_username?: string }) =>
       api.post('/api/auth/change-password', data).then((r) => r.data),
   })
 }
@@ -469,8 +469,8 @@ export function useAgents(enabled = true) {
 export function useCreateAgent() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (data: { name: string; subnets: string[]; notes: string }) =>
-      api.post<AgentInfo & { api_key: string }>('/api/agents', data).then((r) => r.data),
+    mutationFn: (data: { name: string; notes?: string }) =>
+      api.post('/api/agents', data).then((r) => r.data),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['agents'] }),
   })
 }

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from ..database import get_db
-from ..models import User
+from ..models import AuditLog, User
 from ..passwords import hash_password, verify_password
 from ..schemas import LoginRequest, TokenResponse, UserOut, ChangePasswordRequest
 from ..auth import create_access_token, get_current_user_unchecked
@@ -85,7 +85,7 @@ async def change_password(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user_unchecked),
 ):
-    """Change the current user's password.
+    """Change the current user's password, optionally renaming the account.
 
     Runs even while `must_change_password` is still set (the one operation
     available to an otherwise locked account), then clears the flag so normal
@@ -101,10 +101,33 @@ async def change_password(
     if stripped.lower() in ("password123", "changeme", "password"):
         raise HTTPException(status_code=400, detail="That password is too weak; choose a stronger one")
 
+    # Resolve the requested rename before mutating anything: a clash must abort
+    # the whole request rather than change the password and leave the name alone.
+    old_email = current_user.email
+    new_email = None
+    if data.new_username:
+        candidate = normalize_email(data.new_username).lower()
+        if candidate != old_email.lower():
+            taken = (await db.execute(
+                select(User.id).where(User.email == candidate)
+            )).first()
+            if taken:
+                raise HTTPException(status_code=409, detail="That username is already taken")
+            new_email = candidate
+
     current_user.password_hash = hash_password(data.new_password)
     current_user.must_change_password = False
     current_user.jwt_version += 1
+    if new_email:
+        current_user.email = new_email
+        db.add(AuditLog(
+            user_id=current_user.id,
+            action="user_updated",
+            detail={"user": old_email, "changes": {"email": {"old": old_email, "new": new_email}}},
+        ))
     await db.commit()
+    if new_email:
+        return {"status": "ok", "detail": f"Account updated - log in as {new_email}"}
     return {"status": "ok", "detail": "Password updated - log in with your new password"}
 
 @router.post("/refresh", response_model=TokenResponse)

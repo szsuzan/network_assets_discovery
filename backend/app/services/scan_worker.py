@@ -1368,31 +1368,62 @@ def _run_streamed(scan, cmd: str, timeout: int = 60) -> str:
     return "".join(out_sink)
 
 
+def _agent_covers(agent, target_nets) -> tuple:
+    """(covers_all, agent_networks) for one agent against the target networks.
+
+    An agent with no advertised subnets reports `covers_all=False` but is still
+    a valid candidate — subnet advertising is a routing hint, not a credential
+    (see `agent.require_subnet_match`).
+    """
+    agent_nets = []
+    for s in agent.subnets or []:
+        try:
+            agent_nets.append(ipaddress.ip_network(s, strict=False))
+        except ValueError:
+            continue
+    if not agent_nets:
+        return False, agent_nets
+    covers = all(any(net.supernet_of(tn) for net in agent_nets) for tn in target_nets)
+    return covers, agent_nets
+
+
 def _delegate_to_agent(db, scan: Scan) -> bool:
-    """Assign the scan to a live scanner agent whose local subnets cover the
-    targets. Agents have real Layer-2 access (ARP -> MAC/vendor, SYN + -O ->
-    exact OS) and run the scan autonomously; the worker returns immediately and
-    the agent's result endpoint finishes the scan. Returns False when no agent
-    is available, leaving the legacy in-worker execution to run.
+    """Assign the scan to a live scanner agent. Agents have real Layer-2 access
+    (ARP -> MAC/vendor, SYN + -O -> exact OS) and run the scan autonomously; the
+    worker returns immediately and the agent's result endpoint finishes the
+    scan. Returns False when no agent is available, leaving the legacy
+    in-worker execution to run.
+
+    Subnets are a *preference*, not a requirement. An agent that advertises a
+    subnet covering every target is picked first; otherwise any online agent
+    takes the job, so registering an agent never requires knowing (or typing)
+    the LAN ranges up front. Set `agent.require_subnet_match` to True to restore
+    strict coverage-only routing.
     """
     try:
         if not settings_svc.get_bool("agent.delegation_enabled", True):
             # Master switch in the Settings page turns agent delegation off for
             # every scan / re-verify method; always run in the worker instead.
             return False
-        from datetime import datetime as _dt, timezone as _tz
-        now = _dt.now(_tz.utc)
+        require_match = settings_svc.get_bool("agent.require_subnet_match", False)
+        now = datetime.now(timezone.utc)
         window = settings_svc.get_int("agent.online_window_seconds", 90)
+
+        # An agent is delegatable only once it has actually heartbeated inside
+        # the window. `last_seen IS NULL` means "registered, never connected",
+        # which is NOT online — treating it as online both invented capacity
+        # and, once sorted alongside real agents, raised a TypeError comparing
+        # None to a datetime, which silently aborted delegation for EVERY scan.
         online = []
         for agent in db.execute(select(Agent).where(Agent.status != "disabled")).scalars().all():
-            if agent.last_seen and (now - agent.last_seen).total_seconds() > window:
+            if agent.last_seen is None:
+                continue
+            if (now - agent.last_seen).total_seconds() > window:
                 continue
             online.append(agent)
         if not online:
             return False
 
-        # A candidate agent must cover every target with one of its reported
-        # locally-attached subnets (supernet of the target address/network).
         target_nets = []
         for t in scan.targets:
             try:
@@ -1400,32 +1431,59 @@ def _delegate_to_agent(db, scan: Scan) -> bool:
             except ValueError:
                 target_nets.append(ipaddress.ip_network(f"{t}/32", strict=False))
 
-        for agent in sorted(online, key=lambda a: a.last_seen, reverse=True):
-            agent_subnets = []
-            for s in agent.subnets or []:
-                try:
-                    agent_subnets.append(ipaddress.ip_network(s, strict=False))
-                except ValueError:
-                    continue
-            if not agent_subnets:
+        # Prefer exact coverage, then most recently seen. `last_seen` is
+        # guaranteed non-None by the filter above, so the sort key is safe.
+        scored = []
+        for agent in online:
+            covers, agent_nets = _agent_covers(agent, target_nets)
+            if require_match and not covers:
                 continue
-            if all(any(sub.supernet_of(tn) for sub in agent_subnets) for tn in target_nets):
-                task = AgentTask(scan_id=scan.id, agent_id=agent.id, status="queued", targets=scan.targets)
-                db.add(task)
-                scan.status = "agent_running"
-                scan.progress_pct = 5
-                db.commit()
-                _emit_log(
-                    scan,
-                    f"--- Delegating scan to scanner agent '{agent.name}' "
-                    f"{('(' + agent.hostname + ')') if agent.hostname else ''} "
-                    f"— L2-capable, subnets {', '.join(str(s) for s in agent_subnets)} ---",
-                    level="info",
-                )
-                manager.broadcast_sync(str(scan.id), {
-                    "type": "scan_delegated", "scan_id": str(scan.id), "agent": agent.name,
-                })
-                return True
+            scored.append((covers, agent, agent_nets))
+        if not scored:
+            return False
+        scored.sort(key=lambda item: (item[0], item[1].last_seen), reverse=True)
+
+        covers, agent, agent_nets = scored[0]
+        task = AgentTask(scan_id=scan.id, agent_id=agent.id, status="queued", targets=scan.targets)
+        db.add(task)
+        scan.status = "agent_running"
+        scan.progress_pct = 5
+        db.commit()
+        if covers:
+            scope = f"subnets {', '.join(str(n) for n in agent_nets)}"
+        elif not agent_nets:
+            scope = "no advertised subnets — matched by availability"
+        else:
+            scope = (f"advertised subnets {', '.join(str(n) for n in agent_nets)} "
+                     "do not cover the targets — matched by availability")
+        agent_caps = set(agent.capabilities or [])
+        if "l2-degraded" in agent_caps or ("arp" not in agent_caps and agent_caps):
+            # The agent told us it has no raw sockets, so this delegation will
+            # come back without MAC/vendor/OS. Say so in the live feed instead of
+            # letting the user stare at blank columns and assume the scan broke.
+            l2_note = ("L2-DEGRADED (agent lacks raw-socket privileges: "
+                       "expect no MAC/vendor/OS), ")
+        else:
+            l2_note = "L2-capable, "
+        _emit_log(
+            scan,
+            f"--- Delegating scan to scanner agent '{agent.name}' "
+            f"{('(' + agent.hostname + ')') if agent.hostname else ''} "
+            f"— {l2_note}{scope} ---",
+            level="info",
+        )
+        if l2_note != "L2-capable, ":
+            _emit_log(
+                scan,
+                "    Agent is running without CAP_NET_RAW/root. Restart it with "
+                "sudo (Linux), as Administrator (Windows), or as a container with "
+                "--cap-add NET_RAW --cap-add NET_ADMIN to recover MAC/vendor/OS.",
+                level="warn",
+            )
+        manager.broadcast_sync(str(scan.id), {
+            "type": "scan_delegated", "scan_id": str(scan.id), "agent": agent.name,
+        })
+        return True
     except Exception:
         import traceback
         traceback.print_exc()

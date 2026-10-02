@@ -20,6 +20,27 @@ class LoginRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str
+    # Optional rename of the account happening in the same step (the bootstrap
+    # user is called "demo" and owns nothing but the instance, so forcing them
+    # to keep that handle is noise). Blank/omitted keeps the current username.
+    new_username: Optional[str] = None
+
+    @field_validator("new_username")
+    @classmethod
+    def _username_valid(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if any(ch.isspace() for ch in v):
+            # A bare username is stored verbatim and matched on login against a
+            # whitespace-stripped identifier, so an embedded space would lock
+            # the account out of its own sign-in.
+            raise ValueError("Username cannot contain spaces")
+        if "@" in v and "." not in v.rsplit("@", 1)[-1]:
+            raise ValueError("A valid email address is required")
+        return v.lower()
 
 class UserOut(BaseModel):
     id: uuid.UUID
@@ -501,8 +522,16 @@ class DiffResult(BaseModel):
 # Scanner agents
 # --------------------------------------------------------------------------- #
 class AgentCreate(BaseModel):
+    """Registering an agent needs nothing but a name.
+
+    Subnets are deliberately NOT accepted here. They used to be a required-ish
+    routing key (a scan only delegated to an agent whose advertised subnets
+    covered the targets), which meant every install had to know and type its LAN
+    ranges before an agent could ever be used. An agent now advertises whatever
+    it detects locally on its first heartbeat, and delegation prefers a coverage
+    match but does not require one.
+    """
     name: str
-    subnets: List[str] = []
     notes: str = ""
 
 class AgentOut(BaseModel):

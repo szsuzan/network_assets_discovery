@@ -44,20 +44,76 @@ function relTime(iso: string | null, now: number): string {
   return `${Math.round(m / 60)}h ago`
 }
 
-function agentctlCmd(name: string, subnets: string, key: string | null, os: Os) {
-  const py = os === 'windows' ? 'python' : 'python3'
-  const sep = os === 'windows' ? '\\' : '/'
+/**
+ * Build the copy-paste commands for an agent.
+ *
+ * These get pasted into whatever machine is on the LAN, which is often a freshly
+ * imaged, rebuilt or migrated box that has never seen the SubNex repository and
+ * has no pre-built Docker image. So:
+ *   1. Step 1 always downloads the agent from the server itself
+ *      (`/api/agent/bundle`) — no git clone, no image transfer.
+ *   2. No `--subnets`. The agent works out its own coverage from the machine it
+ *      runs on.
+ *   3. The key travels in the environment, never in argv, so it does not leak
+ *      into `ps`, process inspectors or a shared shell history.
+ *   4. `python3`/`python`, path separators and shell quoting are per-OS.
+ */
+function agentctlCmd(name: string, key: string | null, os: Os, server: string) {
+  const win = os === 'windows'
+  const py = win ? 'python' : 'python3'
+  const sep = win ? '\\' : '/'
   const ctl = `agent${sep}agentctl.py`
-  const keyArg = key ? ` --api-key ${key}` : ''
-  const subArg = subnets ? ` --subnets ${subnets}` : ''
-  const run = `${py} ${ctl} run --server ${origin()} --name ${name}${subArg}${keyArg}`
-  const install = `${py} ${ctl} install`
+  const bundle = `${server}/api/agent/bundle`
+  const q = (v: string) => (win ? `"${v}"` : `'${v.replace(/'/g, `'\\''`)}'`)
+  // Step 1 must leave the shell inside a directory that has ./agent/ next to it,
+  // because the Dockerfile does `COPY agent/scanner_agent.py`.
+  const fetch = win
+    ? `mkdir subnex-agent -Force | Out-Null; cd subnex-agent\n` +
+      `curl.exe -fsSL -o agent.zip ${bundle}\n` +
+      `python -c "import zipfile;zipfile.ZipFile('agent.zip').extractall('agent')"`
+    : `mkdir -p subnex-agent && cd subnex-agent\n` +
+      `curl -fsSL -o agent.zip ${bundle}\n` +
+      `python3 -c "import zipfile;zipfile.ZipFile('agent.zip').extractall('agent')"`
+  // Raw-socket privileges are what make this a Layer-2 agent, so `sudo` is baked
+  // into the suggested commands rather than left as a footnote — an unprivileged
+  // agent still scans, but returns every host with blank MAC/vendor/OS and no
+  // obvious reason why.
+  //
+  // The key env var must sit AFTER sudo, not before it: sudo resets the
+  // environment by default, so a leading `SCANNER_AGENT_KEY=... sudo ...` would be
+  // stripped and the agent would come up with no credentials. `sudo KEY=v cmd`
+  // passes it through to the child.
+  const sudo = win ? '' : 'sudo '
+  const sudoKey = key
+    ? win
+      ? `$env:SCANNER_AGENT_KEY="${key}"; `
+      : `sudo SCANNER_AGENT_KEY="${key}" `
+    : sudo
   return {
-    run,
-    install,
-    status: `${py} ${ctl} status`,
-    repair: `${py} ${ctl} repair`,
-    keySet: (k: string) => `${py} ${ctl} key --set ${k}`,
+    fetch,
+    run: `${sudoKey}${py} ${ctl} run --server ${server} --name ${q(name)}`,
+    install: `${sudo}${py} ${ctl} install`,
+    status: `${sudo}${py} ${ctl} status`,
+    repair: `${sudo}${py} ${ctl} repair`,
+    // `purge` is what the operator runs on the agent machine after deleting the
+    // agent row here: it removes autostart, the stored key, the state dir and
+    // the /tmp instance lock that would otherwise block the next registration.
+    purge: `${sudo}${py} ${ctl} purge`,
+    keySet: (k: string) => `${sudo}${py} ${ctl} key --set ${k}`,
+    // Windows has no in-command elevation, so the privilege requirement is
+    // surfaced as a "right-click -> Run as administrator" instruction plus the
+    // self-elevating variant for people who would rather not change terminals.
+    elevateNote: win
+      ? 'Open PowerShell as Administrator (right-click -> Run as administrator), then paste the command.'
+      : '',
+    // Single line so no PowerShell backtick-continuation is needed (a literal
+    // backtick inside a JS template literal would terminate the string).
+    elevate: win
+      ? `Start-Process -Verb RunAs -FilePath ${py} -ArgumentList '${ctl}','run','--server','${server}','--name','${name}' -Wait`
+      : '',
+    dockerBuild: 'docker build -t scanner-agent -f agent/Dockerfile .',
+    docker: `docker run -d --network=host --name ${q(name)} --cap-add NET_RAW --cap-add NET_ADMIN ` +
+      `-e SCANNER_AGENT_KEY="${key || '<API_KEY>'}" scanner-agent --server ${server} --name ${q(name)}`,
   }
 }
 
@@ -156,6 +212,23 @@ function CodeBlock({ label, value }: { label: string; value: string }) {
       <pre className="mt-1 overflow-x-auto rounded-md border border-gray-800 bg-gray-950 px-3 py-2 text-xs leading-relaxed text-gray-300">
         {value}
       </pre>
+    </div>
+  )
+}
+
+function OsToggle({ os, setOs }: { os: Os; setOs: (o: Os) => void }) {
+  return (
+    <div className="flex items-center gap-1">
+      {(['windows', 'unix'] as Os[]).map((o) => (
+        <button
+          key={o}
+          onClick={() => setOs(o)}
+          className={`rounded-md px-2 py-1 text-[12px] font-medium transition-colors ${os === o ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
+          title={o === 'windows' ? 'PowerShell on Windows' : 'Bash on Linux/macOS'}
+        >
+          {OS_LABEL[o]}
+        </button>
+      ))}
     </div>
   )
 }
@@ -356,15 +429,30 @@ function DiagnosePanel({ agent, now }: { agent: AgentInfo; now: number }) {
     items.push({ tone: 'warn', title: 'Reports online but heartbeat is stale', body: 'Status comes from the last update; if it stays stale in the UI, the page query may be cached — refresh or re-run the check.' })
   }
 
-  if (!(agent.subnets || []).length) {
+  const caps = agent.capabilities || []
+  if (caps.includes('l2-degraded')) {
     items.push({
       tone: 'warn',
-      title: 'No L2 coverage yet',
-      body: 'Without advertised ranges the server may fall back to the container scanner for scans. The agent auto-detects local subnets on heartbeat.', 
+      title: 'Running without raw-socket privileges',
+      body: 'ARP, SYN scanning and passive sniffing are unavailable, so every scan this agent takes will return hosts with no MAC, vendor or OS. Restart it with sudo (Linux/macOS), from an Administrator terminal (Windows), or as a container with --cap-add NET_RAW --cap-add NET_ADMIN. Run `agentctl.py status` for the same check on the agent machine.',
+    })
+  } else if (caps.length && !caps.includes('arp')) {
+    items.push({
+      tone: 'warn',
+      title: 'No ARP capability reported',
+      body: 'This agent did not advertise ARP, so it cannot return MAC addresses. Usually it is running unprivileged.',
     })
   }
 
-  if (!(agent.capabilities || []).length) {
+  if (!(agent.subnets || []).length) {
+    items.push({
+      tone: 'ok',
+      title: 'No L2 coverage reported yet',
+      body: 'Informational only — scans are still delegated to this agent while it is online. The agent advertises its local ranges on its first heartbeat.',
+    })
+  }
+
+  if (!caps.length) {
     items.push({ tone: 'warn', title: 'No capabilities advertised', body: 'SYN/ARP/NSE features are reported with the heartbeat; an empty list usually means the agent just started.' })
   }
 
@@ -404,7 +492,7 @@ function DiagnosePanel({ agent, now }: { agent: AgentInfo; now: number }) {
   )
 }
 
-function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }) {
+function AgentCard({ agent, os, now, onRemoved }: { agent: AgentInfo; os: Os; now: number; onRemoved: (name: string) => void }) {
   const del = useDeleteAgent()
   const resetKey = useResetAgentKey()
   const health = useAgentHealth()
@@ -430,7 +518,7 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
     return () => clearTimeout(t)
   }, [updateRequested])
 
-  const cmds = agentctlCmd(agent.name, (agent.subnets || []).join(','), null, os)
+  const cmds = agentctlCmd(agent.name, null, os, origin())
 
   const runHealth = async () => {
     setHealthInfo(null)
@@ -475,7 +563,16 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
 
   const removeAgent = () => {
     del.mutate(agent.id, {
-      onSuccess: () => toast.success(`Agent "${agent.name}" removed`),
+      // Deleting the row is server-side only. Everything on the agent machine
+      // survives -- key, auto-start entry, state dir, and the /tmp lock that
+      // would block the next registration -- so surface the cleanup command
+      // right here instead of leaving the operator to rediscover it.
+      onSuccess: () => {
+        // Hand off to the page: this card unmounts as soon as the agent leaves
+        // the list, so a panel rendered here would disappear immediately.
+        onRemoved(agent.name)
+        toast.success(`Agent "${agent.name}" removed — run the cleanup command shown below`)
+      },
       onError: (e) => toast.error(errText(e, 'Failed to remove agent')),
     })
   }
@@ -546,9 +643,10 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
           {(agent.capabilities || []).map((c) => <Chip key={c}>{c}</Chip>)}
         </div>
         <div className="mt-1.5 text-xs text-gray-500">
-          Not tied to one subnet: this agent is chosen for any scan whose targets all fall
-          inside these ranges. Change them with <code className="text-gray-400">--subnets</code> on
-          the agent, or let it auto-detect its local interfaces.
+          Reported by the agent itself, not configured here. These ranges are used to{' '}
+          <em>prefer</em> this agent for matching targets; an online agent is still eligible for
+          any scan. Override with <code className="text-gray-400">--subnets</code> on the agent if
+          auto-detection picks up an interface you would rather not scan from.
         </div>
         {agent.notes ? (
           <div className="mt-1.5 text-xs text-gray-500">{agent.notes}</div>
@@ -609,14 +707,18 @@ function AgentCard({ agent, os, now }: { agent: AgentInfo; os: Os; now: number }
   )
 }
 
-function FirstRunBanner({ name, subnets, apiKey, onClose }: {
+function FirstRunBanner({ name, apiKey, onClose }: {
   name: string
-  subnets: string
   apiKey: string
   onClose: () => void
 }) {
-  const win = agentctlCmd(name, subnets, apiKey, 'windows')
-  const unix = agentctlCmd(name, subnets, apiKey, 'unix')
+  const [os, setOs] = useState<Os>('unix')
+  // The address the *agent machine* will dial. window.location.origin is right
+  // only when the agent runs on the same box as the UI; a LAN agent needs the
+  // server's routable IP, so make it editable and flag the localhost case.
+  const [server, setServer] = useState(origin())
+  const c = agentctlCmd(name, apiKey, os, server)
+  const localhostish = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(server)
   return (
     <div className="overflow-hidden rounded-xl border border-emerald-700/60 bg-gradient-to-br from-emerald-950/50 to-gray-900">
       <div className="px-4 py-4">
@@ -626,10 +728,12 @@ function FirstRunBanner({ name, subnets, apiKey, onClose }: {
               Agent '{name}' created successfully
             </div>
             <p className="mt-0.5 text-xs text-gray-400">
-              Copy the API key now — it is shown once. Then start the agent on the LAN machine.
+              Copy the API key now — it is shown once. Then start the agent on any machine on the
+              target LAN. It downloads itself from this server and detects its own coverage.
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <OsToggle os={os} setOs={setOs} />
             <button onClick={onClose} className="rounded-md px-2 py-1 text-xs text-gray-400 hover:text-gray-200">
               Done
             </button>
@@ -638,26 +742,85 @@ function FirstRunBanner({ name, subnets, apiKey, onClose }: {
         <div className="mt-3">
           <KeyBox value={apiKey} label="Agent API key" hint="shown once — masked until you reveal it" />
         </div>
+        <div className="mt-3">
+          <label className="mb-1 block text-xs font-medium text-gray-300">
+            Server address the agent will call
+          </label>
+          <input
+            value={server}
+            onChange={(e) => setServer(e.target.value)}
+            spellCheck={false}
+            className="w-full rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 font-mono text-xs text-gray-200 focus:border-emerald-600 focus:outline-none"
+          />
+          {localhostish && (
+            <p className="mt-1 text-xs text-amber-400/90">
+              This points at the local machine. If the agent runs on a <em>different</em> box, replace{' '}
+              <code className="text-gray-400">localhost</code> with this server's LAN IP — e.g.{' '}
+              <code className="text-gray-400">http://192.168.1.139:8000</code>.
+            </p>
+          )}
+        </div>
       </div>
       <div className="border-t border-gray-800 px-4 py-4">
-        <div className="mb-3 text-xs font-medium text-gray-300">
-          1. Start the agent &nbsp;·&nbsp; 2. Make it persistent
+        <div className="mb-1 text-xs font-medium text-gray-300">
+          1 · Get the agent &nbsp;·&nbsp; 2 · Start it &nbsp;·&nbsp; 3 · Make it persistent
+        </div>
+        <p className="mb-3 text-xs text-gray-500">
+          Nothing to clone or install — step 1 pulls the agent straight off this server and unpacks
+          it into <code className="text-gray-400">./subnex-agent/agent/</code>. Needs Python 3.9+ and{' '}
+          <code className="text-gray-404">curl</code> only. The key travels via the environment, so
+          it never appears in the process list.
+        </p>
+        <div className="mb-3 rounded-lg border border-amber-700/50 bg-amber-950/20 p-3">
+          <div className="text-xs font-medium text-amber-300">Step 2 must run elevated</div>
+          <p className="mt-1 text-xs text-gray-400">
+            ARP, SYN scanning and passive sniffing all need raw sockets. Unprivileged, the agent
+            still scans but every host comes back with <strong>no MAC, vendor or OS</strong>, and it
+            reports itself as <code className="text-gray-400">l2-degraded</code>. The commands below
+            already include the right prefix — use them as-is.
+          </p>
+          {os === 'windows' ? (
+            <>
+              <p className="mt-2 text-xs text-amber-200/90">{c.elevateNote}</p>
+              <div className="mt-2">
+                <CodeBlock label="Or let PowerShell prompt for elevation" value={c.elevate} />
+              </div>
+            </>
+          ) : (
+            <p className="mt-2 text-xs text-amber-200/90">
+              <code className="text-gray-400">sudo</code> is already in the command. Note the key
+              sits <em>after</em> <code className="text-gray-400">sudo</code> — sudo strips a
+              leading environment variable, which would leave the agent with no credentials.
+            </p>
+          )}
         </div>
         <div className="grid gap-4 md:grid-cols-2">
           <CommandColumn
-            title="Windows"
-            blocks={[
-              { label: 'Start the agent', value: win.run },
-              { label: 'Auto-start at logon', value: win.install },
-            ]}
+            title="Get the agent"
+            blocks={[{ label: '1 · Download + unpack', value: c.fetch }]}
           />
           <CommandColumn
-            title="Linux / macOS"
+            title="Run it"
             blocks={[
-              { label: 'Start the agent', value: unix.run },
-              { label: 'Auto-start via systemd / launchd', value: unix.install },
+              { label: `2 · Start (supervised, auto-restart)${os === 'unix' ? ' — sudo' : ' — as Administrator'}`, value: c.run },
+              { label: '3 · Auto-start at boot', value: c.install },
             ]}
           />
+        </div>
+        <div className="mt-4 rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+          <div className="mb-2 text-xs font-medium text-gray-300">
+            No Python on that machine? Run it as a container instead
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
+            <CodeBlock label="1 · Build (after step 1 above)" value={c.dockerBuild} />
+            <CodeBlock label="2 · Run" value={c.docker} />
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            Host networking plus <code className="text-gray-400">NET_RAW</code>/<code className="text-gray-400">NET_ADMIN</code> is
+            what gives ARP and SYN scans real Layer-2 reach. If the build fails on a fresh box, your
+            account likely cannot reach the Docker socket — add it to the <code className="text-gray-400">docker</code>{' '}
+            group and log in again, otherwise prefix with <code className="text-gray-400">sudo</code>.
+          </p>
         </div>
       </div>
     </div>
@@ -672,9 +835,12 @@ export default function Agents() {
   const [os, setOs] = useState<Os>('windows')
   const [formOpen, setFormOpen] = useState(false)
   const [name, setName] = useState('')
-  const [subnets, setSubnets] = useState('')
   const [notes, setNotes] = useState('')
-  const [newAgent, setNewAgent] = useState<{ name: string; subnets: string; apiKey: string } | null>(null)
+  const [newAgent, setNewAgent] = useState<{ name: string; apiKey: string } | null>(null)
+  // Set when an agent is deleted, so the machine-local cleanup command can be
+  // shown after the card that offered it has already unmounted.
+  const [removedName, setRemovedName] = useState<string | null>(null)
+  const purgeCmd = agentctlCmd(removedName || '', null, os, origin()).purge
 
   const total = agents?.length || 0
   const online = agents?.filter((a) => a.status === 'online').length || 0
@@ -683,15 +849,10 @@ export default function Agents() {
   const submit = async () => {
     if (!name.trim()) return
     try {
-      const res = await create.mutateAsync({
-        name: name.trim(),
-        subnets: subnets.split(',').map((s) => s.trim()).filter(Boolean),
-        notes,
-      })
-      setNewAgent({ name: res.name, subnets, apiKey: res.api_key })
+      const res = await create.mutateAsync({ name: name.trim(), notes })
+      setNewAgent({ name: res.name, apiKey: res.api_key })
       toast.success(`Agent "${res.name}" created — copy the API key now`)
       setName('')
-      setSubnets('')
       setNotes('')
       setFormOpen(false)
     } catch (e) {
@@ -747,7 +908,6 @@ export default function Agents() {
         <div className="mb-6">
           <FirstRunBanner
             name={newAgent.name}
-            subnets={newAgent.subnets}
             apiKey={newAgent.apiKey}
             onClose={() => setNewAgent(null)}
           />
@@ -759,26 +919,17 @@ export default function Agents() {
           <div className="mb-3">
             <h2 className="text-sm font-semibold text-gray-200">Register a new agent</h2>
             <p className="mt-0.5 text-xs text-gray-500">
-              The name identifies it in scan logs. Subnets are the LAN ranges (CIDR) it can reach at
-              Layer 2 — leave empty and the agent auto-detects its local subnets on first heartbeat.
+              A name is all that is needed. The agent reports its own Layer-2 coverage from the
+              machine it runs on, and any online agent can take a scan.
             </p>
           </div>
-          <div className="grid gap-3 md:grid-cols-3">
+          <div className="grid gap-3 md:grid-cols-2">
             <div>
               <label className="mb-1 block text-xs text-gray-500">Name (unique)</label>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="home-lan-nuc"
-                className="w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-indigo-500"
-              />
-            </div>
-            <div>
-              <label className="mb-1 block text-xs text-gray-500">Subnets (comma-separated)</label>
-              <input
-                value={subnets}
-                onChange={(e) => setSubnets(e.target.value)}
-                placeholder="192.168.1.0/24"
                 className="w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none transition-colors focus:border-indigo-500"
               />
             </div>
@@ -809,23 +960,36 @@ export default function Agents() {
         <span className="text-xs font-medium uppercase tracking-wider text-gray-500">Registered agents</span>
         <div className="flex items-center gap-1 text-[12px] text-gray-500">
           <span className="mr-1">Show commands for</span>
-          {(['windows', 'unix'] as Os[]).map((o) => (
-            <button
-              key={o}
-              onClick={() => setOs(o)}
-              className={`rounded-md px-2 py-1 font-medium transition-colors ${os === o ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-              title={o === 'windows' ? 'PowerShell on Windows' : 'Bash on Linux/macOS'}
-            >
-              {OS_LABEL[o]}
-            </button>
-          ))}
+          <OsToggle os={os} setOs={setOs} />
         </div>
       </div>
+
+      {removedName && (
+        <div className="rounded-xl border border-amber-700/60 bg-amber-950/30 p-4">
+          <div className="text-sm font-semibold text-amber-300">
+            &ldquo;{removedName}&rdquo; removed — finish the cleanup on that machine
+          </div>
+          <p className="mt-1 text-xs text-amber-200/70">
+            Deleting it here only removed the server-side record. On the agent machine the stored
+            key, the auto-start entry and the state directory all survive, so a later{' '}
+            <code className="text-amber-200">run</code> would try to re-register this deleted agent
+            and fail with an auth error.
+          </p>
+          <div className="mt-3">
+            <CodeBlock label="Run this on the agent machine" value={purgeCmd} />
+          </div>
+          <p className="mt-2 text-xs text-amber-200/60">
+            {os === 'unix'
+              ? 'Use sudo so a root-owned copy is cleaned up too — otherwise a privileged agent keeps polling and will steal scans from any unprivileged copy you start later.'
+              : 'Run PowerShell as Administrator so a copy installed with elevated rights is removed too.'}
+          </p>
+        </div>
+      )}
 
       {agents?.length ? (
         <div className="space-y-4">
           {(agents || []).map((a) => (
-            <AgentCard key={a.id} agent={a} os={os} now={now} />
+            <AgentCard key={a.id} agent={a} os={os} now={now} onRemoved={setRemovedName} />
           ))}
         </div>
       ) : (

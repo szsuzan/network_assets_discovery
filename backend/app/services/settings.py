@@ -80,8 +80,13 @@ SETTINGS_CATALOG = [
 
     _s("agent.delegation_enabled", "agent", "Agent delegation",
        "Master switch: hand scans/re-verifies to a registered scanner agent when one "
-       "covers the target LAN (ARP + SYN + exact -O). Off forces in-worker scanning.",
+       "is online (ARP + SYN + exact -O). Off forces in-worker scanning.",
        "boolean", True),
+    _s("agent.require_subnet_match", "agent", "Require subnet coverage",
+       "On: only delegate a scan to an agent whose advertised subnets cover every "
+       "target. Off (default): any online agent can take any scan, and agents that "
+       "do advertise matching subnets are still preferred.",
+       "boolean", False),
     _s("agent.online_window_seconds", "agent", "Agent heartbeat window (s)",
        "How recently an agent must have heartbeated to be considered online/delegatable.",
        "number", 90),

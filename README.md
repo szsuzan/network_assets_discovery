@@ -341,30 +341,57 @@ The **scanner agent** is a small, self-contained CLI in `agent/` that you run **
 ### Register an agent
 
 1. Open **Agents** (top nav).
-2. Click **Create agent**; give it a unique **name**, the **subnets** it can reach at Layer-2 (comma-separated, e.g. `192.168.1.0/24`), and optional notes.
+2. Click **Register agent**; give it a unique **name** and optional notes. That's the whole form — **no subnet configuration**: the agent reports its own Layer-2 coverage, and any online agent is eligible for any scan.
 3. Copy the **one-time API key** shown (it's only displayed once).
 
 ### Run the agent
 
-On the LAN machine (Windows/macOS/Linux with **nmap** installed; Windows needs **Npcap**):
+The agent is pure standard library and is served by SubNex itself, so a machine
+that has never seen this repository can fetch and run it in three commands —
+no clone, no PyPI packages, no image transfer. On the LAN machine
+(Windows/macOS/Linux with **nmap** installed; Windows needs **Npcap**):
 
 ```bash
+mkdir -p subnex-agent && cd subnex-agent
+curl -fsSL -o agent.zip http://<SERVER_IP>:8000/api/agent/bundle
+python3 -c "import zipfile;zipfile.ZipFile('agent.zip').extractall('agent')"
 export SCANNER_AGENT_KEY="<KEY>"   # keeps the key out of argv / process listings
-python agent/scanner_agent.py --server http://<SERVER_IP>:8000 --name my-lan --subnets 192.168.1.0/24
+sudo python3 agent/agentctl.py run --server http://<SERVER_IP>:8000 --name my-lan
+python3 agent/agentctl.py install  # survive reboots
 ```
 
-Or as a container on a Linux LAN host (host networking + raw sockets = real L2):
+**`sudo` (or Administrator) is what makes this a Layer-2 agent.** ARP, SYN
+scanning and passive sniffing all need raw sockets. Without privileges the agent
+still runs and scans complete, but MAC / vendor / OS come back empty — so it
+advertises `l2-degraded` and the scan log says so, rather than leaving you to
+guess why the columns are blank. `--connect` trades OS detection for a
+privilege-free TCP connect scan.
+
+Or as a container on a Linux LAN host (host networking + raw sockets = real L2),
+built from the folder step 1 just unpacked:
 
 ```bash
 docker build -t scanner-agent -f agent/Dockerfile .
-docker run -d --network=host --cap-add NET_RAW --cap-add NET_ADMIN \
-  -e SCANNER_AGENT_KEY=<KEY> \
+docker run -d --network=host --cap-add NET_RAW --cap-add NET_ADMIN --restart unless-stopped \
+  -e SCANNER_AGENT_KEY="<KEY>" \
   scanner-agent --server http://<SERVER_IP>:8000 --name my-lan
 ```
 
-The agent heartbeats every few seconds. Once it's **online**, new scans whose targets fall inside its subnets are **automatically delegated to it** — no config change needed. It streams console lines into the same live feed as in-worker scans and its results flow through the same risk / topology / report pipeline.
+If `docker run` fails with `permission denied ... /var/run/docker.sock`, add your
+account to the `docker` group and log in again (`sudo usermod -aG docker $USER`),
+or prefix the command with `sudo`.
 
-> **`--connect` flag:** if your user can't do raw SYN scans (no root / no Npcap), add `--connect` to use TCP connect scans instead. On Windows with Npcap, omit it to get SYN + full OS fingerprinting.
+The agent heartbeats every few seconds. Once it's **online**, new scans are
+**automatically delegated to it** — no config change needed. When several agents
+are online, one whose reported ranges cover the targets is preferred, otherwise
+any online agent can take the scan (turn on **Settings → Agent delegation →
+Require subnet coverage** to restrict it to covering agents only). It streams
+console lines into the same live feed as in-worker scans and its results flow
+through the same risk / topology / report pipeline.
+
+> **Single IP targets** like `192.168.1.50` are handled as `/32` for both routing
+> and discovery. `0 hosts` for a single IP normally means the address is down,
+> not that the agent missed it.
 
 ### Passive fingerprinting (optional, needs Scapy)
 
@@ -511,7 +538,7 @@ The `profile` only changes the nmap timing template (`-T*`); everything else is 
 ### Phase 0 — Host discovery
 
 1. **Expand targets** into concrete IPv4 addresses (`/24` → 254 usable IPs; network `.0` and broadcast `.255` excluded; `/31`/`/32` kept whole).
-2. **L2-first, L3-fallback** — if an online agent's subnets cover the targets, the scan is delegated (real ARP → MAC/vendor). Otherwise it warns (`No online L2-capable agent covers the targets — falling back to L3 container scan…`) and proceeds L3-only.
+2. **L2-first, L3-fallback** — if an online agent is available, the scan is delegated to it (real ARP → MAC/vendor). A covering agent is preferred, but by default any online agent qualifies. With no agent online it warns (`No online L2-capable agent covers the targets — falling back to L3 container scan…`) and proceeds L3-only. If the chosen agent lacks raw-socket privileges the log flags `L2-DEGRADED` up front, because that run will come back without MAC/vendor/OS.
 3. **Liveness probe** — concurrent TCP connect (64 threads, 1 s timeout) on the probe ports (`80, 443, 22, 445, 3389, 23, 53, 8080, 8443, 515, 631, 135, 139`). Answering hosts are marked `up` (`tcp_probe`); the rest are still registered as `scope` so the inventory mirrors the scan order.
 4. **Register hosts** — each emits a `host_discovered` WS event.
 
@@ -740,11 +767,15 @@ Expected and by design — the API returns `422` with `Targets outside authorize
 
 ### "MAC / Vendor / Hostname / OS are all empty"
 
-The container runs on Docker's virtual network, so it has no Layer-2 access — no ARP → no MAC/vendor, and heavily-filtered connect scans may produce no `-O` match. **Fix:** deploy a [scanner agent](#scanner-agents) on the LAN; scans targeting its subnets are delegated automatically and return real data.
+The container runs on Docker's virtual network, so it has no Layer-2 access — no ARP → no MAC/vendor, and heavily-filtered connect scans may produce no `-O` match. **Fix:** deploy a [scanner agent](#scanner-agents) on the LAN; scans are delegated automatically and return real data.
 
 ### "The scan used the L3 container fallback / no agent took it"
 
-Agents are only used when one is **online** and its **subnets cover the targets**. Check the **Agents** page — it must show `online` (heartbeats every few seconds) and list the target's subnet. Confirm the agent host can route to the target LAN.
+An agent is only used while it is **online** — i.e. it has heartbeated within the last 90 s. Check the **Agents** page: it must show `online` and a recent `last seen`. A row that has never connected shows `never seen` and is correctly skipped. Confirm the agent host can route to the target LAN.
+
+### "The agent is online and took the scan, but MAC / vendor / OS are blank"
+
+The agent is running **without raw-socket privileges**, so ARP/SYN/packet capture were unavailable and it advertised itself as `l2-degraded`. `python3 agent/agentctl.py status` prints the reason and the fix. Restart it with `sudo` (Linux/macOS), from an **Administrator** terminal (Windows), or as a container with `--cap-add NET_RAW --cap-add NET_ADMIN`. This is the single most common cause of "the scan worked but I got no L2 data".
 
 ### "I changed backend code — do I need to rebuild?"
 

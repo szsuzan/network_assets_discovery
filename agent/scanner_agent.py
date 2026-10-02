@@ -102,6 +102,46 @@ def _set_runtime_workers(task: dict):
 _PORT_RANGE_RE = re.compile(r"^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*$")
 
 
+def raw_socket_privileges() -> tuple:
+    """(can_do_raw_sockets, why_not) for this process.
+
+    ARP discovery, SYN scans, packet capture and nmap's -O fingerprinting all
+    need raw sockets: root or CAP_NET_RAW on Linux, an elevated token on
+    Windows. macOS restricts AF_PACKET to root as well. Checked for real rather
+    than assumed, because "assumed" is what produced silent L2 scans that came
+    back with every MAC/vendor/OS field blank.
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+            if ctypes.windll.shell32.IsUserAnAdmin():
+                return True, ""
+        except Exception:
+            pass
+        return False, "Windows requires an elevated (Administrator) token"
+
+    try:
+        if os.geteuid() == 0:
+            return True, ""
+    except AttributeError:
+        pass
+
+    # Not root: CAP_NET_RAW in the effective set is still enough.
+    try:
+        with open("/proc/self/status", "r") as fh:
+            for line in fh:
+                if line.startswith("CapEff:"):
+                    mask = int(line.split()[1], 16)
+                    CAP_NET_RAW = 13
+                    CAP_NET_ADMIN = 12
+                    if mask & ((1 << CAP_NET_RAW) | (1 << CAP_NET_ADMIN)):
+                        return True, ""
+                    return False, "running unprivileged without CAP_NET_RAW"
+    except Exception:
+        pass
+    return False, "running unprivileged (need root or CAP_NET_RAW)"
+
+
 def _valid_target(t: str) -> bool:
     """True only if the string is a well-formed IP or CIDR network.
 
@@ -3097,12 +3137,39 @@ def main():
 
     subnets = [s.strip() for s in (args.subnets or "").split(",") if s.strip()] or local_subnets()
     hostname, os_name = host_identity()
+    # Advertise what this process can ACTUALLY do, not what the toolchain could
+    # do in theory. ARP/SYN/packet-capture/O all need raw sockets: root or
+    # CAP_NET_RAW on Linux, Administrator on Windows. Claiming them without the
+    # privilege makes the server hand L2 scans to an agent that then returns
+    # hosts with blank MAC/vendor/OS and no explanation — which reads as a broken
+    # scan rather than a misconfigured one.
+    raw_ok, raw_why = raw_socket_privileges()
     caps = []
-    if not use_connect:
-        caps.append("syn")
-    caps += ["arp", "nse", "nmap", "o-version"]  # authoritative L2 features
+    if use_connect:
+        # TCP connect needs no privileges at all.
+        caps += ["connect", "nmap"]
+    else:
+        if raw_ok:
+            caps += ["syn", "o-version"]
+        caps.append("nmap")
+    if raw_ok:
+        caps += ["arp", "nse", "passive"]
+    else:
+        caps.append("l2-degraded")
+    if shutil.which("nmap"):
+        caps.append("nmap-bin")
 
     print(f"[agent] {args.name} v{VERSION} starting; subnets={subnets}")
+    print(f"[agent] capabilities: {', '.join(sorted(set(caps)))}")
+    if not raw_ok:
+        print(
+            f"[agent] WARNING: no raw-socket privileges ({raw_why}) - ARP/MAC/vendor,\n"
+            f"[agent]          SYN scans and passive sniffing are unavailable. Scans will\n"
+            f"[agent]          still run but return no MAC/vendor/OS. Re-run with sudo, or as\n"
+            f"[agent]          a container with --cap-add NET_RAW --cap-add NET_ADMIN,\n"
+            f"[agent]          or pass --connect for privilege-free TCP connect scanning.",
+            file=sys.stderr,
+        )
 
     # Background mDNS sweeper: keep re-probing on a separate thread so the
     # shared state keeps accumulating device names between/around scans. A

@@ -9,14 +9,15 @@ import subnexLogo from '../assets/subnex-logo.svg'
 import subnexLogoLight from '../assets/subnex-logo-light.svg'
 
 export default function Login() {
-  const [email, setEmail] = useState('')
+  const location = useLocation()
+  const { passwordChanged, username } = (location.state as { passwordChanged?: boolean; username?: string }) || {}
+  const [email, setEmail] = useState(username || '')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const navigate = useNavigate()
-  const location = useLocation()
   const login = useLogin()
   const { theme } = useTheme()
-  const justChanged = (location.state as { passwordChanged?: boolean })?.passwordChanged
+  const justChanged = passwordChanged
   usePageTitle('Sign in')
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -77,7 +78,7 @@ export default function Login() {
 
           {justChanged && (
             <div className="rounded border border-green-800 bg-green-900/30 px-3 py-2 text-sm text-green-400">
-              Password updated — log in with your new password.
+              Account updated — sign in with your new username and password.
             </div>
           )}
 

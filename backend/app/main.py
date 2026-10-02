@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from .routers import auth, engagements, scans, export, agents, webhooks, settings, users, deletion_requests
+from .routers import auth, engagements, scans, export, agents, agent_bundle, webhooks, settings, users, deletion_requests
 
 app = FastAPI(
     title="SubNex",
@@ -62,6 +62,7 @@ app.include_router(auth.router)
 app.include_router(engagements.router)
 app.include_router(scans.router)
 app.include_router(agents.router)
+app.include_router(agent_bundle.router)
 app.include_router(export.router)
 app.include_router(webhooks.router)
 app.include_router(settings.router)

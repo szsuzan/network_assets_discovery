@@ -16,7 +16,7 @@ const ROLE_LABELS: Record<string, string> = {
 
 const TITLE_BY_ROUTE: Array<[RegExp, string]> = [
   [/^\/login$/, 'Sign in'],
-  [/^\/change-password$/, 'Change password'],
+  [/^\/change-password$/, 'Set up account'],
   [/^\/$/, 'Engagements'],
   [/^\/agents/, 'Agents'],
   [/^\/integrations/, 'Integrations'],

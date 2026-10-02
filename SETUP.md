@@ -210,27 +210,79 @@ Agent-delegated scans get real Layer-2 discovery: ARP → MAC/vendor, `nmap -O`,
 and passive sniffing (DHCP/mDNS/NBNS/SSDP/LLDP-CDP) for hosts that hide behind
 firewalled TCP. Register one on a machine that sits on the target LAN.
 
-1. Open **Agents** → **Create agent** → give it a name, the **subnets** it
-   reaches at L2 (e.g. `192.168.1.0/24`), and copy the **one-time API key**
-   (shown only once).
-2. Run it on the LAN machine:
+**No subnet configuration is needed anywhere.** An agent reports the Layer-2
+ranges it can reach itself (from `--subnets`, or auto-detected from its
+interfaces), and *any* online agent is eligible for any scan — the reported
+ranges only decide which agent is *preferred* when several are online.
+
+1. Open **Agents** → **Register agent** → give it a name and copy the **one-time
+   API key** (shown only once). That is the entire form.
+2. On the LAN machine, fetch the agent from the server. Nothing to clone, no
+   PyPI packages, no image to transfer — the agent is pure standard library and
+   is served straight off SubNex:
 
    ```bash
-   # Linux/macOS (direct)
-   export SCANNER_AGENT_KEY="<KEY>"
-   python3 agent/scanner_agent.py --server http://<SERVER_IP>:8000 \
-       --name my-lan --subnets 192.168.1.0/24
+   # Linux / macOS
+   mkdir -p subnex-agent && cd subnex-agent
+   curl -fsSL -o agent.zip http://<SERVER_IP>:8000/api/agent/bundle
+   python3 -c "import zipfile;zipfile.ZipFile('agent.zip').extractall('agent')"
+   SCANNER_AGENT_KEY="<KEY>" python3 agent/agentctl.py run \
+       --server http://<SERVER_IP>:8000 --name my-lan
+   python3 agent/agentctl.py install      # survive reboots (systemd / launchd)
+   ```
 
-   # or as a container on a Linux LAN host (host networking = real L2)
+   ```powershell
+   # Windows PowerShell
+   mkdir subnex-agent -Force | Out-Null; cd subnex-agent
+   curl.exe -fsSL -o agent.zip http://<SERVER_IP>:8000/api/agent/bundle
+   python -c "import zipfile;zipfile.ZipFile('agent.zip').extractall('agent')"
+   # run this from an Administrator PowerShell — see step 3
+   $env:SCANNER_AGENT_KEY="<KEY>"
+   python agent\agentctl.py run --server http://<SERVER_IP>:8000 --name my-lan
+   python agent\agentctl.py install       # auto-start at logon
+   ```
+
+   Requirements: Python 3.9+, `curl`, and `nmap`. `pip install scapy` is optional
+   and only adds the passive DHCP/ARP/CDP/LLDP fingerprinter.
+
+3. **Grant raw-socket privileges — this is what makes it a Layer-2 agent.**
+   ARP, SYN scanning and packet capture all need them. Without them the agent
+   still runs and scans still complete, but MAC / vendor / OS columns come back
+   empty, and the agent advertises itself as `l2-degraded` so the server says so
+   in the scan log.
+
+   The Linux/macOS commands above already carry `sudo`. On **Windows** there is
+   no in-command equivalent: open PowerShell via right-click → **Run as
+   administrator** (or use `Start-Process -Verb RunAs …` to be prompted), because
+   an unelevated token cannot open raw sockets.
+
+   ```bash
+   sudo python3 agent/agentctl.py run --server http://<SERVER_IP>:8000 --name my-lan
+   # or, no Python needed at all — container with host networking (build from
+   # the unpacked ./agent folder):
    docker build -t scanner-agent -f agent/Dockerfile .
    docker run -d --network=host --name scanner-agent \
-     --cap-add NET_RAW --cap-add NET_ADMIN \
-     -e SCANNER_AGENT_KEY=<KEY> \
+     --cap-add NET_RAW --cap-add NET_ADMIN --restart unless-stopped \
+     -e SCANNER_AGENT_KEY="<KEY>" \
      scanner-agent --server http://<SERVER_IP>:8000 --name my-lan
    ```
 
-3. The agent heartbeats every few seconds. Once **online**, scans whose targets
-   fall inside its subnets are **automatically delegated** to it.
+   On Windows, run the terminal as **Administrator**. If a container run fails
+   with `permission denied ... /var/run/docker.sock`, add your account to the
+   `docker` group and log in again (`sudo usermod -aG docker $USER`), or prefix
+   the command with `sudo`.
+
+4. The agent heartbeats every few seconds. Once **online** it starts receiving
+   scans automatically — no further configuration.
+
+> **Single IPs work fine.** A bare `192.168.1.50` is treated as `192.168.1.50/32`
+> for routing and discovery. A scan reports **0 hosts** when the address is simply
+> not up — check with `ping`/`nmap -sn` before assuming the agent missed it.
+
+> **Prefer strict routing?** Set **Settings → Agent delegation → Require subnet
+> coverage** to on, and delegation goes back to only handing a scan to an agent
+> whose advertised ranges cover every target. Off (default) is what makes agent
+> setup a one-field form.
 
 > **Windows agent:** use `start-scanner-agent.ps1` (reads
 > `SCANNER_AGENT_KEY` env or the local key file; no argv exposure), or run

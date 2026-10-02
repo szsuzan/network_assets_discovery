@@ -100,6 +100,13 @@ async def create_agent(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    """Register an agent and hand back its one-time API key.
+
+    Only a name is needed: subnets are not part of registration. The agent
+    advertises the ranges it can reach at Layer 2 on its first heartbeat, and
+    scan delegation prefers an agent whose ranges cover the targets without
+    requiring one (see `agent.require_subnet_match`).
+    """
     if current_user.role not in ("admin", "scanner"):
         raise HTTPException(status_code=403,
                             detail="Only admins/scanners can create scanner agents")
@@ -110,7 +117,7 @@ async def create_agent(
     agent = Agent(
         name=data.name,
         api_key_hash=_hash_key(key),
-        subnets=data.subnets or [],
+        subnets=[],
         notes=data.notes,
         created_by=current_user.id,
         status="offline",
@@ -119,7 +126,7 @@ async def create_agent(
     db.add(AuditLog(
         user_id=current_user.id,
         action="agent_created",
-        detail={"name": data.name, "subnets": data.subnets},
+        detail={"name": data.name},
     ))
     await db.commit()
     await db.refresh(agent)

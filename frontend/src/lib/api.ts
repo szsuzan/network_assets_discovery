@@ -19,9 +19,16 @@ api.interceptors.response.use(
   (res) => res,
   (error) => {
     if (error.response?.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('role')
-      window.location.href = '/login'
+      // A bad password on the login form is itself a 401. Redirecting here
+      // reloaded the page and wiped the component's error state, so the
+      // "Invalid email or password" message could never render. Let the
+      // login page handle its own 401.
+      const onLogin = window.location.pathname === '/login'
+      if (!onLogin) {
+        localStorage.removeItem('token')
+        localStorage.removeItem('role')
+        window.location.href = '/login'
+      }
     } else if (
       error.response?.status === 403 &&
       (error.response?.headers?.['x-require-password-change'] === 'true' ||
