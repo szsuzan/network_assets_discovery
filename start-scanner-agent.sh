@@ -13,7 +13,11 @@
 #    SCANNER_AGENT_API_KEY  alias for the above
 #    SCANNER_AGENT_SERVER   default http://localhost:8000
 #    SCANNER_AGENT_NAME     default lan-agent
-#    SCANNER_AGENT_SUBNETS  comma-separated L2 subnets, default 192.168.1.0/24
+#    SCANNER_AGENT_SUBNETS  comma-separated L2 subnets. Empty by default, which
+#                           lets the agent auto-detect its own interfaces. Only
+#                           set this if auto-detection is wrong for your host.
+#    SCANNER_AGENT_NO_SUDO  set to 1 to skip the automatic elevation (you will
+#                           get TCP-connect scans only: no MAC/vendor/OS)
 #
 #  Run:  ./start-scanner-agent.sh
 # =============================================================================
@@ -24,7 +28,7 @@ AGENT_PY="${AGENT_PY:-$ROOT/agent/scanner_agent.py}"
 
 SERVER="${SCANNER_AGENT_SERVER:-http://localhost:8000}"
 NAME="${SCANNER_AGENT_NAME:-lan-agent}"
-SUBNETS="${SCANNER_AGENT_SUBNETS:-192.168.1.0/24}"
+SUBNETS="${SCANNER_AGENT_SUBNETS:-}"
 
 PIDDIR="${TMPDIR:-/tmp}/subnex"
 PIDFILE="$PIDDIR/agent.pid"
@@ -74,12 +78,39 @@ mkdir -p "$PIDDIR"
 : > "$OUTLOG"
 : > "$ERRLOG"
 
+SUBNET_ARG=()
+if [ -n "$SUBNETS" ]; then
+  SUBNET_ARG=(--subnets "$SUBNETS")
+else
+  echo "  subnets: auto-detect from local interfaces"
+fi
+
 # Hand the key over via the inherited environment (SCANNER_AGENT_KEY) instead of
 # an --api-key argv flag so it never shows up in process listings.
-SCANNER_AGENT_KEY="$API_KEY" \
-  nohup python3 -u "$AGENT_PY" --server "$SERVER" --name "$NAME" --subnets "$SUBNETS" \
-    >> "$OUTLOG" 2>> "$ERRLOG" &
-AGENT_PID=$!
+if [ "${SCANNER_AGENT_NO_SUDO:-0}" = "1" ]; then
+  echo "=== Starting LAN scanner agent (unprivileged) ==="
+  echo "  note: no MAC/vendor/OS will be reported; use --connect for L3 coverage"
+  SCANNER_AGENT_KEY="$API_KEY" \
+    nohup python3 -u "$AGENT_PY" --server "$SERVER" --name "$NAME" ${SUBNET_ARG[@]+"${SUBNET_ARG[@]}"} \
+      >> "$OUTLOG" 2>> "$ERRLOG" &
+  AGENT_PID=$!
+else
+  # ARP/SYN scanning and passive sniffing need uid 0. Re-exec under sudo rather
+  # than warning and silently producing a degraded agent.
+  if [ "$(id -u)" != "0" ]; then
+    echo "=== Elevating: Layer-2 scans need root ... ==="
+    # Pass the key through the environment; sudo resets it unless we allow it.
+    exec sudo --preserve-env=SCANNER_AGENT_KEY,SCANNER_AGENT_API_KEY \
+      env SCANNER_AGENT_KEY="$API_KEY" \
+      SCANNER_AGENT_NO_SUDO=1 SCANNER_AGENT_SUBNETS="$SUBNETS" \
+      "$BASH_SOURCE" "$@"
+  fi
+  echo "=== Starting LAN scanner agent (root) ==="
+  SCANNER_AGENT_KEY="$API_KEY" \
+    nohup python3 -u "$AGENT_PY" --server "$SERVER" --name "$NAME" ${SUBNET_ARG[@]+"${SUBNET_ARG[@]}"} \
+      >> "$OUTLOG" 2>> "$ERRLOG" &
+  AGENT_PID=$!
+fi
 echo "$AGENT_PID" > "$PIDFILE"
 
 sleep 5

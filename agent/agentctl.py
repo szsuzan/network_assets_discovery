@@ -112,6 +112,27 @@ def write_pid(which: str, pid: int) -> None:
         fh.write(str(pid))
 
 
+def _lock_dir() -> str:
+    """Directory for cross-user instance locks.
+
+    Must be shared by every account, so it must NOT be tempfile.gettempdir():
+    on Windows that is %LOCALAPPDATA%\\Temp, which is per-user, and the lock
+    would silently fail to stop two users registering the same agent name.
+    """
+    if os.name == "nt":
+        base = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+        d = os.path.join(base, "SubNex")
+    else:
+        d = "/tmp"
+    try:
+        os.makedirs(d, exist_ok=True)
+        if not os.access(d, os.W_OK):
+            raise OSError
+    except Exception:
+        d = tempfile.gettempdir()  # last resort: shared on POSIX, not on Windows
+    return d
+
+
 def _instance_lock_path(name: str, server: str) -> str:
     """System-wide lock, deliberately NOT under $HOME.
 
@@ -120,10 +141,10 @@ def _instance_lock_path(name: str, server: str) -> str:
     start. They then share one API key, resolve to the same DB row, and the
     unprivileged instance wins the task queue -- handing back scans with blank
     MAC/vendor/OS and no error anywhere. Keying the lock on name+server in a
-    shared location (/tmp) makes the collision visible at startup instead.
+    shared location makes the collision visible at startup instead.
     """
-    tag = f"{name}@{server}".replace("/", "_").replace(":", "_")
-    return os.path.join(tempfile.gettempdir(), f"subnex-agent-{tag}.lock")
+    tag = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in f"{name}@{server}")
+    return os.path.join(_lock_dir(), f"subnex-agent-{tag}.lock")
 
 
 def claim_instance(name: str, server: str) -> tuple:
@@ -164,11 +185,140 @@ def release_instance(name: str, server: str) -> None:
 
 
 def _same_user(pid: int) -> bool:
-    """True when pid runs under the same uid as us."""
+    """True when pid runs under the same account as us."""
+    if os.name == "nt":
+        return _win_process_owner(pid).lower() == (os.environ.get("USERNAME") or "").lower()
     try:
         return os.stat(f"/proc/{pid}").st_uid == os.geteuid()
     except Exception:
         return False
+
+
+def _win_process_owner(pid: int) -> str:
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+        parts = [c.strip('" ') for c in out.split(",")]
+        return parts[1] if len(parts) > 2 else "?"
+    except Exception:
+        return "?"
+
+
+def all_agent_processes() -> list:
+    """(pid, owner) for every running agentctl/scanner_agent process.
+
+    Portable across Linux/macOS (/proc) and Windows (tasklist). The pid file is
+    useless here because it lives under $HOME, so it cannot see an agent running
+    as a different account -- which is exactly the one that has to be cleaned up.
+    """
+    out = []
+    me = os.getpid()
+    if os.name == "nt":
+        try:
+            txt = subprocess.run(["tasklist", "/FO", "CSV", "/NH", "/FI", "IMAGENAME eq python.exe"],
+                                 capture_output=True, text=True, timeout=30).stdout
+            for line in txt.splitlines():
+                parts = [c.strip('" ') for c in line.split(",")]
+                if len(parts) < 2 or not parts[1].isdigit():
+                    continue
+                pid = int(parts[1])
+                if pid == me:
+                    continue
+                # Only python processes running our script; tasklist has no cmdline.
+                if _win_cmdline_has(pid, ("agentctl.py", "scanner_agent.py")):
+                    out.append((pid, parts[0]))
+        except Exception:
+            pass
+        return out
+    import glob
+    for entry in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            pid = int(entry.split("/")[2])
+            if pid == me:
+                continue
+            with open(entry, "rb") as fh:
+                cmd = fh.read().decode("utf-8", "replace").replace("\x00", " ")
+            if "agentctl.py" in cmd or "scanner_agent.py" in cmd:
+                out.append((pid, _proc_owner(pid)))
+        except Exception:
+            continue
+    return out
+
+
+def _win_cmdline_has(pid: int, needles) -> bool:
+    """True when a Windows process's command line contains any of `needles`."""
+    for src in (
+        ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine"],
+        ["powershell", "-NoProfile", "-Command",
+         f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine"],
+    ):
+        try:
+            r = subprocess.run(src, capture_output=True, text=True, timeout=25)
+            blob = (r.stdout or "") + (r.stderr or "")
+            if any(n in blob for n in needles):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def all_user_homes() -> list:
+    """(username, home_dir) for every account on the machine.
+
+    macOS/Windows have no pwd module, so fall back to the accounts we can
+    discover from that platform's own user database.
+    """
+    out = []
+    if os.name != "nt":
+        try:
+            import pwd as _pwd
+            return [(p.pw_name, p.pw_dir) for p in _pwd.getpwall()]
+        except Exception:
+            pass
+        who = os.environ.get("USER")
+        if who:
+            out.append((who, os.path.expanduser("~")))
+        return out
+    # Windows: enumerate real (non special) accounts via the Win32 API.
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        netapi = ctypes.WinDLL("netapi32", use_last_error=True)
+        LEVEL0 = 1
+        FILTER_NORMAL = 0x0002
+        buf = ctypes.create_string_buffer(1024)
+        size = wintypes.DWORD(1024)
+        resume = wintypes.DWORD(0)
+
+        class USER_INFO_0(ctypes.Structure):
+            _fields_ = [("name", wintypes.LPWSTR)]
+
+        class USER_INFO_1(ctypes.Structure):
+            _fields_ = [("name", wintypes.LPWSTR), ("password", wintypes.LPWSTR),
+                        ("password_age", wintypes.DWORD), ("priv", wintypes.DWORD),
+                        ("home_dir", wintypes.LPWSTR), ("comment", wintypes.LPWSTR),
+                        ("flags", wintypes.DWORD), ("script_path", wintypes.LPWSTR)]
+
+        PLIST = (ctypes.POINTER(USER_INFO_1) * 1024)()
+        got = wintypes.DWORD(0)
+        rc = netapi.NetUserEnum(
+            None, 1, ctypes.byref(PLIST), 1024, ctypes.byref(got),
+            ctypes.byref(resume), FILTER_NORMAL)
+        if rc == 0 or rc == 234:  # NERR_Success / ERROR_MORE_DATA
+            for i in range(got.value):
+                u = PLIST[i].contents
+                if u.name and u.home_dir:
+                    out.append((u.name, u.home_dir))
+    except Exception:
+        pass
+    me = os.environ.get("USERPROFILE")
+    uname = os.environ.get("USERNAME")
+    if uname and me and (uname, me) not in out:
+        out.append((uname, me))
+    return out
 
 
 def pid_alive(pid: int) -> bool:
@@ -190,6 +340,55 @@ def pid_alive(pid: int) -> bool:
         return False
 
 
+def _windows_is_elevated() -> bool:
+    """True when this Windows token is actually elevated.
+
+    IsUserAnAdmin() is unreliable: after UAC it returns FALSE for an account that
+    IS a member of Administrators whenever it is running with a medium-integrity
+    filtered token -- i.e. every ordinary terminal. That made a genuinely
+    capable agent advertise l2-degraded. Check the real elevation type via
+    TokenElevation, and keep IsUserAnAdmin as a fallback.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        TOKEN_ELEVATION = 20
+        TokenElevation = 20  # TokenElevation
+
+        class TOKEN_ELEVATION(ctypes.Structure):
+            _fields_ = [("TokenIsElevated", wintypes.DWORD)]
+
+        h = wintypes.HANDLE()
+        if not advapi.OpenProcessToken(kernel.GetCurrentProcess(),
+                                       wintypes.DWORD(TOKEN_QUERY | TOKEN_QUERY),
+                                       ctypes.byref(h)):
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        elev = TOKEN_ELEVATION()
+        ok = advapi.GetTokenInformation(h, TokenElevation, ctypes.byref(elev),
+                                        ctypes.sizeof(elev), None)
+        kernel.CloseHandle(h)
+        if ok and elev.TokenIsElevated:
+            return True
+        # Not elevated: it can still be an admin filtered for UAC, which is
+        # exactly the case IsUserAnAdmin gets wrong. Check group membership.
+        SID = ctypes.c_void_p()
+        admins = ctypes.c_void_p()
+        NtAuthority = 5
+        if not advapi.ConvertStringSidToSidW("S-1-5-32-544", ctypes.byref(SID)):
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        admin_ok = bool(advapi.IsMemberSid(SID, SID))
+        advapi.FreeSid(SID)
+        return admin_ok
+    except Exception:
+        try:
+            import ctypes
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:
+            return False
+
+
 def is_privileged() -> bool:
     """True when this process can open raw sockets.
 
@@ -200,8 +399,7 @@ def is_privileged() -> bool:
     """
     try:
         if os.name == "nt":
-            import ctypes
-            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+            return _windows_is_elevated()
     except Exception:
         return False
     try:
@@ -293,7 +491,12 @@ def resolve_args(args) -> dict:
             "no API key found. Create the agent on the Agents page, then pass --api-key "
             f"once (it is saved to {key_path()}).")
     subs = [s.strip() for s in subnets.split(SUBNET_SEP) if s.strip()]
-    return {"key": key, "server": server, "name": name, "subnets": subs}
+    # Persist --connect so autostart, the supervised child and `repair` all keep
+    # the same privilege-free scan type instead of silently reverting to -sS.
+    connect = bool(getattr(args, "connect", False)) or bool(
+        os.environ.get("SCANNER_AGENT_CONNECT")) or bool(cfg.get("connect"))
+    return {"key": key, "server": server, "name": name, "subnets": subs,
+            "connect": connect}
 
 
 def _supervisor_cmd(root: str, cfg: dict) -> list:
@@ -334,6 +537,7 @@ def cmd_run(args) -> int:
     write_key(cfg["key"])
     write_config({
         "server": cfg["server"], "name": cfg["name"], "subnets": cfg["subnets"],
+        "connect": bool(cfg.get("connect")),
         "installed": read_config().get("installed", False),
     })
     parent = _supervisor_cmd(os.path.dirname(os.path.abspath(__file__)), cfg)
@@ -355,6 +559,8 @@ def _child_cmd(script: str, cfg: dict) -> list:
            "--interval", "10"]
     if cfg.get("subnets"):
         cmd += ["--subnets", SUBNET_SEP.join(cfg["subnets"])]
+    if cfg.get("connect"):
+        cmd += ["--connect"]
     env = dict(os.environ)
     env["SCANNER_AGENT_KEY"] = cfg["key"]
     return cmd, env
@@ -473,6 +679,19 @@ def install_command() -> list:
 
 
 def autostart_status() -> str:
+    # Audit the filesystem BEFORE trusting the config marker. A leftover unit
+    # from an older version is the thing most likely to be wrong, and it keeps
+    # working (or keeps failing) regardless of what the config file claims.
+    # Reporting "not_installed" while a dangerous unit sits on disk hides the
+    # one problem that actually matters.
+    for probe in (os.path.expanduser(LEGACY_USER_UNIT),):
+        if os.path.isfile(probe):
+            try:
+                with open(probe, encoding="utf-8", errors="replace") as fh:
+                    if unit_is_dangerous(fh.read()):
+                        return "dangerous"
+            except Exception:
+                pass
     cfg = read_config()
     if not cfg.get("installed"):
         return "not_installed"
@@ -487,17 +706,152 @@ def autostart_status() -> str:
             return "unknown"
     if sys.platform == "darwin":
         plist = os.path.expanduser("~/Library/LaunchAgents/local.subnex.agent.plist")
-        return "installed" if os.path.isfile(plist) else "missing"
-    unit = os.path.expanduser("~/.config/systemd/user/subnex-agent.service")
-    if os.path.isfile(unit):
+        if not os.path.isfile(plist):
+            return "missing"
+        # Ask launchd, not just the filesystem: a plist can exist while the job
+        # failed to load, and reporting "installed" made `repair` refuse to fix it.
         try:
-            out = subprocess.run(["systemctl", "--user", "is-enabled", "subnex-agent"],
+            out = subprocess.run(["launchctl", "list"], capture_output=True,
+                                 text=True, timeout=15).stdout
+            if "local.subnex.agent" in out:
+                return "installed"
+            return "missing"
+        except Exception:
+            return "installed"
+    # A system unit (root, the preferred install) or a per-user unit.
+    if os.path.isfile(SYSTEM_UNIT):
+        try:
+            out = subprocess.run(["systemctl", "is-enabled", UNIT_NAME],
                                  capture_output=True, text=True, timeout=15).stdout.strip()
             return "installed" if out == "enabled" else "missing"
         except Exception:
             return "installed"
-    crontab = os.popen("crontab -l 2>/dev/null").read()
+    unit = os.path.expanduser(LEGACY_USER_UNIT)
+    if os.path.isfile(unit):
+        try:
+            # A per-user unit that prompts for a password is not a working
+            # install -- it fails auth forever and can lock the account out.
+            with open(unit, encoding="utf-8", errors="replace") as fh:
+                if unit_is_dangerous(fh.read()):
+                    return "dangerous"
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(["systemctl", "--user", "is-enabled", UNIT_NAME],
+                                 capture_output=True, text=True, timeout=15).stdout.strip()
+            return "installed" if out == "enabled" else "missing"
+        except Exception:
+            return "installed"
+    try:
+        crontab = subprocess.run(["crontab", "-l"], capture_output=True,
+                                 text=True, timeout=15).stdout
+    except Exception:
+        crontab = ""
+    # Require the well-formed marker: the old broken line also contained this
+    # text, so status reported "installed" for a job that died every boot.
     return "installed" if "agentctl.py run --foreground" in crontab else "missing"
+
+
+UNIT_NAME = "subnex-agent"
+SYSTEM_UNIT = "/etc/systemd/system/subnex-agent.service"
+SYSTEM_ENV = "/etc/subnex-agent.env"
+LEGACY_USER_UNIT = "~/.config/systemd/user/subnex-agent.service"
+
+
+def render_system_unit(py_exe: str, ctl: str, args_str: str) -> str:
+    """A SYSTEM unit for the privileged agent.
+
+    Two hard rules, both learned the hard way:
+
+    1. NEVER put `sudo` in ExecStart. A background service has no terminal, so
+       sudo cannot prompt, cannot read a cached credential and cannot use
+       askpass -- it just fails the PAM auth. With Restart=always that becomes
+       an infinite retry loop, and pam_faillock counts every attempt until it
+       locks the account out of the machine entirely. If the agent needs root,
+       the unit itself must be a system unit that already runs as root.
+    2. Restart=on-failure, never always -- a service that was asked to stop
+       should stay stopped, and a crash loop must not be able to spin forever.
+
+    StartLimit* caps the blast radius of any future failure: systemd gives up
+    after a few attempts rather than retrying forever.
+    """
+    return f"""[Unit]
+Description=SubNex LAN scanner agent
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10
+# Runs as root because it needs raw sockets. No sudo: this is a system unit,
+# so privilege is already there and asking for it again can only fail.
+ExecStart={py_exe} -u {ctl} {args_str}
+# The API key lives in a 0600 root-owned file, not inline here, so it does not
+# sit in a world-readable unit file.
+EnvironmentFile={SYSTEM_ENV}
+# Never block waiting for input: a service must never be able to prompt.
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=subnex-agent
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def render_user_unit(py_exe: str, ctl: str, args_str: str) -> str:
+    """A per-user unit that CANNOT elevate.
+
+    Used when install runs without root. This runs as the logged-in user, so it
+    gets TCP connect scanning and hostname data but no ARP/MAC/vendor/OS. It
+    deliberately contains no `sudo` -- see render_system_unit().
+    """
+    return f"""[Unit]
+Description=SubNex LAN scanner agent (unprivileged, no Layer-2 data)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=10
+ExecStart={py_exe} -u {ctl} {args_str}
+EnvironmentFile=%h/.config/subnex-agent/agent.env
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=subnex-agent
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def unit_is_dangerous(text: str) -> bool:
+    """True if a unit would prompt for a password in the background.
+
+    Used both when writing units (refuse to emit one) and when auditing units
+    written by older versions.
+    """
+    for line in text.splitlines():
+        line = line.strip()
+        # Strip the `ExecStart=` key, not just `ExecStart` -- leaving the `=`
+        # attached makes the first token "=sudo", which matches nothing and
+        # silently reports every dangerous unit as safe.
+        if not line.startswith("ExecStart="):
+            continue
+        argv = line[len("ExecStart="):].split()
+        for tok in argv:
+            base = os.path.basename(tok)
+            if base in ("sudo", "su", "pkexec", "doas", "runuser"):
+                return True
+    return False
 
 
 def cmd_install(args) -> int:
@@ -537,25 +891,42 @@ def cmd_install(args) -> int:
         os.makedirs(plist_dir, exist_ok=True)
         plist = os.path.join(plist_dir, "local.subnex.agent.plist")
         launchd_label = "local.subnex.agent"
+
+        def _x(v) -> str:
+            # Interpolated values are agent name / server URL / paths. An
+            # unescaped &, < or > produces a malformed plist that launchctl
+            # rejects, and the raw returncode used to be ignored.
+            return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+                    .replace(">", "&gt;"))
+
         with open(plist, "w", encoding="utf-8") as fh:
             fh.write(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-  <key>Label</key><string>{launchd_label}</string>
+  <key>Label</key><string>{_x(launchd_label)}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{sys.executable}</string>
+    <string>{_x(sys.executable)}</string>
     <string>-u</string>
-    <string>{os.path.abspath(os.path.join(root, 'agentctl.py'))}</string>
-    {''.join(f'<string>{a}</string>' for a in tail)}
+    <string>{_x(os.path.abspath(os.path.join(root, 'agentctl.py')))}</string>
+    {''.join(f'<string>{_x(a)}</string>' for a in tail)}
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>{logr}</string>
-  <key>StandardErrorPath</key><string>{logr}</string>
+  <key>StandardOutPath</key><string>{_x(logr)}</string>
+  <key>StandardErrorPath</key><string>{_x(logr)}</string>
 </dict></plist>""")
         subprocess.run(["launchctl", "unload", plist], capture_output=True)
-        subprocess.run(["launchctl", "load", plist])
+        # Check the result. launchctl reports a malformed plist (e.g. an agent
+        # name containing & or <) only in its output; ignoring returncode made
+        # install claim success for a job that would never start.
+        load = subprocess.run(["launchctl", "load", plist], capture_output=True, text=True)
+        if load.returncode != 0:
+            detail = (load.stderr or load.stdout or "").strip()
+            print(f"launchctl failed to load {plist}: {detail}")
+            print("  The plist may be malformed if the agent name or server URL")
+            print("  contains &, < or >. Re-run install with a simpler name.")
+            return 1
         cfg["installed"] = "macos:launchd"
         write_config(cfg)
         print(f"installed LaunchAgent {plist}")
@@ -570,91 +941,141 @@ def cmd_install(args) -> int:
             print("         from a root shell:")
             print(f"           sudo {sys.executable} {os.path.abspath(os.path.join(root, 'agentctl.py'))} run --server {cfg.get('server','')} --name {cfg.get('name','')}")
         return 0
-    unit_name = "subnex-agent"
+    unit_name = UNIT_NAME
     if shutil.which("systemctl"):
-        # Resolve the *real* user's home. Running this under sudo leaves HOME=/root,
-        # which silently installs a root-owned unit that never starts at the user's
-        # login. SUDO_USER names who actually invoked us.
         sudo_user = os.environ.get("SUDO_USER") or ""
         run_user = sudo_user or os.environ.get("USER") or ""
         pw = None
-        home = os.path.expanduser("~")
         if run_user:
             try:
                 import pwd
                 pw = pwd.getpwnam(run_user)
-                home = pw.pw_dir
             except Exception:
                 pw = None
-        unit_dir = os.path.join(home, ".config", "systemd", "user")
-        os.makedirs(unit_dir, exist_ok=True)
-        unit = os.path.join(unit_dir, f"{unit_name}.service")
-        # Elevation goes INSIDE the unit, and it is ALWAYS needed here: a
-        # `systemctl --user` unit runs as the logged-in user and can never be
-        # root, no matter what privilege the `install` command itself had.
-        # Checking is_privileged() here is wrong -- when install is run under
-        # sudo it returns True and emits a unit with no `sudo`, which then
-        # starts unprivileged at boot and quietly returns blank MAC/vendor/OS.
-        elevate = "sudo "
-        with open(unit, "w", encoding="utf-8") as fh:
-            fh.write(f"""[Unit]
-Description=SubNex LAN scanner agent
-After=network-online.target
-Wants=network-online.target
 
-[Service]
-Type=simple
-Restart=always
-RestartSec=5
-ExecStart={elevate}{sys.executable} -u {os.path.abspath(os.path.join(root, 'agentctl.py'))} {args_str}
-Environment=SCANNER_AGENT_KEY={read_key()}
-
-[Install]
-WantedBy=default.target
-""")
-        if sudo_user and os.geteuid() == 0 and pw:
-            # Fix ownership so the user can later enable/disable their own unit.
+        # --- Clean up any unit written by an older version -----------------
+        # Those wrote `ExecStart=sudo ...` into a per-user unit with
+        # Restart=always. With no terminal to prompt on, every restart was a
+        # failed PAM authentication, and pam_faillock eventually locked the
+        # user's account out of the whole machine. Never leave one in place.
+        legacy = os.path.expanduser(LEGACY_USER_UNIT)
+        legacy_bad = False
+        if os.path.isfile(legacy):
+            with open(legacy, encoding="utf-8", errors="replace") as fh:
+                legacy_bad = unit_is_dangerous(fh.read())
+        if legacy_bad:
+            print("REMOVING a dangerous unit from a previous version:")
+            print(f"  {legacy}")
+            print("  It ran `sudo` in the background with Restart=always, which fails")
+            print("  PAM authentication on every retry and can lock your account")
+            print("  (pam_faillock). Disable and delete it now.")
+            env_l = dict(os.environ)
+            as_user_l = (["runuser", "-u", run_user, "--"]
+                         if run_user and os.geteuid() == 0
+                         and shutil.which("runuser") else [])
+            subprocess.run(as_user_l + ["systemctl", "--user", "disable", "--now",
+                                        unit_name], capture_output=True, env=env_l)
             try:
-                os.chown(unit_dir, pw.pw_uid, pw.pw_gid)
-                os.chown(unit, pw.pw_uid, pw.pw_gid)
-            except Exception:
-                pass
-        env = dict(os.environ)
-        if run_user:
-            env["HOME"] = home
-            env["USER"] = run_user
-            # systemctl --user needs the session bus; a sudo'd shell has neither
-            # of the variables it looks for, which is the "Failed to connect to
-            # user scope bus" error.
-            if pw:
-                env["XDG_RUNTIME_DIR"] = f"/run/user/{pw.pw_uid}"
-            env.pop("DBUS_SESSION_BUS_ADDRESS", None)
-        as_user = ["runuser", "-u", run_user, "--"] if run_user and os.geteuid() == 0 and shutil.which("runuser") else []
-        subprocess.run(as_user + ["systemctl", "--user", "daemon-reload"], capture_output=True, env=env)
-        r = subprocess.run(as_user + ["systemctl", "--user", "enable", "--now", unit_name],
-                           capture_output=True, text=True, env=env)
+                os.remove(legacy)
+            except Exception as e:
+                print(f"  could not delete it: {e}")
+                print(f"  remove it manually: rm {legacy}")
+            else:
+                print("  removed.")
+
+        ctl_abs = os.path.abspath(os.path.join(root, "agentctl.py"))
+        key = read_key()
+        can_write_system = os.geteuid() == 0
+
+        if can_write_system:
+            # Preferred: a system unit that is already root. No sudo, no PAM,
+            # no password prompt, full ARP/MAC/vendor/OS.
+            unit_text = render_system_unit(sys.executable, ctl_abs, args_str)
+            with open(SYSTEM_UNIT, "w", encoding="utf-8") as fh:
+                fh.write(unit_text)
+            os.chmod(SYSTEM_UNIT, 0o644)
+            # Key in a root-only file rather than inline in the unit.
+            with open(SYSTEM_ENV, "w", encoding="utf-8") as fh:
+                fh.write(f"SCANNER_AGENT_KEY={key}\n")
+            os.chmod(SYSTEM_ENV, 0o600)
+            if unit_is_dangerous(unit_text):  # belt and braces
+                raise SystemExit("refusing to install a unit that prompts for a password")
+            subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
+            r = subprocess.run(["systemctl", "enable", "--now", unit_name],
+                               capture_output=True, text=True)
+            if r.returncode != 0:
+                detail = (r.stderr or r.stdout or "").strip()
+                print(f"could not start the unit automatically: {detail}")
+                print(f"  start it yourself with:  sudo systemctl enable --now {unit_name}")
+                print(f"  inspect it with:        journalctl -u {unit_name} -f")
+            else:
+                print(f"installed system unit {SYSTEM_UNIT} (runs as root, no sudo)")
+            cfg["installed"] = "linux:systemd-system"
+            write_config(cfg)
+            return 0
+
+        # No root: write a per-user unit that cannot and does not try to
+        # elevate. This is the honest degraded mode -- TCP connect scanning and
+        # hostnames work, ARP/MAC/vendor/OS do not.
+        env_dir = os.path.join(os.path.expanduser("~"), ".config", "subnex-agent")
+        os.makedirs(env_dir, exist_ok=True)
+        unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+        os.makedirs(unit_dir, exist_ok=True)
+        unit_text = render_user_unit(sys.executable, ctl_abs, args_str)
+        if unit_is_dangerous(unit_text):
+            raise SystemExit("refusing to install a unit that prompts for a password")
+        with open(os.path.join(unit_dir, f"{unit_name}.service"), "w",
+                  encoding="utf-8") as fh:
+            fh.write(unit_text)
+        with open(os.path.join(env_dir, "agent.env"), "w", encoding="utf-8") as fh:
+            fh.write(f"SCANNER_AGENT_KEY={key}\n")
+        os.chmod(os.path.join(env_dir, "agent.env"), 0o600)
+        subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        r = subprocess.run(["systemctl", "--user", "enable", "--now", unit_name],
+                           capture_output=True, text=True)
         if r.returncode != 0:
             detail = (r.stderr or r.stdout or "").strip()
             print(f"could not start the unit automatically: {detail}")
             print(f"  start it yourself with:  systemctl --user enable --now {unit_name}")
-            print(f"  or at boot without a login:  sudo loginctl enable-linger {run_user}")
         else:
-            print(f"installed user systemd unit {unit_name}")
+            print(f"installed user systemd unit {unit_dir}/{unit_name}.service")
         if run_user:
             try:
                 subprocess.run(["loginctl", "enable-linger", run_user], capture_output=True)
             except Exception:
                 pass
-        if not is_privileged():
-            print("note: the unit re-elevates with sudo on start, so it still gets raw-socket")
-            print("      privileges. Allow NOPASSWD for it, or the start will prompt at boot:")
-            print(f"      sudo visudo   # rule: sz ALL=(ALL) NOPASSWD: {sys.executable} *")
+        print()
+        print("NOTE: this unit runs as your user, so it cannot open raw sockets.")
+        print("      Scans still work over TCP connect, but MAC/vendor/OS stay blank.")
+        print("      For Layer-2 data, re-run install as root to get a system unit:")
+        print(f"        sudo {sys.executable} {ctl_abs} install")
+        print()
+        print("      This unit deliberately contains no sudo: a background service has")
+        print("      no terminal to answer a password prompt, so it would fail")
+        print("      authentication forever and lock your account via pam_faillock.")
         cfg["installed"] = "linux:systemd-user"
         write_config(cfg)
         return 0
-    cron_line = f"@reboot {sys.executable} -u {os.path.abspath(os.path.join(root, 'agentctl.py'))} run --foreground {' '.join(shell_quote(a) for a in cmd[2:])} >> {shell_quote(logr)} 2>&1"
-    existing = os.popen("crontab -l 2>/dev/null").read()
-    os.system(f"(echo '{cron_line}'; echo \"{existing}\") | crontab -")
+    cron_line = (f"@reboot {sys.executable} -u "
+                   f"{os.path.abspath(os.path.join(root, 'agentctl.py'))} run --foreground "
+                   f"{' '.join(shell_quote(a) for a in tail)} >> {shell_quote(logr)} 2>&1")
+    # Write via stdin, not shell string interpolation. Building an `os.system`
+    # command with the agent name / server URL / existing crontab embedded in
+    # single and double quotes breaks on any quote character and replaces the
+    # whole crontab. This used `tail`-less cmd[2:], which also emitted the
+    # script path twice and made argparse die with "unrecognized arguments".
+    try:
+        existing = subprocess.run(["crontab", "-l"], capture_output=True, text=True).stdout
+    except Exception:
+        existing = ""
+    kept = [l for l in existing.splitlines() if "agentctl.py" not in l or "run" not in l]
+    body = "\n".join(kept + [cron_line]).strip() + "\n"
+    try:
+        r = subprocess.run(["crontab", "-"], input=body, capture_output=True, text=True)
+        if r.returncode != 0:
+            raise SystemExit(f"could not write crontab: {r.stderr.strip()}")
+    except FileNotFoundError:
+        raise SystemExit("`crontab` not found; install a cron implementation or use Docker")
     cfg["installed"] = "linux:cron"
     write_config(cfg)
     print("installed @reboot crontab entry")
@@ -673,17 +1094,33 @@ def cmd_uninstall(args) -> int:
         except OSError:
             pass
     elif shutil.which("systemctl"):
-        subprocess.run(["systemctl", "--user", "disable", "--now", "subnex-agent"], capture_output=True)
-        try:
-            os.remove(os.path.expanduser("~/.config/systemd/user/subnex-agent.service"))
-        except OSError:
-            pass
+        # Remove BOTH shapes: the root system unit and the per-user unit.
+        subprocess.run(["systemctl", "disable", "--now", UNIT_NAME], capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", "--now", UNIT_NAME],
+                       capture_output=True)
+        for p in (SYSTEM_UNIT,
+                  os.path.expanduser(LEGACY_USER_UNIT),
+                  os.path.expanduser("~/.config/subnex-agent/agent.env")):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+        subprocess.run(["systemctl", "daemon-reload"], capture_output=True)
         subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+        if os.geteuid() == 0:
+            try:
+                os.remove(SYSTEM_ENV)
+            except OSError:
+                pass
     else:
-        out = os.popen("crontab -l 2>/dev/null").read()
+        try:
+            out = subprocess.run(["crontab", "-l"], capture_output=True,
+                                 text=True, timeout=15).stdout
+        except Exception:
+            out = ""
         kept = [l for l in out.splitlines() if "agentctl.py run" not in l]
-        data = "\n".join(kept) + "\n"
-        os.system(f"(echo '{data}') | crontab -")
+        subprocess.run(["crontab", "-"], input="\n".join(kept).strip() + "\n",
+                       capture_output=True, text=True)
     cfg = read_config()
     cfg["installed"] = False
     write_config(cfg)
@@ -710,55 +1147,65 @@ def cmd_purge(args) -> int:
 
     Run it as root to clean up both users at once.
     """
-    import glob
-    import pwd as _pwd
+    import glob as _glob
     import shutil as _shutil
 
     removed, missing = [], []
 
+    # System-level install (root). Stopped before the files are touched so a
+    # running unit cannot rewrite them underneath us.
+    if os.name != "nt" and shutil.which("systemctl"):
+        subprocess.run(["systemctl", "disable", "--now", UNIT_NAME],
+                       capture_output=True)
+        subprocess.run(["systemctl", "--user", "disable", "--now", UNIT_NAME],
+                       capture_output=True)
+    for p in (SYSTEM_UNIT, SYSTEM_ENV):
+        if os.path.exists(p):
+            try:
+                os.remove(p)
+                removed.append(f"removed {p}")
+            except Exception as e:
+                missing.append(f"{p} ({e})")
+
     # -- 1. processes ------------------------------------------------------
-    # The pid file is per-$HOME, so as a normal user it cannot see a root-owned
-    # agent. Sweep every agent process on the box instead.
+    # The pid file is per-$HOME, so as a normal user it cannot see an agent owned
+    # by another account. Sweep every agent process on the box instead.
     killed = []
-    for entry in glob.glob("/proc/[0-9]*/cmdline"):
+    for pid, owner in all_agent_processes():
         try:
-            pid = int(entry.split("/")[2])
-            with open(entry, "rb") as fh:
-                cmd = fh.read().decode("utf-8", "replace").replace("\x00", " ")
-            if "agentctl.py" in cmd or "scanner_agent.py" in cmd:
-                if pid == os.getpid():
-                    continue
-                try:
-                    os.kill(pid, signal.SIGTERM)
-                    killed.append((pid, _proc_owner(pid)))
-                except PermissionError:
-                    print(f"  ! PID {pid} ({_proc_owner(pid)}) needs root: sudo kill {pid}")
-                except Exception:
-                    pass
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+                               capture_output=True, timeout=20)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            killed.append((pid, owner))
+        except PermissionError:
+            tip = (f"stop-Process -Id {pid} -Force" if os.name == "nt"
+                   else f"sudo kill {pid}")
+            print(f"  ! PID {pid} ({owner}) needs elevation: {tip}")
         except Exception:
-            continue
+            pass
     if killed:
         time.sleep(2)
-        for pid, _u in killed:
-            removed.append(f"stopped agent process PID {pid} (user {_u})")
-        left = [p for p, _u in killed if pid_alive(p)]
+        for pid, owner in killed:
+            removed.append(f"stopped agent process PID {pid} (user {owner})")
+        left = [p for p, _o in killed if pid_alive(p)]
         for p in left:
-            print(f"  ! PID {p} still alive: sudo kill -9 {p}")
+            tip = (f"stop-Process -Id {p} -Force" if os.name == "nt"
+                   else f"sudo kill -9 {p}")
+            print(f"  ! PID {p} still alive: {tip}")
 
     # -- 2. autostart entries, for every user on the box --------------------
-    users = []
-    try:
-        users = [p.pw_name for p in _pwd.getpwall()]
-    except Exception:
-        users = [os.environ.get("USER") or "root"]
-    for u in users:
-        try:
-            home = _pwd.getpwnam(u).pw_dir
-        except Exception:
+    users = all_user_homes()
+    seen_homes = set()
+    for u, home in users:
+        if not home or home in seen_homes:
             continue
+        seen_homes.add(home)
         for rel in (".config/systemd/user/subnex-agent.service",
+                    ".config/subnex-agent/agent.env",
                     "Library/LaunchAgents/local.subnex.agent.plist"):
-            p = os.path.join(home, rel)
+            p = os.path.join(home, rel.replace("/", os.sep))
             if os.path.exists(p):
                 try:
                     os.remove(p)
@@ -766,34 +1213,47 @@ def cmd_purge(args) -> int:
                 except Exception as e:
                     missing.append(f"{p} ({e})")
 
+    # macOS: also unload the job, or launchd keeps the old plist loaded.
+    if sys.platform == "darwin":
+        for _u, home in users:
+            plist = os.path.join(home, "Library", "LaunchAgents", "local.subnex.agent.plist")
+            if os.path.exists(plist):
+                subprocess.run(["launchctl", "unload", plist], capture_output=True)
+
     # systemctl --user for each real user, best-effort
-    for u in users:
-        if u == "root":
-            continue
-        try:
-            uid = _pwd.getpwnam(u).pw_uid
-            env = dict(os.environ, HOME=_pwd.getpwnam(u).pw_dir, USER=u,
-                       XDG_RUNTIME_DIR=f"/run/user/{uid}")
-            env.pop("DBUS_SESSION_BUS_ADDRESS", None)
-            if os.geteuid() == 0:
-                subprocess.run(["runuser", "-u", u, "--", "systemctl", "--user",
-                                "disable", "--now", "subnex-agent"],
-                               capture_output=True, env=env)
-                subprocess.run(["runuser", "-u", u, "--", "systemctl", "--user",
-                                "daemon-reload"], capture_output=True, env=env)
-            else:
-                subprocess.run(["systemctl", "--user", "disable", "--now", "subnex-agent"],
-                               capture_output=True, env=env)
-        except Exception:
-            pass
+    if os.name != "nt" and shutil.which("systemctl"):
+        for u, home in users:
+            if u == "root" or not home:
+                continue
+            try:
+                import pwd as _pwd
+                uid = _pwd.getpwnam(u).pw_uid
+                env = dict(os.environ, HOME=home, USER=u,
+                           XDG_RUNTIME_DIR=f"/run/user/{uid}")
+                env.pop("DBUS_SESSION_BUS_ADDRESS", None)
+                if os.geteuid() == 0 and shutil.which("runuser"):
+                    subprocess.run(["runuser", "-u", u, "--", "systemctl", "--user",
+                                    "disable", "--now", "subnex-agent"],
+                                   capture_output=True, env=env)
+                    subprocess.run(["runuser", "-u", u, "--", "systemctl", "--user",
+                                    "daemon-reload"], capture_output=True, env=env)
+                else:
+                    subprocess.run(["systemctl", "--user", "disable", "--now",
+                                    "subnex-agent"], capture_output=True, env=env)
+            except Exception:
+                pass
     if os.name == "nt":
-        subprocess.run(["schtasks", "/delete", "/tn", WINDOWS_TASK, "/f"], capture_output=True)
-        removed.append(f"deleted scheduled task {WINDOWS_TASK}")
+        r = subprocess.run(["schtasks", "/delete", "/tn", WINDOWS_TASK, "/f"],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            removed.append(f"deleted scheduled task {WINDOWS_TASK}")
+        else:
+            missing.append(f"scheduled task {WINDOWS_TASK} ({r.stderr.strip() or 'not present'})")
 
     # -- 3. cross-user instance locks --------------------------------------
-    # These live in /tmp and are the reason a freshly-created agent can be told
-    # "already running" when nothing is. Always clear them.
-    for lock in glob.glob(os.path.join(tempfile.gettempdir(), "subnex-agent-*.lock")):
+    # These live in a shared dir and are the reason a freshly-created agent can
+    # be told "already running" when nothing is. Always clear them.
+    for lock in _glob.glob(os.path.join(_lock_dir(), "subnex-agent-*.lock")):
         try:
             os.unlink(lock)
             removed.append(f"removed stale lock {lock}")
@@ -801,9 +1261,11 @@ def cmd_purge(args) -> int:
             pass
 
     # -- 4. state dirs, for every user --------------------------------------
-    for u in users:
+    for u, home in users:
+        if not home:
+            continue
         try:
-            d = os.path.join(_pwd.getpwnam(u).pw_dir, APP_DIR_NAME)
+            d = os.path.join(home, APP_DIR_NAME)
         except Exception:
             continue
         if os.path.isdir(d):
@@ -866,7 +1328,19 @@ def cmd_status(args) -> int:
     ag = read_pid("agent")
     print(f"supervisor pid : {sup if pid_alive(sup) else 'not running'}")
     print(f"agent pid      : {ag if pid_alive(ag) else 'not running'}")
-    print(f"autostart      : {autostart_status()}")
+    st = autostart_status()
+    print(f"autostart      : {st}")
+    if st == "dangerous":
+        # Loud, actionable, and specific: this state locked a user out of their
+        # machine once already.
+        print()
+        print("  *** DANGEROUS AUTOSTART ENTRY ***")
+        print("  An installed unit runs `sudo` in the background with no terminal to")
+        print("  answer a password prompt. Every retry is a failed PAM authentication,")
+        print("  which pam_faillock counts -- it can lock your account out of the")
+        print("  whole machine.")
+        print(f"  Remove it with:  python {os.path.abspath(__file__)} repair")
+        print()
     if not key:
         print("API key        : MISSING -- run with --api-key after creating the agent")
         return 1
@@ -917,7 +1391,7 @@ def cmd_repair(args) -> int:
         pid = _spawn_detached(_supervisor_cmd(root, cfg), log_path())
         write_pid("supervisor", pid)
         print(f"restarted agent supervisor (PID {pid})")
-    if autostart_status() in ("missing", "not_installed"):
+    if autostart_status() in ("missing", "not_installed", "dangerous"):
         try:
             cmd_install(args)
         except SystemExit as exc:
@@ -955,6 +1429,12 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(s)
     s.add_argument("--foreground", action="store_true",
                    help="supervise in this terminal (recommended; autostart uses this)")
+    # `status` tells unprivileged users to add this, so argparse has to accept
+    # it. Privileged-only nmap flags are stripped automatically when the agent
+    # has no raw sockets, so this is genuinely privilege-free.
+    s.add_argument("--connect", action="store_true",
+                   help="TCP connect scanning only: needs no root/Administrator, "
+                        "so no MAC/vendor/OS but works unprivileged")
 
     sub.add_parser("stop", help="stop the agent (keep autostart entry)")
     s = sub.add_parser("install", help="persist the agent across reboot/logon")

@@ -377,6 +377,10 @@ docker run -d --network=host --cap-add NET_RAW --cap-add NET_ADMIN --restart unl
   scanner-agent --server http://<SERVER_IP>:8000 --name my-lan
 ```
 
+This is a **Linux-host-only** option: `--network=host` and `--cap-add` are
+ignored inside Docker Desktop's Linux VM on macOS and are unsupported by
+Windows containers. Use the native commands on those hosts instead.
+
 If `docker run` fails with `permission denied ... /var/run/docker.sock`, add your
 account to the `docker` group and log in again (`sudo usermod -aG docker $USER`),
 or prefix the command with `sudo`.
@@ -775,7 +779,7 @@ An agent is only used while it is **online** — i.e. it has heartbeated within 
 
 ### "The agent is online and took the scan, but MAC / vendor / OS are blank"
 
-The agent is running **without raw-socket privileges**, so ARP/SYN/packet capture were unavailable and it advertised itself as `l2-degraded`. `python3 agent/agentctl.py status` prints the reason and the fix. Restart it with `sudo` (Linux/macOS), from an **Administrator** terminal (Windows), or as a container with `--cap-add NET_RAW --cap-add NET_ADMIN`. This is the single most common cause of "the scan worked but I got no L2 data".
+The agent is running **without raw-socket privileges**, so ARP/SYN/packet capture were unavailable and it advertised itself as `l2-degraded`. `python3 agent/agentctl.py status` prints the reason and the fix. Restart it with `sudo` (Linux), from a root shell (macOS), from an **Administrator** terminal (Windows), or as a container with `--cap-add NET_RAW --cap-add NET_ADMIN` (Linux hosts only). This is the single most common cause of "the scan worked but I got no L2 data". If you cannot run elevated at all, add `--connect` to the run command for privilege-free TCP connect scanning — that still finds open ports but cannot report MAC addresses or guess the OS.
 
 ### "I changed backend code — do I need to rebuild?"
 

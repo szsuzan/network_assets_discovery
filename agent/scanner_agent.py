@@ -94,9 +94,14 @@ def _p2_workers():
 def _set_runtime_workers(task: dict):
     global _RUNTIME_WORKERS
     try:
-        _RUNTIME_WORKERS = int(task.get("workers")) if task.get("workers") else None
+        n = int(task.get("workers")) if task.get("workers") else None
     except (TypeError, ValueError):
-        _RUNTIME_WORKERS = None
+        n = None
+    # The server sends this from the `agent.workers` setting, so a mistyped
+    # value used to reach ThreadPoolExecutor directly: a negative/zero count
+    # raised ValueError and killed the whole phase, and a huge one tried to
+    # spawn that many threads. Clamp to something an agent host can honour.
+    _RUNTIME_WORKERS = min(max(n or 1, 1), 64)
 
 # nmap-style port range grammar, mirror of the server-side schema validator.
 _PORT_RANGE_RE = re.compile(r"^\d{1,5}(-\d{1,5})?(,\d{1,5}(-\d{1,5})?)*$")
@@ -114,11 +119,41 @@ def raw_socket_privileges() -> tuple:
     if os.name == "nt":
         try:
             import ctypes
-            if ctypes.windll.shell32.IsUserAnAdmin():
+            from ctypes import wintypes
+            advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+
+            class TOKEN_ELEVATION(ctypes.Structure):
+                _fields_ = [("TokenIsElevated", wintypes.DWORD)]
+
+            h = wintypes.HANDLE()
+            if not advapi.OpenProcessToken(kernel.GetCurrentProcess(),
+                                           wintypes.DWORD(0x0008 | 0x0010),
+                                           ctypes.byref(h)):
+                return False, "could not inspect the Windows access token"
+            elev = TOKEN_ELEVATION()
+            ok = advapi.GetTokenInformation(h, 20, ctypes.byref(elev),
+                                            ctypes.sizeof(elev), None)
+            kernel.CloseHandle(h)
+            if ok and elev.TokenIsElevated:
                 return True, ""
+            # UAC filtered token: still an Administrators member, which
+            # IsUserAnAdmin() wrongly reports as not-admin.
+            sid = ctypes.c_void_p()
+            if advapi.ConvertStringSidToSidW("S-1-5-32-544", ctypes.byref(sid)):
+                member = bool(advapi.IsMemberSid(sid, sid))
+                advapi.FreeSid(sid)
+                if member:
+                    return True, ""
+            return False, "Windows requires an elevated (Administrator) token"
         except Exception:
-            pass
-        return False, "Windows requires an elevated (Administrator) token"
+            try:
+                import ctypes
+                if ctypes.windll.shell32.IsUserAnAdmin():
+                    return True, ""
+            except Exception:
+                pass
+            return False, "Windows requires an elevated (Administrator) token"
 
     try:
         if os.geteuid() == 0:
@@ -143,17 +178,23 @@ def raw_socket_privileges() -> tuple:
 
 
 def _valid_target(t: str) -> bool:
-    """True only if the string is a well-formed IP or CIDR network.
+    """True only if the string is a well-formed IPv4 address or CIDR network.
 
     Anything unparseable (a stray nmap option like ``--script=...``, a hostname,
     whitespace) is rejected so a malicious/compromised server can never smuggle
     extra arguments into the nmap argv we execute locally.
+
+    IPv6 is rejected too, and that is deliberate: nmap refuses IPv6 literals
+    without an explicit ``-6`` flag, both XML parsers here only read
+    addrtype="ipv4", and vendor/OS detection is ARP-based. Accepting ``::1`` and
+    then reporting zero hosts looks like a working scan that found nothing, so
+    the agent refuses it instead and says so in the task log.
     """
     if not isinstance(t, str) or not t.strip():
         return False
     try:
-        ipaddress.ip_network(t.strip(), strict=False)
-        return True
+        net = ipaddress.ip_network(t.strip(), strict=False)
+        return net.version == 4
     except ValueError:
         return False
 
@@ -293,25 +334,218 @@ class ApiClient:
 # --------------------------------------------------------------------------- #
 # Local subnet detection (advertises L2 coverage to the server)
 # --------------------------------------------------------------------------- #
-def local_subnets() -> List[str]:
-    subs = []
-    if sys.platform.startswith("linux"):
+def _usable_subnet(ip: str, prefix: str) -> Optional[str]:
+    """Normalise one interface address into a CIDR, or None to skip it.
+
+    Loopback and link-local are never scannable. Note that 172.16.0.0/12 is
+    RFC1918 private space and MUST be kept -- excluding every 172.* address (as
+    this used to) silently dropped an entire common corporate LAN, and Docker's
+    own 172.17/16 bridge.
+
+    Multicast, unspecified and reserved ranges are dropped too: advertising one
+    of these as a scan target is never useful, and a /0 would advertise the
+    entire IPv4 internet for a sweep.
+    """
+    if not ip or not prefix:
+        return None
+    try:
+        addr = ipaddress.ip_address(ip)
+        plen = int(prefix)
+    except ValueError:
+        return None
+    if addr.is_loopback or addr.is_link_local:
+        return None
+    if addr.is_multicast or addr.is_unspecified or addr.is_reserved:
+        return None
+    # Skip single-host /31-/32 entries: nothing to sweep. Also refuse anything
+    # broader than /8, which can only come from a mis-detected prefix.
+    if plen >= 31 or plen < 8:
+        return None
+    return f"{addr}/{plen}"
+
+
+def _linux_subnets() -> List[str]:
+    out = []
+    try:
+        r = subprocess.run(["ip", "-o", "-f", "inet", "addr", "show"],
+                           capture_output=True, text=True, timeout=10)
+        for line in r.stdout.splitlines():
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == "inet" and i + 1 < len(parts):
+                    ip, _, prefix = parts[i + 1].partition("/")
+                    net = _usable_subnet(ip, prefix)
+                    if net:
+                        out.append(net)
+    except Exception:
+        pass
+    return out
+
+
+def _macos_subnets() -> List[str]:
+    """Enumerate every IPv4 interface on macOS.
+
+    macOS has no `ip` command, so this used to fall through to the default-route
+    /24 guess -- hiding the Ethernet NIC while Wi-Fi was up, plus every VLAN and
+    bridge adapter. ifconfig prints "inet 10.0.0.5 --> 10.0.0.1 netmask 0xffffff00".
+    """
+    out = []
+    for cmd in (["ifconfig", "-a"], ["ifconfig"]):
         try:
-            out = subprocess.run(["ip", "-o", "-f", "inet", "addr", "show"],
-                                 capture_output=True, text=True, timeout=10).stdout
-            for line in out.splitlines():
-                parts = line.split()
-                for i, p in enumerate(parts):
-                    if p == "inet" and i + 1 < len(parts):
-                        ip, _, prefix = parts[i + 1].partition("/")
-                        if ip.startswith("127.") or ip.startswith("172.") or ip.startswith("169.254."):
-                            continue
-                        subs.append(f"{ip}/{prefix}")
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            if r.returncode == 0 and "inet " in r.stdout:
+                break
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
+    else:
+        return []
+    current = []
+    for line in r.stdout.splitlines():
+        if line and not line[0].isspace() and ":" in line:
+            if current:
+                out.extend(current)
+                current = []
+            continue
+        if "inet " not in line:
+            continue
+        tok = line.split("inet ", 1)[1].split()[0]
+        ip = tok
+        prefix = None
+        m = re.search(r"netmask\s+(0x[0-9a-fA-F]+|\d+\.\d+\.\d+\.\d+)", line)
+        if m:
+            nm = m.group(1)
+            try:
+                if nm.startswith("0x"):
+                    prefix = str(bin(int(nm, 16)).count("1"))
+                else:
+                    prefix = str(bin(int(ipaddress.IPv4Address(nm))).count("1"))
+            except Exception:
+                prefix = None
+        if prefix is None:
+            # macOS omits the netmask on point-to-point (utun/VPN) links.
+            continue
+        net = _usable_subnet(ip, prefix)
+        if net:
+            current.append(net)
+    out.extend(current)
+    # Deduplicate, preserving order.
+    seen = set()
+    return [s for s in out if not (s in seen or seen.add(s))]
+
+
+def _windows_subnets() -> List[str]:
+    """Enumerate IPv4 interfaces on Windows without extra dependencies."""
+    out = []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        iphlp = ctypes.WinDLL("iphlpapi", use_last_error=True)
+        ws2 = ctypes.WinDLL("ws2_32", use_last_error=True)
+
+        AF_INET = 2
+        ERROR_BUFFER_OVERFLOW = 111
+        class SOCKADDR(ctypes.Structure):
+            _fields_ = [("sa_family", ctypes.c_ushort), ("sa_data", ctypes.c_byte * 14)]
+        class IP_ADAPTER_ADDRESSES(ctypes.Structure):
+            pass
+        IP_ADAPTER_ADDRESSES._fields_ = [
+            ("Length", ctypes.c_ulong), ("IfIndex", ctypes.c_ulong),
+            ("Next", ctypes.POINTER(IP_ADAPTER_ADDRESSES)),
+            ("AdapterName", ctypes.c_char_p), ("FirstUnicastAddress",
+                                               ctypes.c_void_p),
+            ("FirstAnycastAddress", ctypes.c_void_p),
+            ("FirstMulticastAddress", ctypes.c_void_p),
+            ("FirstDnsServerAddress", ctypes.c_void_p),
+            ("DnsSuffix", ctypes.c_wchar_p), ("Description", ctypes.c_wchar_p),
+            ("FriendlyName", ctypes.c_wchar_p),
+        ]
+        class SOCKET_ADDRESS(ctypes.Structure):
+            _fields_ = [("lpSockaddr", ctypes.POINTER(SOCKADDR)),
+                        ("iSockaddrLength", ctypes.c_int)]
+        size = ctypes.c_ulong(15000)
+        buf = ctypes.create_string_buffer(size.value)
+        ret = iphlp.GetAdaptersAddresses(AF_INET, 0, None,
+                                         ctypes.byref(buf), ctypes.byref(size))
+        if ret == ERROR_BUFFER_OVERFLOW:
+            buf = ctypes.create_string_buffer(size.value)
+            ret = iphlp.GetAdaptersAddresses(AF_INET, 0, None,
+                                             ctypes.byref(buf), ctypes.byref(size))
+        if ret != 0:
+            return []
+        addr = ctypes.cast(buf, ctypes.POINTER(IP_ADAPTER_ADDRESSES))
+        while addr:
+            sa = ctypes.cast(addr.contents.FirstUnicastAddress,
+                             ctypes.POINTER(SOCKET_ADDRESS))
+            while sa:
+                raw = sa.contents.lpSockaddr.contents
+                port = ctypes.string_at(ctypes.addressof(raw), 2)
+                ctypes.memmove(port, b"\x00\x00", 2)
+                packed = ctypes.string_at(ctypes.addressof(raw.sa_data), 4)
+                ip = socket.inet_ntoa(ctypes.c_char_p(packed))
+                mask_raw = ctypes.string_at(ctypes.addressof(raw.sa_data) + 4, 4)
+                mask = socket.inet_ntoa(ctypes.c_char_p(mask_raw))
+                try:
+                    plen = bin(int(ipaddress.IPv4Address(mask))).count("1")
+                except Exception:
+                    plen = 0
+                net = _usable_subnet(ip, str(plen))
+                if net:
+                    out.append(net)
+                sa = sa.contents.Next if hasattr(sa.contents, "Next") else None
+                break
+            addr = addr.contents.Next
+    except Exception:
+        # Fall back to netsh, which is present on every Windows install.
+        try:
+            r = subprocess.run(
+                ["netsh", "interface", "ipv4", "show", "addresses"],
+                capture_output=True, text=True, timeout=20)
+            iface, ip = None, None
+            for line in r.stdout.splitlines():
+                s = line.strip()
+                hdr = re.match(r'^Configuration for interface "(.+)"$', s)
+                if hdr:
+                    iface = hdr.group(1)
+                    continue
+                a = re.match(r"^IP Address:\s*(\d+\.\d+\.\d+\.\d+)\s*$", s)
+                if a:
+                    ip = a.group(1)
+                    continue
+                # "Subnet Prefix: 192.168.1.0/24 (mask 255.255.255.0)"
+                p = re.match(r"^Subnet Prefix:\s*\S+?/(\d+)", s)
+                if p and ip:
+                    low = (iface or "").lower()
+                    if not low.startswith(("loopback", "pseudo", "teredo", "isatap")):
+                        net = _usable_subnet(ip, p.group(1))
+                        if net:
+                            out.append(net)
+                    ip = None
         except Exception:
             pass
+    seen = set()
+    return [s for s in out if not (s in seen or seen.add(s))]
+
+
+def local_subnets() -> List[str]:
+    """Every scannable IPv4 subnet this host is directly attached to.
+
+    Used for agent heartbeat coverage, so it must list ALL interfaces: the
+    server prefers this agent for matching targets. Reporting only the default
+    route (the old fallback) hid every secondary NIC, VLAN and bridge.
+    """
+    subs = []
+    if sys.platform.startswith("linux"):
+        subs = _linux_subnets()
+    elif sys.platform == "darwin":
+        subs = _macos_subnets()
+    elif os.name == "nt":
+        subs = _windows_subnets()
     if subs:
         return subs
-    # Generic fallback: derive a /24 from the default-route interface IP.
+    # Last resort: guess a /24 from the default-route interface. Report it as a
+    # guess by omitting any prefix detail we could not verify.
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -808,10 +1042,110 @@ def _run_mdns_sweeper(probe_duration: float = 10.0, gap: float = 5.0, stop_evt=N
             except Exception:
                 return
 
+# Cached privilege verdict: nmap's own decision is `geteuid() != 0` unless
+# told otherwise, which does NOT match this agent's capability check. An agent
+# holding CAP_NET_RAW but not uid 0 would claim arp/syn/o-version and then have
+# every nmap invocation quit outright. `_NMAP_PRIVILEGED` bridges that gap.
+_NMAP_PRIVILEGED: Optional[bool] = None
+
+# Flags nmap refuses to run without privilege. Passing any of these while
+# unprivileged makes nmap print a usage error and quit, so the whole call
+# returns empty -- silently losing service/version/OS data for every host.
+_PRIVILEGED_ONLY_FLAGS = ("-O", "-sS", "-sU", "-PR", "-PS", "-PA", "-A")
+
+
+def nmap_is_privileged() -> bool:
+    """Whether nmap will accept privilege-requiring flags from this process.
+
+    nmap requires uid 0 specifically; CAP_NET_RAW alone (a container running as
+    a non-root uid, or a hardened build) is not enough unless we pass
+    `--privileged` or set NMAP_PRIVILEGED.
+    """
+    global _NMAP_PRIVILEGED
+    if _NMAP_PRIVILEGED is not None:
+        return _NMAP_PRIVILEGED
+    ok, _why = raw_socket_privileges()
+    if not ok:
+        _NMAP_PRIVILEGED = False
+        return False
+    if os.name == "nt":
+        # Windows nmap relies on Npcap rather than uid, so CAP checks do not
+        # apply; raw_socket_privileges() already tested the elevated token.
+        _NMAP_PRIVILEGED = True
+        return True
+    try:
+        if os.geteuid() == 0:
+            _NMAP_PRIVILEGED = True
+            return True
+    except AttributeError:
+        pass
+    # Real capabilities but not uid 0: tell nmap explicitly, else it exits.
+    _NMAP_PRIVILEGED = True
+    return True
+
+
+def _strip_privileged_flags(args: List[str]) -> List[str]:
+    """Drop flags nmap will refuse to run unprivileged.
+
+    Without this, `--connect` (documented as needing no privileges) still
+    passed -O, so nmap quit on every host and the scan returned no service,
+    version or OS data at all.
+    """
+    return [a for a in args if a not in _PRIVILEGED_ONLY_FLAGS]
+
+
+def _prepare_nmap_args(args: List[str], priv: bool,
+                       is_windows: Optional[bool] = None) -> List[str]:
+    """Build the final nmap argv for the current privilege level.
+
+    Split out from run_nmap() so both branches are unit-testable: the
+    privileged branch cannot be exercised from an unprivileged shell, which is
+    how a real bug survived review.
+
+    - Privileged but not uid 0 (CAP_NET_RAW without root): nmap quits on
+      -sS/-O/-PR unless told otherwise, so pass --privileged. It MUST come
+      *after* the binary name -- prepending it makes subprocess try to execute
+      a program literally named "--privileged" and the whole scan dies with
+      FileNotFoundError.
+    - Unprivileged: strip those flags instead, so nmap runs at all.
+    """
+    args = list(args)
+    if not args:
+        return []
+    if is_windows is None:
+        is_windows = os.name == "nt"
+    if priv:
+        if not is_windows and "--privileged" not in args:
+            args = args[:1] + ["--privileged"] + args[1:]
+    else:
+        args = _strip_privileged_flags(args)
+    return args
+
+
 def run_nmap(args: List[str]) -> str:
     """Run nmap, returning raw output. stderr (liveness/port progress) is
-    echoed; the caller decides whether stdout XML is worth keeping."""
-    proc = subprocess.run(args, capture_output=True, text=True, errors="replace")
+    echoed; the caller decides whether stdout XML is worth keeping.
+
+    Two portability fixes live here because this is the single choke point for
+    every nmap call:
+
+    - When we hold raw sockets but are not uid 0, add `--privileged`. nmap
+      otherwise quits on -sS/-O/-PR and every result comes back empty.
+    - When we do NOT hold raw sockets, remove those flags instead of letting
+      nmap fail. This is what makes `--connect` genuinely privilege-free.
+    """
+    args = list(args)
+    if not args:
+        return ""
+    priv = nmap_is_privileged()
+    nmap_args = _prepare_nmap_args(args, priv)
+    if not nmap_args:
+        return ""
+    env = None
+    if priv and os.name != "nt":
+        env = dict(os.environ, NMAP_PRIVILEGED="1")
+    proc = subprocess.run(nmap_args, capture_output=True, text=True,
+                          errors="replace", env=env)
     if proc.stderr:
         sys.stderr.write(proc.stderr)
     return proc.stdout or ""
@@ -877,7 +1211,11 @@ def _hostname_from_banner(ports: list) -> Optional[str]:
         re.compile(r"NetBIOS computer name\s*:\s*([^\r\n]+)"),
         re.compile(r"Computer name\s*:\s*([^\r\n]+)"),
         re.compile(r"Workstation\s*:\s*([^\r\n]+)"),
-        re.compile(r"([A-Za-z0-9\-_.]{1,63})\s+<00>\s+UNIQUE"),
+        # nbtstat-style rows look like "DESKTOP-ABC123<00>   UNIQUE" with NO
+        # space before the <00> suffix. The previous pattern required `\s+`
+        # there, so it could never match the very format it was written for and
+        # every Windows name found this way was silently dropped.
+        re.compile(r"([A-Za-z0-9\-_.]{1,63})\s*<00>\s+UNIQUE"),
     )
     for p in ports:
         b = p.get("banner") or ""
@@ -983,7 +1321,7 @@ def parse_host_xml(xml: str) -> Optional[dict]:
         })
 
     host = {"ip": ip, "mac": mac, "vendor": vendor, "hostname": hostname,
-            "status": "up", "ports": ports}
+            "status": state, "ports": ports}
 
     if mac:
         host["mac"] = mac
@@ -1107,9 +1445,22 @@ def execute_task(client: ApiClient, task: dict, use_connect: bool = False):
     _set_runtime_workers(task)
 
     if not targets:
-        client.log(task_id, "Task rejected: no valid targets provided", level="err")
+        raw = [t for t in (task.get("targets") or []) if str(t).strip()]
+        ipv6 = []
+        for t in raw:
+            try:
+                if ipaddress.ip_network(str(t).strip(), strict=False).version == 6:
+                    ipv6.append(str(t))
+            except ValueError:
+                pass
+        if ipv6 and len(ipv6) == len(raw):
+            msg = ("IPv6 targets are not supported by the agent (nmap needs -6 and "
+                   "vendor/OS detection is ARP-based): " + ", ".join(ipv6))
+        else:
+            msg = "Task rejected: no valid targets provided"
+        client.log(task_id, msg, level="err")
         try:
-            client.result(task_id, [], status="failed", notes="invalid targets")
+            client.result(task_id, [], status="failed", notes=msg[:400])
         except Exception:
             pass
         return
@@ -1937,6 +2288,10 @@ def _sniff_vendor(text: str) -> Optional[str]:
 
 def _mac_from_bytes(b: bytes) -> str:
     try:
+        # A truncated packet slice produced bogus 1-5 byte "MACs" like "00",
+        # which then reached the database as if they were real addresses.
+        if not b or len(b) < 6:
+            return ""
         return ":".join("%02x" % x for x in b[:6])
     except Exception:
         return ""
@@ -2544,9 +2899,23 @@ def _passive_packet(pkt, subnets: List[str]):
         pass
 
 
+_NON_DEVICE_MACS = frozenset((
+    "ff:ff:ff:ff:ff:ff",   # broadcast
+    "00:00:00:00:00:00",   # all-zero / padding
+))
+
+
 def _mac_to_ip(mac: str, ip: str):
-    m = (mac or "").lower()
-    if m and ("ff" * 3) != m and not _passive_shared.get("_mac2ip", {}).get(m):
+    m = (mac or "").strip().lower()
+    if not m or len(m) != 17 or m.count(":") != 5:
+        return
+    # The old guard compared a full "ff:ff:ff:ff:ff:ff" string against "ffffff",
+    # which can never be equal, so the broadcast MAC was cached like any other
+    # and the reverse map reported it as a discovered device. IPv4/IPv6
+    # multicast MACs (01:00:5e:..., 33:33:...) are transports, not hosts.
+    if m in _NON_DEVICE_MACS or m.startswith(("01:00:5e:", "33:33:")):
+        return
+    if not _passive_shared.get("_mac2ip", {}).get(m):
         _passive_shared.setdefault("_mac2ip", {})[m] = ip
 
 

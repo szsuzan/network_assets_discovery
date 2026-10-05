@@ -424,6 +424,14 @@ async def claim_next_task(
     scan = (await db.execute(select(Scan).where(Scan.id == task.scan_id))).scalar_one_or_none()
     if not scan:
         return None
+    # A paused scan must not be claimed. Claiming overwrote the status with
+    # "agent_running", which (a) told the UI the scan was running when it was
+    # suspended and (b) made Resume a no-op, because resume only acts on a
+    # "paused" scan -- so the user could pause an agent scan and then never
+    # resume it. The task stays queued, so the agent claims it the moment the
+    # scan is resumed.
+    if scan.status == "paused":
+        return None
     task.status = "claimed"
     task.claimed_at = datetime.now(timezone.utc)
     scan.status = "agent_running"

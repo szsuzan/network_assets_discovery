@@ -222,14 +222,18 @@ ranges only decide which agent is *preferred* when several are online.
    is served straight off SubNex:
 
    ```bash
-   # Linux / macOS
+   # Linux / macOS — sudo is required (note: the key must sit AFTER sudo)
    mkdir -p subnex-agent && cd subnex-agent
    curl -fsSL -o agent.zip http://<SERVER_IP>:8000/api/agent/bundle
    python3 -c "import zipfile;zipfile.ZipFile('agent.zip').extractall('agent')"
-   SCANNER_AGENT_KEY="<KEY>" python3 agent/agentctl.py run \
+   sudo SCANNER_AGENT_KEY="<KEY>" python3 agent/agentctl.py run \
        --server http://<SERVER_IP>:8000 --name my-lan
-   python3 agent/agentctl.py install      # survive reboots (systemd / launchd)
+   sudo python3 agent/agentctl.py install      # survive reboots (systemd / launchd)
    ```
+
+   The key is passed as `sudo VAR=value cmd`, not `VAR=value sudo cmd`. `sudo`
+   strips a leading environment variable, so the reversed form starts the agent
+   with no credentials.
 
    ```powershell
    # Windows PowerShell
@@ -255,6 +259,23 @@ ranges only decide which agent is *preferred* when several are online.
    no in-command equivalent: open PowerShell via right-click → **Run as
    administrator** (or use `Start-Process -Verb RunAs …` to be prompted), because
    an unelevated token cannot open raw sockets.
+
+   On **macOS** there is a permanent caveat: `install` writes a LaunchAgent, and
+   a LaunchAgent runs as the logged-in user and can never obtain raw sockets. So
+   after a reboot the macOS agent comes back `l2-degraded` with blank
+   MAC/vendor/OS. For Layer-2 data across reboots, start it from a root shell:
+
+   ```bash
+   sudo python3 agent/agentctl.py run --server http://<SERVER_IP>:8000 --name my-lan
+   ```
+
+   If you cannot run elevated on macOS, add `--connect` instead. That switches
+   nmap to TCP connect scanning, which needs no privileges at all and still
+   finds open ports — it just cannot report MAC addresses or guess the OS:
+
+   ```bash
+   python3 agent/agentctl.py run --server http://<SERVER_IP>:8000 --name my-lan --connect
+   ```
 
    ```bash
    sudo python3 agent/agentctl.py run --server http://<SERVER_IP>:8000 --name my-lan
@@ -310,6 +331,52 @@ docker compose down
 
 `compose down` is always run **without** `-v`, so the Postgres data volume and
 all stored scans/hosts/findings survive restarts.
+
+---
+
+## Running the tests
+
+No test dependencies to install — everything is stdlib `unittest`. Run from
+the `backend/` directory:
+
+```bash
+cd backend
+python3 -m unittest discover -s tests          # fast tiers
+python3 -m unittest tests.test_agent_core -v   # one file, verbose
+```
+
+Three tiers, fastest first:
+
+| File | Needs | Covers |
+|------|-------|--------|
+| `tests/test_agent_core.py` | nothing | Target validation, nmap XML parsing, port arithmetic, subnet filtering, MAC handling, worker clamping |
+| `tests/test_agent_protocol.py` | nothing | Agent HTTP payloads, progress streaming, pause/stop handling, auth errors (mock server, stubbed nmap) |
+| `tests/test_agent_nmap.py` | `nmap` on PATH | Real nmap runs against loopback and the RFC 5737 documentation range — never your LAN |
+| `tests/test_agent_live.py` | running server + admin token | Registration, delegation, host rows, pause/resume/stop end to end |
+
+The live tier is opt-in and skips itself unless you provide a token. It creates
+its own throwaway engagement scoped to loopback and `192.0.2.0/24`, and deletes
+it afterwards — your engagements, scans and hosts are never touched.
+
+```bash
+cd backend
+# Log in with any account that can create engagements (admin), and reuse the
+# access token the API returns.
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@pentest.local","password":"your-password"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+export SCANNER_E2E_TOKEN="$TOKEN"
+python3 -m unittest tests.test_agent_live -v
+```
+
+The token cannot be fabricated from a script — it embeds the account's
+`jwt_version`, so it has to come from a real login. In the browser you can copy
+the same value out of local storage instead.
+
+Add `SCANNER_E2E_SLOW=1` to also run the multi-minute tests that pause and stop
+a scan in the middle of a real phase.
 
 ---
 

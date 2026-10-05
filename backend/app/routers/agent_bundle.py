@@ -43,26 +43,52 @@ Contents
 Quick start
 -----------
   # 1. start (auto-detects its own LAN ranges, restarts on crash)
-  SCANNER_AGENT_KEY="<KEY>" python3 agentctl.py run \\
+  #    Linux / macOS -- sudo is REQUIRED for Layer-2 data. The key must come
+  #    AFTER sudo, because sudo strips a leading environment variable.
+  sudo SCANNER_AGENT_KEY="<KEY>" python3 agentctl.py run \\
       --server http://<SERVER>:8000 --name <NAME>
 
-  # 2. survive reboots (systemd unit on Linux, Startup folder on Windows)
-  python3 agentctl.py install
+  #    Windows -- open PowerShell as Administrator (right-click -> Run as
+  #    administrator), then:
+  #    $env:SCANNER_AGENT_KEY="<KEY>"; python agentctl.py run \\
+  #        --server http://<SERVER>:8000 --name <NAME>
+
+  # 2. survive reboots
+  #    Linux   : systemd user unit (re-elevates via sudo inside ExecStart)
+  #    macOS   : LaunchAgent -- CANNOT elevate, so it returns l2-degraded
+  #              after a reboot. For Layer-2 across reboots, run step 1 from
+  #              a root shell instead.
+  #    Windows : scheduled task
+  sudo python3 agentctl.py install       # or: python agentctl.py install (as admin on Windows)
 
   # 3. check it is alive
-  python3 agentctl.py status
+  sudo python3 agentctl.py status
+
+  # 4. fully remove everything (run after deleting the agent in the UI)
+  sudo python3 agentctl.py purge
 
 Requirements
 ------------
   Python 3.9+ and nmap on PATH. No pip packages required.
   Optional: pip install scapy  -> enables the passive DHCP/ARP/CDP/LLDP fingerprinter
-  Optional: Npcap on Windows    -> required for raw-socket and passive modes
+              (needs Npcap on Windows; needs root on macOS, where libpcap
+               alone is not enough for BPF capture)
+
+No privileges available?
+-----------------------
+  Add --connect to the run command. That switches nmap to TCP connect
+  scanning, which needs no elevation at all and still finds open ports --
+  it just cannot report MAC addresses or guess the OS:
+
+    python agentctl.py run --server http://<SERVER>:8000 --name <NAME> --connect
 
 Layer-2 note
 ------------
   Raw sockets (ARP, SYN, passive sniffing) need privileges:
-    Linux    : run as root, or grant CAP_NET_RAW + CAP_NET_ADMIN
-    Windows  : run the terminal as Administrator
+    Linux    : run as root (uid 0). CAP_NET_RAW alone is not enough, because
+               nmap itself requires uid 0 unless passed --privileged.
+    macOS    : run as root. sudo is required even for ARP.
+    Windows  : run the terminal as Administrator.
   Without privileges the agent still runs, but degrades to TCP connect scans
   and cannot report MAC/vendor/OS.
 """

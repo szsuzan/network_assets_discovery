@@ -14,11 +14,21 @@ import { StatCard, Chip, DotPill, ActionButton, Skeleton, SkeletonCard } from '.
 import { useToast } from '../components/Toaster'
 import { errText } from '../lib/errors'
 
-type Os = 'windows' | 'unix'
+type Os = 'windows' | 'macos' | 'linux'
 
 const OS_LABEL: Record<Os, string> = {
   windows: 'Windows',
-  unix: 'Linux / macOS',
+  macos: 'macOS',
+  linux: 'Linux',
+}
+
+// macOS is separate from Linux because autostart differs materially: a Linux
+// systemd user unit can re-elevate via sudo inside ExecStart, whereas a macOS
+// LaunchAgent can never hold raw sockets, so the guidance must differ.
+const OS_TIP: Record<Os, string> = {
+  windows: 'PowerShell on Windows',
+  macos: 'zsh / bash on macOS',
+  linux: 'bash on Linux',
 }
 
 function origin(): string {
@@ -64,7 +74,14 @@ function agentctlCmd(name: string, key: string | null, os: Os, server: string) {
   const sep = win ? '\\' : '/'
   const ctl = `agent${sep}agentctl.py`
   const bundle = `${server}/api/agent/bundle`
-  const q = (v: string) => (win ? `"${v}"` : `'${v.replace(/'/g, `'\\''`)}'`)
+  // Escape for the target shell. PowerShell uses a backtick (not a backslash) to
+// escape a double quote inside a double-quoted string; cmd.exe has no escape
+// at all. An agent name containing a quote would otherwise produce a command
+// that silently fails to parse.
+const q = (v: string) =>
+    win
+      ? `"${v.replace(/"/g, '`"').replace(/`/g, '``').replace(/\$/g, '`$')}"`
+      : `'${v.replace(/'/g, `'\\''`)}'`
   // Step 1 must leave the shell inside a directory that has ./agent/ next to it,
   // because the Dockerfile does `COPY agent/scanner_agent.py`.
   const fetch = win
@@ -109,7 +126,7 @@ function agentctlCmd(name: string, key: string | null, os: Os, server: string) {
     // Single line so no PowerShell backtick-continuation is needed (a literal
     // backtick inside a JS template literal would terminate the string).
     elevate: win
-      ? `Start-Process -Verb RunAs -FilePath ${py} -ArgumentList '${ctl}','run','--server','${server}','--name','${name}' -Wait`
+      ? `Start-Process -Verb RunAs -FilePath ${py} -ArgumentList '${ctl.replace(/'/g, "''")}','run','--server','${server.replace(/'/g, "''")}','--name','${name.replace(/'/g, "''")}' -Wait`
       : '',
     dockerBuild: 'docker build -t scanner-agent -f agent/Dockerfile .',
     docker: `docker run -d --network=host --name ${q(name)} --cap-add NET_RAW --cap-add NET_ADMIN ` +
@@ -219,12 +236,12 @@ function CodeBlock({ label, value }: { label: string; value: string }) {
 function OsToggle({ os, setOs }: { os: Os; setOs: (o: Os) => void }) {
   return (
     <div className="flex items-center gap-1">
-      {(['windows', 'unix'] as Os[]).map((o) => (
+      {(['windows', 'macos', 'linux'] as Os[]).map((o) => (
         <button
           key={o}
           onClick={() => setOs(o)}
           className={`rounded-md px-2 py-1 text-[12px] font-medium transition-colors ${os === o ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'}`}
-          title={o === 'windows' ? 'PowerShell on Windows' : 'Bash on Linux/macOS'}
+          title={OS_TIP[o]}
         >
           {OS_LABEL[o]}
         </button>
@@ -712,7 +729,7 @@ function FirstRunBanner({ name, apiKey, onClose }: {
   apiKey: string
   onClose: () => void
 }) {
-  const [os, setOs] = useState<Os>('unix')
+  const [os, setOs] = useState<Os>('linux')
   // The address the *agent machine* will dial. window.location.origin is right
   // only when the agent runs on the same box as the UI; a LAN agent needs the
   // server's routable IP, so make it editable and flag the localhost case.
@@ -791,6 +808,15 @@ function FirstRunBanner({ name, apiKey, onClose }: {
               <code className="text-gray-400">sudo</code> is already in the command. Note the key
               sits <em>after</em> <code className="text-gray-400">sudo</code> — sudo strips a
               leading environment variable, which would leave the agent with no credentials.
+              {os === 'macos' && (
+                <>
+                  {' '}
+                  On macOS, step 3 installs a LaunchAgent, which <em>cannot</em> re-elevate: the
+                  agent will come back after reboot as{' '}
+                  <code className="text-gray-400">l2-degraded</code> with no MAC/vendor/OS. For
+                  full Layer-2 data across reboots, run step 2 from a root shell instead.
+                </>
+              )}
             </p>
           )}
         </div>
@@ -802,8 +828,8 @@ function FirstRunBanner({ name, apiKey, onClose }: {
           <CommandColumn
             title="Run it"
             blocks={[
-              { label: `2 · Start (supervised, auto-restart)${os === 'unix' ? ' — sudo' : ' — as Administrator'}`, value: c.run },
-              { label: '3 · Auto-start at boot', value: c.install },
+              { label: `2 · Start (supervised, auto-restart)${os === 'windows' ? ' — as Administrator' : ' — sudo'}`, value: c.run },
+              { label: `3 · Auto-start at boot${os === 'linux' ? ' (systemd, re-elevates via sudo)' : os === 'macos' ? ' (LaunchAgent — see note)' : ' (scheduled task)'}`, value: c.install },
             ]}
           />
         </div>
@@ -816,10 +842,24 @@ function FirstRunBanner({ name, apiKey, onClose }: {
             <CodeBlock label="2 · Run" value={c.docker} />
           </div>
           <p className="mt-2 text-xs text-gray-500">
-            Host networking plus <code className="text-gray-400">NET_RAW</code>/<code className="text-gray-400">NET_ADMIN</code> is
-            what gives ARP and SYN scans real Layer-2 reach. If the build fails on a fresh box, your
-            account likely cannot reach the Docker socket — add it to the <code className="text-gray-400">docker</code>{' '}
-            group and log in again, otherwise prefix with <code className="text-gray-400">sudo</code>.
+            {os === 'linux' ? (
+              <>
+                Host networking plus <code className="text-gray-400">NET_RAW</code>/<code className="text-gray-400">NET_ADMIN</code>{' '}
+                is what gives ARP and SYN scans real Layer-2 reach. If the build fails on a fresh box,
+                your account likely cannot reach the Docker socket — add it to the{' '}
+                <code className="text-gray-400">docker</code> group and log in again, otherwise prefix
+                with <code className="text-gray-400">sudo</code>.
+              </>
+            ) : (
+              <>
+                <strong className="text-amber-300">Linux hosts only.</strong>{' '}
+                {os === 'macos'
+                  ? 'Docker Desktop for Mac runs containers inside a Linux VM, so --network=host and --cap-add are ignored — the container cannot reach your Mac LAN.'
+                  : 'Windows containers do not support --network=host or --cap-add.'}{' '}
+                Use the native commands in steps 2 and 3 instead; they are the supported path on{' '}
+                {os === 'macos' ? 'macOS' : 'Windows'}.
+              </>
+            )}
           </p>
         </div>
       </div>
@@ -979,9 +1019,9 @@ export default function Agents() {
             <CodeBlock label="Run this on the agent machine" value={purgeCmd} />
           </div>
           <p className="mt-2 text-xs text-amber-200/60">
-            {os === 'unix'
-              ? 'Use sudo so a root-owned copy is cleaned up too — otherwise a privileged agent keeps polling and will steal scans from any unprivileged copy you start later.'
-              : 'Run PowerShell as Administrator so a copy installed with elevated rights is removed too.'}
+            {os === 'windows'
+              ? 'Run PowerShell as Administrator so a copy installed with elevated rights is removed too.'
+              : 'Use sudo so a root-owned copy is cleaned up too — otherwise a privileged agent keeps polling and will steal scans from any unprivileged copy you start later.'}
           </p>
         </div>
       )}

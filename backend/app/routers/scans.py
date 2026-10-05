@@ -441,6 +441,29 @@ async def resume_scan(
     scan = await _load_scan_for_user(db, scan_id, current_user)
     await _ensure_engagement_writable(db, scan.engagement_id, current_user)
 
+    # A scan handed to an agent carries its paused state in Redis while the DB
+    # row can still read "agent_running" (the agent claimed it in the same
+    # instant the user paused). Treat the flag as authoritative so Resume works
+    # instead of returning 400 and leaving the agent blocked forever.
+    if scan.status not in ("paused", "completed", "failed", "stopped"):
+        try:
+            from ..websocket import _redis_client
+            rc = _redis_client()
+            still_paused = bool(rc.exists(f"scan:paused:{scan.id}"))
+            rc.close()
+        except Exception:
+            still_paused = False
+        if still_paused:
+            scan.status = "paused"
+            db.add(AuditLog(
+                user_id=current_user.id,
+                engagement_id=scan.engagement_id,
+                scan_id=scan.id,
+                action="scan_paused",
+                detail={"recovered": True}
+            ))
+            await db.commit()
+
     # Paused: the worker/agent suspension is lifted and the scan continues
     # from exactly where it suspended.
     if scan.status == "paused":

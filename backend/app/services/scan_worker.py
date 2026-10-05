@@ -1431,6 +1431,19 @@ def _delegate_to_agent(db, scan: Scan) -> bool:
             except ValueError:
                 target_nets.append(ipaddress.ip_network(f"{t}/32", strict=False))
 
+        # Agents are IPv4/ARP scanners: nmap needs an explicit -6 for IPv6
+        # literals and vendor/OS detection is ARP-based. Delegating an IPv6
+        # scan to one only produces a task the agent must reject (or worse,
+        # report as "0 hosts found"), so keep IPv6 in the worker instead.
+        if any(getattr(n, "version", 4) != 4 for n in target_nets):
+            _emit_log(
+                scan,
+                "IPv6 targets are not covered by scanner agents - scanning in the "
+                "worker instead (ARP/vendor detection is IPv4-only).",
+                level="warn",
+            )
+            return False
+
         # Prefer exact coverage, then most recently seen. `last_seen` is
         # guaranteed non-None by the filter above, so the sort key is safe.
         scored = []
